@@ -61,7 +61,7 @@ struct LocalInstallation {
 }
 
 enum InstallerResult {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     Complete,
     #[cfg(target_os = "windows")]
     AwaitingExternalInstallation,
@@ -148,7 +148,7 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
             return Err(error);
         }
     };
-    let extension = download_extension();
+    let extension = download_extension(&download_urls);
     let download_path = env::temp_dir().join(format!(
         "autogateway-chatgpt-{}.{}",
         uuid::Uuid::new_v4(),
@@ -527,17 +527,27 @@ fn download_url() -> Result<&'static str, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn download_extension() -> &'static str {
+fn download_extension(_download_urls: &[String]) -> &'static str {
     "dmg"
 }
 
 #[cfg(target_os = "windows")]
-fn download_extension() -> &'static str {
-    "exe"
+fn download_extension(download_urls: &[String]) -> &'static str {
+    let uses_msix = download_urls.iter().any(|url| {
+        url.split_once('?')
+            .map_or(url, |(path, _)| path)
+            .to_ascii_lowercase()
+            .ends_with(".msix")
+    });
+    if uses_msix {
+        "msix"
+    } else {
+        "exe"
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn download_extension() -> &'static str {
+fn download_extension(_download_urls: &[String]) -> &'static str {
     "installer"
 }
 
@@ -825,12 +835,61 @@ fn install_downloaded_app(
     download_path: &Path,
     _preferred_destination: Option<&Path>,
 ) -> Result<InstallerResult, String> {
+    if download_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("msix"))
+    {
+        install_windows_msix(download_path)?;
+        return Ok(InstallerResult::Complete);
+    }
+
     validate_windows_installer(download_path)?;
     Command::new(download_path)
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|error| format!("run the official ChatGPT installer: {error}"))?;
     Ok(InstallerResult::AwaitingExternalInstallation)
+}
+
+#[cfg(target_os = "windows")]
+fn install_windows_msix(download_path: &Path) -> Result<(), String> {
+    let escaped_path = download_path.display().to_string().replace('\'', "''");
+    let script = format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::OpenRead('{escaped_path}')
+try {{
+    $entry = $archive.GetEntry('AppxManifest.xml')
+    if ($null -eq $entry) {{ throw 'the downloaded MSIX package does not contain AppxManifest.xml' }}
+    $reader = New-Object System.IO.StreamReader($entry.Open())
+    try {{ [xml]$manifest = $reader.ReadToEnd() }} finally {{ $reader.Dispose() }}
+    if ($manifest.Package.Identity.Name -ne 'OpenAI.Codex') {{
+        throw 'the downloaded MSIX package is not the official OpenAI.Codex package'
+    }}
+}} finally {{
+    $archive.Dispose()
+}}
+Add-AppxPackage -LiteralPath '{escaped_path}' -ForceApplicationShutdown -ErrorAction Stop
+"#
+    );
+    let output = Command::new("powershell.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|error| format!("run the ChatGPT MSIX installer: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = if stderr.is_empty() { stdout } else { stderr };
+        return Err(format!(
+            "install the official ChatGPT MSIX package: {details}"
+        ));
+    }
+    fs::remove_file(download_path)
+        .map_err(|error| format!("remove the downloaded ChatGPT MSIX package: {error}"))?;
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -926,13 +985,17 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_uses_only_the_server_mirror() {
+    fn windows_uses_only_the_server_msix_mirror() {
         let release: super::PlatformVersion = serde_json::from_str(
-            r#"{"version":"26.730.8199.0","downloadUrl":"https://cdn.example.test/ChatGPT-Installer.exe","fallbackUrl":"https://official.example.test/ChatGPT-Installer.exe"}"#,
+            r#"{"version":"26.730.8199.0","downloadUrl":"https://cdn.example.test/OpenAI.Codex_26.730.8199.0_x64__2p2nqsd0c76g0.Msix","fallbackUrl":"https://official.example.test/ChatGPT-Installer.exe"}"#,
         )
         .expect("decode version service response");
         let urls = super::download_urls(Some(&release)).expect("build installer candidates");
-        assert_eq!(urls, ["https://cdn.example.test/ChatGPT-Installer.exe"]);
+        assert_eq!(
+            urls,
+            ["https://cdn.example.test/OpenAI.Codex_26.730.8199.0_x64__2p2nqsd0c76g0.Msix"]
+        );
+        assert_eq!(super::download_extension(&urls), "msix");
     }
 
     #[cfg(target_os = "macos")]
