@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AUTO Gateway Desktop",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "identifier": "cc.autogateway.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -71,7 +71,7 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ1N0E1RUMxMTFEQTVEOUIKUldTYlhkb1J3VjU2UlRuL0RHanV2K0QvUk9kN0dEYjJUTmU0TnN3cU16MU1BbjdETDJkSFZZNW4K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE5N0E5MThFN0Q2NTJDMjIKUldRaUxHVjlqcEY2R2JQQWplTWNPVHJ0MjJ5cFFIanBYeG5hODBIc2UzYkZuQmNxK2RrY1B4b24K",
       "endpoints": ["https://cdn.autogateway.cc/downloads/desktop/latest.json"]
     }
   }
