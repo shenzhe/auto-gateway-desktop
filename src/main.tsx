@@ -351,6 +351,7 @@ function App() {
       if (payload.stage === "preparing") setMessage(tr("preparingDownload"));
       if (payload.stage === "downloading") setMessage(payload.percent === undefined ? tr("downloadingCodex") : tr("downloadingCodexProgress", { percent: payload.percent }));
       if (payload.stage === "installing") setMessage(tr("replacingCodex"));
+      if (payload.stage === "windows-installing") setMessage(tr("windowsInstalling"));
       if (payload.stage === "verifying") setMessage(tr("verifyingCodex"));
     }).then((nextUnlisten) => {
       unlisten = nextUnlisten;
@@ -862,7 +863,8 @@ function App() {
               <button className="secondaryButton updateButton versionUpdateButton" disabled={checkingCodexUpdates || installingCodex} onClick={() => void handleCheckCodexUpdates()}>{checkingCodexUpdates ? tr("checkingCodexUpdates") : tr("checkNow")}</button>
               {updateAvailable ? <button className="secondaryButton primaryUpdateButton versionUpdateButton" disabled={installingCodex} onClick={() => void handleInstallCodex(true)}>{installingCodex ? installPercent === undefined ? tr("updatingCodex") : `${tr("updatingCodex")} ${installPercent}%` : tr("updateNow")}</button> : null}
             </div> : null}
-            {installingCodex ? <div className="installProgress" aria-live="polite"><progress max="100" value={installPercent} /><small>{installPercent === undefined ? tr("working") : tr("downloadPercent", { percent: installPercent })}</small></div> : null}
+            {installingCodex && installProgress?.stage === "downloading" ? <div className="installProgress" aria-live="polite"><progress max="100" value={installPercent} /><small>{installPercent === undefined ? tr("downloadingCodex") : tr("downloadPercent", { percent: installPercent })}</small></div> : null}
+            {installingCodex && installProgress?.stage === "windows-installing" ? <div className="installProgress" aria-live="polite"><small>{tr("windowsInstalling")}</small></div> : null}
             {awaitingStoreInstallation ? <div className="installProgress" aria-live="polite"><small>{tr("storeInstallationInProgress")}</small></div> : null}
           </div>
         </div>

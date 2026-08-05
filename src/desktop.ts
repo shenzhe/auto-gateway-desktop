@@ -28,7 +28,7 @@ export type CodexInstallResult = {
 };
 
 export type CodexInstallProgress = {
-  stage: "preparing" | "downloading" | "installing" | "verifying" | "complete";
+  stage: "preparing" | "downloading" | "installing" | "windows-installing" | "verifying" | "complete";
   downloadedBytes: number;
   totalBytes?: number;
   percent?: number;

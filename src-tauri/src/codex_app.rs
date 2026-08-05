@@ -11,10 +11,12 @@ use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(target_os = "macos")]
+#[cfg(target_os = "windows")]
+use std::process::Output;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::thread;
 use std::time::Duration;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
@@ -33,6 +35,10 @@ const CODEX_VERSION_API_URL: &str = "https://api.autogateway.cc/public/api/deskt
 const WINDOWS_STORE_PRODUCT_ID: &str = "9PLM9XGG6VKS";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+#[cfg(target_os = "windows")]
+const WINDOWS_MSIX_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+#[cfg(target_os = "windows")]
+const WINDOWS_STORE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -200,6 +206,8 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
 
     let preferred_destination = existing_installation.map(|installation| installation.path);
     emit_install_progress(app, "installing", 0, None);
+    #[cfg(target_os = "windows")]
+    emit_install_progress(app, "windows-installing", 0, None);
     let installer_path = download_path.clone();
     let install_result = tauri::async_runtime::spawn_blocking(move || {
         install_downloaded_app(&installer_path, preferred_destination.as_deref())
@@ -795,16 +803,20 @@ fn install_with_winget(force_update: bool) -> Result<(), String> {
 
     let mut last_error = None;
     for arguments in attempts {
-        let output = Command::new("winget.exe")
+        let mut command = Command::new("winget.exe");
+        command
             .creation_flags(CREATE_NO_WINDOW)
             .args(arguments.iter().copied().chain([
                 "--silent",
                 "--accept-package-agreements",
                 "--accept-source-agreements",
                 "--disable-interactivity",
-            ]))
-            .output()
-            .map_err(|error| format!("run WinGet: {error}"))?;
+            ]));
+        let output = run_windows_command_with_timeout(
+            &mut command,
+            WINDOWS_STORE_COMMAND_TIMEOUT,
+            "Microsoft Store installation command",
+        )?;
         if output.status.success() {
             return Ok(());
         }
@@ -930,11 +942,18 @@ try {{
 Add-AppxPackage -LiteralPath '{escaped_path}' -ForceApplicationShutdown -ErrorAction Stop
 "#
     );
-    let output = Command::new("powershell.exe")
-        .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .output()
-        .map_err(|error| format!("run the ChatGPT MSIX installer: {error}"))?;
+    let mut command = Command::new("powershell.exe");
+    command.creation_flags(CREATE_NO_WINDOW).args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        &script,
+    ]);
+    let output = run_windows_command_with_timeout(
+        &mut command,
+        WINDOWS_MSIX_INSTALL_TIMEOUT,
+        "ChatGPT MSIX installation",
+    )?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -946,6 +965,39 @@ Add-AppxPackage -LiteralPath '{escaped_path}' -ForceApplicationShutdown -ErrorAc
     fs::remove_file(download_path)
         .map_err(|error| format!("remove the downloaded ChatGPT MSIX package: {error}"))?;
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_command_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+    description: &str,
+) -> Result<Output, String> {
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("start {description}: {error}"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child
+            .try_wait()
+            .map_err(|error| format!("wait for {description}: {error}"))?
+        {
+            Some(_) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| format!("read {description} output: {error}"));
+            }
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait_with_output();
+                return Err(format!(
+                    "{description} timed out after {} minutes. Try again, or complete the installation in Microsoft Store.",
+                    timeout.as_secs() / 60
+                ));
+            }
+            None => thread::sleep(Duration::from_millis(500)),
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
