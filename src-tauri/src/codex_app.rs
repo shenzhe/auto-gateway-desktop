@@ -3,6 +3,7 @@ use futures_util::StreamExt;
 use serde::Deserialize;
 use serde::Serialize;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -19,6 +20,14 @@ use tauri::{AppHandle, Emitter};
 
 #[cfg(target_os = "macos")]
 const MACOS_DOWNLOAD_URL: &str = "https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg";
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const PREFERRED_DIRECT_DOWNLOAD_URL: &str = "https://codexapp.agentsmirror.com/latest/mac-arm64";
+#[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
+const PREFERRED_DIRECT_DOWNLOAD_URL: &str = "https://codexapp.agentsmirror.com/latest/mac-intel";
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+const PREFERRED_DIRECT_DOWNLOAD_URL: &str = "https://codexapp.agentsmirror.com/latest/win-arm64";
+#[cfg(all(target_os = "windows", not(target_arch = "aarch64")))]
+const PREFERRED_DIRECT_DOWNLOAD_URL: &str = "https://codexapp.agentsmirror.com/latest/win-x64";
 const CODEX_VERSION_API_URL: &str = "https://api.autogateway.cc/public/api/desktop/codex-version";
 #[cfg(target_os = "windows")]
 const WINDOWS_STORE_PRODUCT_ID: &str = "9PLM9XGG6VKS";
@@ -83,6 +92,19 @@ struct PlatformVersion {
     download_url: Option<String>,
     #[serde(default)]
     fallback_url: Option<String>,
+    #[serde(default)]
+    artifacts: HashMap<String, PlatformArtifact>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlatformArtifact {
+    #[serde(default)]
+    direct_url: Option<String>,
+    #[serde(default)]
+    download_url: Option<String>,
+    #[serde(default)]
+    fallback_url: Option<String>,
 }
 
 pub async fn status() -> CodexAppStatus {
@@ -133,9 +155,8 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
         });
     }
 
-    // The version service advertises a versioned R2 mirror. On Windows the
-    // Microsoft Store is intentionally a last resort because it is slower than
-    // downloading the verified installer directly from R2.
+    // The version service provides the preferred upstream mirror first, then
+    // our R2 replica. Microsoft Store remains the Windows last resort.
     let latest_release = latest_release().await.ok();
     let download_urls = match download_urls(latest_release.as_ref()) {
         Ok(urls) => urls,
@@ -245,7 +266,7 @@ async fn download_installer(
         }
     }
     Err(format!(
-        "download the ChatGPT installer from R2 and the official source: {}",
+        "download the ChatGPT installer from the mirror, R2, and official source: {}",
         errors.join("; ")
     ))
 }
@@ -387,26 +408,14 @@ async fn latest_release() -> Result<PlatformVersion, String> {
 
 #[cfg(target_os = "macos")]
 fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String> {
-    let fallback = download_url()?.to_string();
-    let mut urls = Vec::with_capacity(2);
+    let mut urls = Vec::with_capacity(5);
+    append_url(&mut urls, Some(PREFERRED_DIRECT_DOWNLOAD_URL));
     if let Some(latest) = latest {
-        if let Some(download_url) = latest
-            .download_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-        {
-            urls.push(download_url.to_string());
-        }
-        if let Some(fallback_url) = latest
-            .fallback_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-        {
-            urls.push(fallback_url.to_string());
-        }
+        append_artifact_urls(&mut urls, latest, native_architecture());
+        append_url(&mut urls, latest.download_url.as_deref());
+        append_url(&mut urls, latest.fallback_url.as_deref());
     }
+    let fallback = download_url()?.to_string();
     if !urls.iter().any(|url| url == &fallback) {
         urls.push(fallback);
     }
@@ -415,19 +424,52 @@ fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String
 
 #[cfg(target_os = "windows")]
 fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String> {
-    let mirror_url = latest
-        .and_then(|release| release.download_url.as_deref())
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .ok_or_else(|| {
-            "the R2 ChatGPT installer is unavailable; opening Microsoft Store instead".to_string()
-        })?;
-    Ok(vec![mirror_url.to_string()])
+    let mut urls = Vec::with_capacity(4);
+    append_url(&mut urls, Some(PREFERRED_DIRECT_DOWNLOAD_URL));
+    if let Some(latest) = latest {
+        append_artifact_urls(&mut urls, latest, native_architecture());
+        append_url(&mut urls, latest.download_url.as_deref());
+    }
+    if urls.is_empty() {
+        return Err(
+            "the mirror and R2 ChatGPT installers are unavailable; opening Microsoft Store instead"
+                .to_string(),
+        );
+    }
+    Ok(urls)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn download_urls(_latest: Option<&PlatformVersion>) -> Result<Vec<String>, String> {
     Err("This desktop build supports macOS and Windows only.".to_string())
+}
+
+fn append_artifact_urls(urls: &mut Vec<String>, release: &PlatformVersion, architecture: &str) {
+    let Some(artifact) = release.artifacts.get(architecture) else {
+        return;
+    };
+    append_url(urls, artifact.direct_url.as_deref());
+    append_url(urls, artifact.download_url.as_deref());
+    append_url(urls, artifact.fallback_url.as_deref());
+}
+
+fn append_url(urls: &mut Vec<String>, candidate: Option<&str>) {
+    let Some(candidate) = candidate.map(str::trim).filter(|url| !url.is_empty()) else {
+        return;
+    };
+    if !urls.iter().any(|url| url == candidate) {
+        urls.push(candidate.to_string());
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn native_architecture() -> &'static str {
+    "arm64"
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn native_architecture() -> &'static str {
+    "x64"
 }
 
 fn compare_versions(left: &str, right: &str) -> Ordering {
@@ -541,7 +583,7 @@ fn download_extension(download_urls: &[String]) -> &'static str {
             .to_ascii_lowercase()
             .ends_with(".msix")
     });
-    if uses_msix {
+    if uses_msix || download_urls.iter().any(|url| url.contains("/latest/win")) {
         "msix"
     } else {
         "exe"
@@ -975,19 +1017,20 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn prefers_the_server_mirror_before_the_official_fallback() {
+    fn prefers_the_direct_mirror_before_r2_and_the_official_fallback() {
         let release: super::PlatformVersion = serde_json::from_str(
             r#"{"version":"26.730.61639","downloadUrl":"https://cdn.example.test/codex.dmg","fallbackUrl":"https://official.example.test/ChatGPT.dmg"}"#,
         )
         .expect("decode version service response");
         let urls = super::download_urls(Some(&release)).expect("build installer candidates");
-        assert_eq!(urls[0], "https://cdn.example.test/codex.dmg");
-        assert_eq!(urls[1], "https://official.example.test/ChatGPT.dmg");
+        assert_eq!(urls[0], super::PREFERRED_DIRECT_DOWNLOAD_URL);
+        assert_eq!(urls[1], "https://cdn.example.test/codex.dmg");
+        assert_eq!(urls[2], "https://official.example.test/ChatGPT.dmg");
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn windows_uses_only_the_server_msix_mirror() {
+    fn windows_prefers_the_direct_mirror_before_r2() {
         let release: super::PlatformVersion = serde_json::from_str(
             r#"{"version":"26.730.8199.0","downloadUrl":"https://cdn.example.test/OpenAI.Codex_26.730.8199.0_x64__2p2nqsd0c76g0.Msix","fallbackUrl":"https://official.example.test/ChatGPT-Installer.exe"}"#,
         )
@@ -995,7 +1038,10 @@ mod tests {
         let urls = super::download_urls(Some(&release)).expect("build installer candidates");
         assert_eq!(
             urls,
-            ["https://cdn.example.test/OpenAI.Codex_26.730.8199.0_x64__2p2nqsd0c76g0.Msix"]
+            [
+                super::PREFERRED_DIRECT_DOWNLOAD_URL,
+                "https://cdn.example.test/OpenAI.Codex_26.730.8199.0_x64__2p2nqsd0c76g0.Msix"
+            ]
         );
         assert_eq!(super::download_extension(&urls), "msix");
     }

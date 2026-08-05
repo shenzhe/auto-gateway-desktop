@@ -7,7 +7,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ArrowRightIcon, ArrowUUpLeftIcon, ArrowsClockwiseIcon, BugIcon, CheckCircleIcon, CheckIcon, CircleNotchIcon, CopyIcon, CubeIcon, CurrencyDollarIcon, GearIcon, HouseIcon, UserCircleIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { bootstrapDesktopKey, clearDesktopSession, clearStoredDesktopAPIKey, configureCodex, exchangeDesktopAuthorization, getCodexAppStatus, getCodexStatus, getDesktopAccountSummary, getDesktopAppVersion, installCodex, isAuthenticationRequired, openCodex, openConsole, openDevtools, restoreDesktopState, restoreLatestCodexBackups, showMainWindow, updateTrayStatus, type CodexAppStatus, type CodexInstallProgress, type CodexStatus, type DesktopSession } from "./desktop";
+import { bootstrapDesktopKey, clearDesktopSession, clearStoredDesktopAPIKey, configureCodex, exchangeDesktopAuthorization, getCodexAppStatus, getCodexStatus, getDesktopAccountSummary, getDesktopAppVersion, installCodex, isAuthenticationRequired, openCodex, openConsole, openDevtools, refreshDesktopState, restoreDesktopState, restoreLatestCodexBackups, showMainWindow, updateTrayStatus, type CodexAppStatus, type CodexInstallProgress, type CodexStatus, type DesktopAccountSummary, type DesktopSession } from "./desktop";
 import { readLocalePreference, resolveLocale, translate, writeLocalePreference, type LocalePreference } from "./i18n";
 import { applyTheme, readTheme, writeTheme, type ThemeMode } from "./theme";
 import "./styles.css";
@@ -109,7 +109,18 @@ function TrayPopup() {
           setAccountBalance(tr("trayUnavailable"));
           return;
         }
-        const summary = await getDesktopAccountSummary(stored.session.token);
+        let session = stored.session;
+        let summary: DesktopAccountSummary;
+        try {
+          summary = await getDesktopAccountSummary(session.token);
+        } catch (error) {
+          if (!isAuthenticationRequired(error)) throw error;
+          const refreshed = await refreshDesktopState();
+          if (!refreshed?.session.token) throw error;
+          session = refreshed.session;
+          if (active) setDesktopSession(session);
+          summary = await getDesktopAccountSummary(session.token);
+        }
         if (active) setAccountBalance(summary.balance);
       } catch (error) {
         if (isAuthenticationRequired(error)) {
@@ -411,7 +422,22 @@ function App() {
     let active = true;
     async function syncAccountBalance() {
       try {
-        const summary = await getDesktopAccountSummary(desktopAccessToken);
+        let summary: DesktopAccountSummary;
+        try {
+          summary = await getDesktopAccountSummary(desktopAccessToken);
+        } catch (error) {
+          if (!isAuthenticationRequired(error)) throw error;
+          const refreshed = await refreshDesktopState();
+          if (!refreshed?.session.token) {
+            await handleSessionExpired();
+            return;
+          }
+          if (!active) return;
+          setDesktopSession(refreshed.session);
+          setDesktopAccessToken(refreshed.session.token);
+          setAPIKey(refreshed.apiKey);
+          summary = await getDesktopAccountSummary(refreshed.session.token);
+        }
         if (!active) return;
         setAccountBalance(summary.balance);
         setBalanceSyncedAt(new Date());

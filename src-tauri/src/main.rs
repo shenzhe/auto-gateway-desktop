@@ -16,8 +16,9 @@ use codex_config::{
 use desktop_auth::{
     bootstrap_desktop_key, clear_desktop_session, clear_stored_desktop_api_key,
     create_desktop_console_ticket, desktop_account_summary, exchange_desktop_authorization,
-    installation_id, restore_desktop_state, save_desktop_api_key, save_desktop_session,
-    DesktopAccountSummary, DesktopBootstrapKey, DesktopSession, StoredDesktopState,
+    installation_id, refresh_desktop_state, restore_desktop_state, save_desktop_api_key,
+    save_desktop_session, DesktopAccountSummary, DesktopBootstrapKey, DesktopSession,
+    StoredDesktopState,
 };
 use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
@@ -93,6 +94,13 @@ async fn restore_desktop_state_command(
     app: AppHandle,
 ) -> Result<Option<StoredDesktopState>, String> {
     restore_desktop_state(&app).await
+}
+
+#[tauri::command]
+async fn refresh_desktop_state_command(
+    app: AppHandle,
+) -> Result<Option<StoredDesktopState>, String> {
+    refresh_desktop_state(&app).await
 }
 
 #[tauri::command]
@@ -306,6 +314,7 @@ fn main() {
             exchange_desktop_authorization_command,
             bootstrap_desktop_key_command,
             restore_desktop_state_command,
+            refresh_desktop_state_command,
             clear_desktop_session_command,
             get_desktop_account_summary_command,
             update_tray_status_command,

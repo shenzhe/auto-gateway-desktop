@@ -190,6 +190,10 @@ pub fn clear_desktop_session(app: &AppHandle) -> Result<(), String> {
 }
 
 pub async fn restore_desktop_state(app: &AppHandle) -> Result<Option<StoredDesktopState>, String> {
+    load_stored_state(app)
+}
+
+pub async fn refresh_desktop_state(app: &AppHandle) -> Result<Option<StoredDesktopState>, String> {
     let Some(mut stored) = load_stored_state(app)? else {
         return Ok(None);
     };
@@ -203,10 +207,7 @@ pub async fn restore_desktop_state(app: &AppHandle) -> Result<Option<StoredDeskt
             delete_stored_state(app)?;
             Ok(None)
         }
-        Err(SessionRefreshError::Other(error)) => {
-            drop(error);
-            Ok(Some(stored))
-        }
+        Err(SessionRefreshError::Other(error)) => Err(error),
     }
 }
 

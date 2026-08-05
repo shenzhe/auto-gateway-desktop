@@ -137,6 +137,10 @@ export function restoreDesktopState(): Promise<StoredDesktopState | null> {
   return invoke<StoredDesktopState | null>("restore_desktop_state_command");
 }
 
+export function refreshDesktopState(): Promise<StoredDesktopState | null> {
+  return invoke<StoredDesktopState | null>("refresh_desktop_state_command");
+}
+
 export function clearDesktopSession(): Promise<void> {
   return invoke<void>("clear_desktop_session_command");
 }
