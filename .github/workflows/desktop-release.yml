@@ -53,6 +53,11 @@ jobs:
         with:
           targets: aarch64-apple-darwin
 
+      - name: Cache Rust dependencies and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
       - id: release
         name: Validate release version
         shell: bash
@@ -155,6 +160,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
 
       - id: release
         name: Validate release version
