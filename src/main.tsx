@@ -115,7 +115,7 @@ function TrayPopup() {
           summary = await getDesktopAccountSummary(session.token);
         } catch (error) {
           if (!isAuthenticationRequired(error)) throw error;
-          const refreshed = await refreshDesktopState();
+          const refreshed = await refreshDesktopState(session.token);
           if (!refreshed?.session.token) throw error;
           session = refreshed.session;
           if (active) setDesktopSession(session);
@@ -427,7 +427,7 @@ function App() {
           summary = await getDesktopAccountSummary(desktopAccessToken);
         } catch (error) {
           if (!isAuthenticationRequired(error)) throw error;
-          const refreshed = await refreshDesktopState();
+          const refreshed = await refreshDesktopState(desktopAccessToken);
           if (!refreshed?.session.token) {
             await handleSessionExpired();
             return;

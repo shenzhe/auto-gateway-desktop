@@ -99,8 +99,9 @@ async fn restore_desktop_state_command(
 #[tauri::command]
 async fn refresh_desktop_state_command(
     app: AppHandle,
+    failed_access_token: String,
 ) -> Result<Option<StoredDesktopState>, String> {
-    refresh_desktop_state(&app).await
+    refresh_desktop_state(&app, &failed_access_token).await
 }
 
 #[tauri::command]

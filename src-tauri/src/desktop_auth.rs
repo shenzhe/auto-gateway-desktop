@@ -9,6 +9,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 use zeroize::Zeroize;
@@ -28,6 +29,8 @@ const CREDENTIAL_SERVICE: &str = "cc.autogateway.desktop";
 const CREDENTIAL_ACCOUNT: &str = "desktop-session";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+static SESSION_REFRESH_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -193,10 +196,24 @@ pub async fn restore_desktop_state(app: &AppHandle) -> Result<Option<StoredDeskt
     load_stored_state(app)
 }
 
-pub async fn refresh_desktop_state(app: &AppHandle) -> Result<Option<StoredDesktopState>, String> {
+pub async fn refresh_desktop_state(
+    app: &AppHandle,
+    failed_access_token: &str,
+) -> Result<Option<StoredDesktopState>, String> {
+    let _refresh_guard = SESSION_REFRESH_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     let Some(mut stored) = load_stored_state(app)? else {
         return Ok(None);
     };
+    // Another window may already have refreshed this session while this request
+    // was waiting for the lock. Reuse the persisted replacement instead of
+    // rotating it again and revoking the just-issued access token.
+    if !failed_access_token.trim().is_empty() && stored.session.token != failed_access_token.trim()
+    {
+        return Ok(Some(stored));
+    }
     match refresh_desktop_session(&stored.session.refresh_token).await {
         Ok(session) => {
             stored.session = session;
