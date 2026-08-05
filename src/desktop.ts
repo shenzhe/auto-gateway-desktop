@@ -101,12 +101,24 @@ export function openConsole(accessToken: string, section?: "billing"): Promise<v
   return invoke<void>("open_console", { accessToken, section });
 }
 
+export function openDevtools(): Promise<void> {
+  return invoke<void>("open_devtools");
+}
+
 export function getDesktopAccountSummary(accessToken: string): Promise<DesktopAccountSummary> {
   return invoke<DesktopAccountSummary>("get_desktop_account_summary_command", { accessToken });
 }
 
 export function updateTrayStatus(username: string, balance: string): Promise<void> {
   return invoke<void>("update_tray_status_command", { username, balance });
+}
+
+export function showMainWindow(): Promise<void> {
+  return invoke<void>("show_main_window");
+}
+
+export function getDesktopAppVersion(): Promise<string> {
+  return invoke<string>("get_desktop_app_version");
 }
 
 export function getInstallationID(): Promise<string> {
@@ -125,6 +137,15 @@ export function restoreDesktopState(): Promise<StoredDesktopState | null> {
   return invoke<StoredDesktopState | null>("restore_desktop_state_command");
 }
 
+export function clearDesktopSession(): Promise<void> {
+  return invoke<void>("clear_desktop_session_command");
+}
+
 export function clearStoredDesktopAPIKey(): Promise<void> {
   return invoke<void>("clear_stored_desktop_api_key_command");
+}
+
+export function isAuthenticationRequired(error: unknown): boolean {
+  const message = String(error).toLowerCase();
+  return message.includes("authentication_required") || message.includes("http 401") || message.includes("http 403") || message.includes("unauthorized") || message.includes("forbidden");
 }

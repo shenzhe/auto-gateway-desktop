@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Permissions for the local AUTO Gateway Desktop shell.",
-  "windows": ["main"],
+  "windows": ["main", "tray-popup"],
   "permissions": ["core:default", "opener:default", "deep-link:default", "updater:default", "process:default"]
 }

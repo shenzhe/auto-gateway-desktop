@@ -5,12 +5,25 @@ mod codex_config;
 mod desktop_auth;
 mod http_client;
 
-use codex_app::{install as install_codex_app, open_installed_app, status as codex_app_status, CodexAppStatus, CodexInstallResult};
-use codex_config::{apply_configuration, default_codex_paths, restore_latest_backups, CodexStatus, ConfigurationResult, RestoreResult};
-use desktop_auth::{bootstrap_desktop_key, clear_stored_desktop_api_key, create_desktop_console_ticket, desktop_account_summary, exchange_desktop_authorization, installation_id, restore_desktop_state, save_desktop_api_key, save_desktop_session, DesktopAccountSummary, DesktopBootstrapKey, DesktopSession, StoredDesktopState};
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use codex_app::{
+    install as install_codex_app, open_installed_app, status as codex_app_status, CodexAppStatus,
+    CodexInstallResult,
+};
+use codex_config::{
+    apply_configuration, default_codex_paths, restore_latest_backups, CodexStatus,
+    ConfigurationResult, RestoreResult,
+};
+use desktop_auth::{
+    bootstrap_desktop_key, clear_desktop_session, clear_stored_desktop_api_key,
+    create_desktop_console_ticket, desktop_account_summary, exchange_desktop_authorization,
+    installation_id, restore_desktop_state, save_desktop_api_key, save_desktop_session,
+    DesktopAccountSummary, DesktopBootstrapKey, DesktopSession, StoredDesktopState,
+};
+use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{
+    AppHandle, Emitter, Manager, PhysicalPosition, Position, Rect, Size, WebviewUrl,
+    WebviewWindowBuilder, WindowEvent,
+};
 use url::Url;
 
 #[tauri::command]
@@ -52,14 +65,23 @@ fn get_installation_id(app: AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn exchange_desktop_authorization_command(app: AppHandle, code: String, code_verifier: String, state: String) -> Result<DesktopSession, String> {
+async fn exchange_desktop_authorization_command(
+    app: AppHandle,
+    code: String,
+    code_verifier: String,
+    state: String,
+) -> Result<DesktopSession, String> {
     let session = exchange_desktop_authorization(&code, &code_verifier, &state).await?;
     save_desktop_session(&app, &session)?;
     Ok(session)
 }
 
 #[tauri::command]
-async fn bootstrap_desktop_key_command(app: AppHandle, access_token: String, rotate_existing: bool) -> Result<DesktopBootstrapKey, String> {
+async fn bootstrap_desktop_key_command(
+    app: AppHandle,
+    access_token: String,
+    rotate_existing: bool,
+) -> Result<DesktopBootstrapKey, String> {
     let id = installation_id(&app)?;
     let key = bootstrap_desktop_key(&access_token, &id, rotate_existing).await?;
     save_desktop_api_key(&app, &key.api_key)?;
@@ -67,18 +89,36 @@ async fn bootstrap_desktop_key_command(app: AppHandle, access_token: String, rot
 }
 
 #[tauri::command]
-async fn restore_desktop_state_command(app: AppHandle) -> Result<Option<StoredDesktopState>, String> {
+async fn restore_desktop_state_command(
+    app: AppHandle,
+) -> Result<Option<StoredDesktopState>, String> {
     restore_desktop_state(&app).await
 }
 
 #[tauri::command]
-async fn get_desktop_account_summary_command(access_token: String) -> Result<DesktopAccountSummary, String> {
+fn clear_desktop_session_command(app: AppHandle) -> Result<(), String> {
+    clear_desktop_session(&app)
+}
+
+#[tauri::command]
+async fn get_desktop_account_summary_command(
+    access_token: String,
+) -> Result<DesktopAccountSummary, String> {
     desktop_account_summary(&access_token).await
 }
 
 #[tauri::command]
-fn update_tray_status_command(app: AppHandle, username: String, balance: String) -> Result<(), String> {
-    let tooltip = format!("AUTO Gateway — {}\n{}: {}", username.trim(), "Balance", balance.trim());
+fn update_tray_status_command(
+    app: AppHandle,
+    username: String,
+    balance: String,
+) -> Result<(), String> {
+    let tooltip = format!(
+        "AUTO Gateway — {}\n{}: {}",
+        username.trim(),
+        "Balance",
+        balance.trim()
+    );
     let tray = app
         .tray_by_id("main-tray")
         .ok_or_else(|| "the AUTO Gateway tray icon is unavailable".to_string())?;
@@ -87,20 +127,98 @@ fn update_tray_status_command(app: AppHandle, username: String, balance: String)
 }
 
 #[tauri::command]
+fn show_main_window(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "the AUTO Gateway main window is unavailable".to_string())?;
+    let _ = window.unminimize();
+    window
+        .show()
+        .map_err(|error| format!("show the AUTO Gateway main window: {error}"))?;
+    window
+        .set_focus()
+        .map_err(|error| format!("focus the AUTO Gateway main window: {error}"))
+}
+
+#[tauri::command]
+fn get_desktop_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+fn show_tray_popup(app: &AppHandle, tray_rect: Rect) {
+    let Some(window) = app.get_webview_window("tray-popup") else {
+        return;
+    };
+
+    let scale_factor = window.scale_factor().unwrap_or(1.0);
+    let (tray_x, tray_y, tray_width, tray_height) = match (tray_rect.position, tray_rect.size) {
+        (Position::Physical(position), Size::Physical(size)) => (
+            position.x as f64,
+            position.y as f64,
+            size.width as f64,
+            size.height as f64,
+        ),
+        (Position::Logical(position), Size::Logical(size)) => (
+            position.x * scale_factor,
+            position.y * scale_factor,
+            size.width * scale_factor,
+            size.height * scale_factor,
+        ),
+        _ => return,
+    };
+    let popup_width = 360.0 * scale_factor;
+    let popup_height = 248.0 * scale_factor;
+    let mut x = tray_x - popup_width + tray_width;
+    let mut y = if cfg!(target_os = "windows") {
+        tray_y - popup_height - (10.0 * scale_factor)
+    } else {
+        tray_y + tray_height + (10.0 * scale_factor)
+    };
+
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let work_area = monitor.work_area();
+        let margin = 8.0 * scale_factor;
+        let left = work_area.position.x as f64 + margin;
+        let right =
+            (work_area.position.x + work_area.size.width as i32) as f64 - popup_width - margin;
+        let top = work_area.position.y as f64 + margin;
+        let bottom =
+            (work_area.position.y + work_area.size.height as i32) as f64 - popup_height - margin;
+        x = x.clamp(left, right.max(left));
+        y = y.clamp(top, bottom.max(top));
+    }
+
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+#[tauri::command]
 fn clear_stored_desktop_api_key_command(app: AppHandle) -> Result<(), String> {
     clear_stored_desktop_api_key(&app)
 }
 
 #[tauri::command]
-async fn open_console(app: AppHandle, access_token: String, section: Option<String>) -> Result<(), String> {
+async fn open_console(
+    app: AppHandle,
+    access_token: String,
+    section: Option<String>,
+) -> Result<(), String> {
     let ticket = create_desktop_console_ticket(&access_token).await?;
-    let mut console_url = Url::parse("https://autogateway.cc/console").map_err(|error| error.to_string())?;
-    console_url.query_pairs_mut().append_pair("desktopTicket", &ticket.ticket);
+    let mut console_url =
+        Url::parse("https://autogateway.cc/console").map_err(|error| error.to_string())?;
+    console_url
+        .query_pairs_mut()
+        .append_pair("desktopTicket", &ticket.ticket);
     if section.as_deref() == Some("billing") {
-        console_url.query_pairs_mut().append_pair("section", "billing");
+        console_url
+            .query_pairs_mut()
+            .append_pair("section", "billing");
     }
     if let Some(window) = app.get_webview_window("console") {
-        window.navigate(console_url).map_err(|error| error.to_string())?;
+        window
+            .navigate(console_url)
+            .map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
     }
@@ -112,24 +230,36 @@ async fn open_console(app: AppHandle, access_token: String, section: Option<Stri
     Ok(())
 }
 
+#[tauri::command]
+fn open_devtools(app: AppHandle) -> Result<(), String> {
+    let mut opened = 0;
+    for label in ["main", "console"] {
+        if let Some(window) = app.get_webview_window(label) {
+            window.open_devtools();
+            opened += 1;
+        }
+    }
+    if opened == 0 {
+        return Err("no desktop window is available for debugging".to_string());
+    }
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
-            let open_item = MenuItem::with_id(app, "open-main", "Open AUTO Gateway", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "Quit AUTO Gateway", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
             let mut tray = TrayIconBuilder::with_id("main-tray")
-                .menu(&menu)
                 .tooltip("AUTO Gateway")
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "open-main" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
+                .show_menu_on_left_click(false)
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button_state: MouseButtonState::Up,
+                        rect,
+                        ..
+                    } = event
+                    {
+                        show_tray_popup(tray.app_handle(), rect);
                     }
-                    "quit" => app.exit(0),
-                    _ => {}
                 });
             if let Some(icon) = app.default_window_icon() {
                 tray = tray.icon(icon.clone());
@@ -155,14 +285,15 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .on_window_event(|window, event| {
-            if window.label() != "main" {
-                return;
-            }
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match (window.label(), event) {
+            ("main", WindowEvent::CloseRequested { api, .. }) => {
                 api.prevent_close();
                 let _ = window.hide();
             }
+            ("tray-popup", WindowEvent::Focused(false)) => {
+                let _ = window.hide();
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             get_codex_status,
@@ -175,10 +306,14 @@ fn main() {
             exchange_desktop_authorization_command,
             bootstrap_desktop_key_command,
             restore_desktop_state_command,
+            clear_desktop_session_command,
             get_desktop_account_summary_command,
             update_tray_status_command,
+            show_main_window,
+            get_desktop_app_version,
             clear_stored_desktop_api_key_command,
-            open_console
+            open_console,
+            open_devtools
         ])
         .run(tauri::generate_context!())
         .expect("failed to run AUTO Gateway Desktop");

@@ -21,7 +21,10 @@ use tauri::{AppHandle, Emitter};
 const MACOS_DOWNLOAD_URL: &str = "https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg";
 const CODEX_VERSION_API_URL: &str = "https://api.autogateway.cc/public/api/desktop/codex-version";
 #[cfg(target_os = "windows")]
-const WINDOWS_DOWNLOAD_URL: &str = "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi";
+const WINDOWS_DOWNLOAD_URL: &str =
+    "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi";
+#[cfg(target_os = "windows")]
+const WINDOWS_STORE_PRODUCT_ID: &str = "9PLM9XGG6VKS";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -76,8 +79,13 @@ struct CodexVersionSnapshot {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PlatformVersion {
     version: String,
+    #[serde(default)]
+    download_url: Option<String>,
+    #[serde(default)]
+    fallback_url: Option<String>,
 }
 
 pub async fn status() -> CodexAppStatus {
@@ -93,14 +101,14 @@ pub async fn status() -> CodexAppStatus {
         };
     };
 
-    let latest_result = latest_version().await;
+    let latest_result = latest_release().await;
     let (latest_version, update_available, update_check_error) = match latest_result {
         Ok(latest) => {
             let available = installation
                 .version
                 .as_deref()
-                .map(|local| compare_versions(&latest, local) == Ordering::Greater);
-            (Some(latest), available, None)
+                .map(|local| compare_versions(&latest.version, local) == Ordering::Greater);
+            (Some(latest.version), available, None)
         }
         Err(error) => (None, None, Some(error)),
     };
@@ -112,7 +120,8 @@ pub async fn status() -> CodexAppStatus {
         latest_version,
         update_available,
         update_check_error,
-        platform_message: "The official ChatGPT desktop application is installed. It includes Codex.".to_string(),
+        platform_message:
+            "The official ChatGPT desktop application is installed. It includes Codex.".to_string(),
     }
 }
 
@@ -127,27 +136,80 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
         });
     }
 
-    let download_url = download_url()?;
+    #[cfg(target_os = "windows")]
+    {
+        // WinGet talks to the Microsoft Store catalog directly and can upgrade an
+        // existing Store package in place. This avoids the delete-then-install flow
+        // and keeps the user's package registration and data intact.
+        emit_install_progress(app, "installing", 0, None);
+        let winget_result =
+            tauri::async_runtime::spawn_blocking(move || install_with_winget(force_update))
+                .await
+                .map_err(|error| format!("wait for the Windows package upgrade: {error}"))?;
+        if winget_result.is_ok() {
+            emit_install_progress(app, "verifying", 0, None);
+            let status = status().await;
+            if status.installed {
+                if force_update {
+                    if let (Some(expected), Some(installed)) = (
+                        status.latest_version.as_deref(),
+                        status.local_version.as_deref(),
+                    ) {
+                        if compare_versions(installed, expected) == Ordering::Less {
+                            return Err(format!("the update finished, but version {installed} is still installed; expected {expected}"));
+                        }
+                    }
+                    open_installed_app()?;
+                }
+                emit_install_progress(app, "complete", 0, None);
+                return Ok(CodexInstallResult {
+                    installed: true,
+                    path: status.path,
+                    message: if force_update {
+                        "ChatGPT and Codex were updated successfully.".to_string()
+                    } else {
+                        "ChatGPT and Codex are installed and ready for the next step.".to_string()
+                    },
+                    awaiting_installation: false,
+                });
+            }
+        }
+    }
+
+    // The version service advertises an R2 mirror first and the official URL
+    // as a fallback. If the service is unavailable, retain the built-in
+    // official URL so installation remains possible offline from our API.
+    let latest_release = latest_release().await.ok();
+    let download_urls = download_urls(latest_release.as_ref())?;
     let extension = download_extension();
-    let download_path = env::temp_dir().join(format!("autogateway-chatgpt-{}.{}", uuid::Uuid::new_v4(), extension));
+    let download_path = env::temp_dir().join(format!(
+        "autogateway-chatgpt-{}.{}",
+        uuid::Uuid::new_v4(),
+        extension
+    ));
     emit_install_progress(app, "preparing", 0, None);
-    if let Err(error) = download_installer(app, download_url, &download_path).await {
+    if let Err(error) = download_installer(app, &download_urls, &download_path).await {
         let _ = fs::remove_file(&download_path);
         return Err(error);
     }
 
     let preferred_destination = existing_installation.map(|installation| installation.path);
     emit_install_progress(app, "installing", 0, None);
-    let install_result = tauri::async_runtime::spawn_blocking(move || install_downloaded_app(&download_path, preferred_destination.as_deref()))
-        .await
-        .map_err(|error| format!("wait for the official ChatGPT installer: {error}"))?;
+    let install_result = tauri::async_runtime::spawn_blocking(move || {
+        install_downloaded_app(&download_path, preferred_destination.as_deref())
+    })
+    .await
+    .map_err(|error| format!("wait for the official ChatGPT installer: {error}"))?;
     let installer_result = install_result?;
 
     #[cfg(not(target_os = "windows"))]
     let _ = installer_result;
 
     #[cfg(target_os = "windows")]
-    if matches!(installer_result, InstallerResult::AwaitingExternalInstallation) {
+    if matches!(
+        installer_result,
+        InstallerResult::AwaitingExternalInstallation
+    ) {
         return Ok(CodexInstallResult {
             installed: false,
             path: None,
@@ -184,41 +246,76 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
     })
 }
 
-async fn download_installer(app: &AppHandle, download_url: &str, download_path: &Path) -> Result<(), String> {
+async fn download_installer(
+    app: &AppHandle,
+    download_urls: &[String],
+    download_path: &Path,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for download_url in download_urls {
+        match download_installer_from_url(app, download_url, download_path).await {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                let _ = fs::remove_file(download_path);
+                errors.push(format!("{download_url}: {error}"));
+            }
+        }
+    }
+    Err(format!(
+        "download the ChatGPT installer from R2 and the official source: {}",
+        errors.join("; ")
+    ))
+}
+
+async fn download_installer_from_url(
+    app: &AppHandle,
+    download_url: &str,
+    download_path: &Path,
+) -> Result<(), String> {
     let response = desktop_http_client(Some(Duration::from_secs(30 * 60)))
-        .map_err(|error| format!("prepare the official ChatGPT download: {error}"))?
+        .map_err(|error| format!("prepare the ChatGPT download: {error}"))?
         .get(download_url)
         .send()
         .await
-        .map_err(|error| format!("download the official ChatGPT installer: {error}"))?
+        .map_err(|error| format!("download the ChatGPT installer: {error}"))?
         .error_for_status()
-        .map_err(|error| format!("download the official ChatGPT installer: {error}"))?;
+        .map_err(|error| format!("download the ChatGPT installer: {error}"))?;
     let total_bytes = response.content_length();
     let mut stream = response.bytes_stream();
-    let mut file = fs::File::create(download_path).map_err(|error| format!("create the official ChatGPT installer file: {error}"))?;
+    let mut file = fs::File::create(download_path)
+        .map_err(|error| format!("create the ChatGPT installer file: {error}"))?;
     let mut downloaded_bytes = 0_u64;
     let mut last_reported_percent = None;
     let mut last_reported_bytes = 0_u64;
     emit_install_progress(app, "downloading", 0, total_bytes);
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("read the official ChatGPT installer: {error}"))?;
-        file.write_all(&chunk).map_err(|error| format!("save the official ChatGPT installer: {error}"))?;
+        let chunk = chunk.map_err(|error| format!("read the ChatGPT installer: {error}"))?;
+        file.write_all(&chunk)
+            .map_err(|error| format!("save the ChatGPT installer: {error}"))?;
         downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
         let percent = total_bytes
             .filter(|total| *total > 0)
             .map(|total| ((downloaded_bytes.saturating_mul(100) / total).min(100)) as u8);
-        if percent != last_reported_percent || downloaded_bytes.saturating_sub(last_reported_bytes) >= 4 * 1024 * 1024 {
+        if percent != last_reported_percent
+            || downloaded_bytes.saturating_sub(last_reported_bytes) >= 4 * 1024 * 1024
+        {
             emit_install_progress(app, "downloading", downloaded_bytes, total_bytes);
             last_reported_percent = percent;
             last_reported_bytes = downloaded_bytes;
         }
     }
-    file.sync_all().map_err(|error| format!("finish saving the official ChatGPT installer: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("finish saving the ChatGPT installer: {error}"))?;
     Ok(())
 }
 
-fn emit_install_progress(app: &AppHandle, stage: &str, downloaded_bytes: u64, total_bytes: Option<u64>) {
+fn emit_install_progress(
+    app: &AppHandle,
+    stage: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+) {
     let percent = total_bytes
         .filter(|total| *total > 0)
         .map(|total| ((downloaded_bytes.saturating_mul(100) / total).min(100)) as u8);
@@ -268,7 +365,10 @@ fn windows_app_user_model_id() -> Result<String, String> {
         .output()
         .map_err(|error| format!("query the installed ChatGPT package: {error}"))?;
     if !output.status.success() {
-        return Err("ChatGPT is not installed yet, or Windows could not find its packaged app entry.".to_string());
+        return Err(
+            "ChatGPT is not installed yet, or Windows could not find its packaged app entry."
+                .to_string(),
+        );
     }
     let app_user_model_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if app_user_model_id.is_empty() {
@@ -277,7 +377,7 @@ fn windows_app_user_model_id() -> Result<String, String> {
     Ok(app_user_model_id)
 }
 
-async fn latest_version() -> Result<String, String> {
+async fn latest_release() -> Result<PlatformVersion, String> {
     let client = desktop_http_client(Some(Duration::from_secs(10)))
         .map_err(|error| format!("prepare the Codex update check: {error}"))?;
 
@@ -293,13 +393,40 @@ async fn latest_version() -> Result<String, String> {
         .map_err(|error| format!("read the AUTO Gateway Codex version response: {error}"))?;
 
     #[cfg(target_os = "macos")]
-    return Ok(snapshot.macos.version);
+    return Ok(snapshot.macos);
 
     #[cfg(target_os = "windows")]
-    return Ok(snapshot.windows.version);
+    return Ok(snapshot.windows);
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Err("Codex update checks are available on macOS and Windows only.".to_string())
+}
+
+fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String> {
+    let fallback = download_url()?.to_string();
+    let mut urls = Vec::with_capacity(2);
+    if let Some(latest) = latest {
+        if let Some(download_url) = latest
+            .download_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        {
+            urls.push(download_url.to_string());
+        }
+        if let Some(fallback_url) = latest
+            .fallback_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        {
+            urls.push(fallback_url.to_string());
+        }
+    }
+    if !urls.iter().any(|url| url == &fallback) {
+        urls.push(fallback);
+    }
+    Ok(urls)
 }
 
 fn compare_versions(left: &str, right: &str) -> Ordering {
@@ -307,7 +434,10 @@ fn compare_versions(left: &str, right: &str) -> Ordering {
     let right_parts = numeric_version_parts(right);
     let count = left_parts.len().max(right_parts.len());
     for index in 0..count {
-        let ordering = left_parts.get(index).unwrap_or(&0).cmp(right_parts.get(index).unwrap_or(&0));
+        let ordering = left_parts
+            .get(index)
+            .unwrap_or(&0)
+            .cmp(right_parts.get(index).unwrap_or(&0));
         if ordering != Ordering::Equal {
             return ordering;
         }
@@ -325,7 +455,9 @@ fn numeric_version_parts(version: &str) -> Vec<u64> {
 
 #[cfg(target_os = "macos")]
 fn local_installation() -> Option<LocalInstallation> {
-    let path = installation_candidates().into_iter().find(|path| path.exists())?;
+    let path = installation_candidates()
+        .into_iter()
+        .find(|path| path.exists())?;
     let plist = path.join("Contents/Info.plist");
     let version = Command::new("/usr/libexec/PlistBuddy")
         .args(["-c", "Print :CFBundleShortVersionString"])
@@ -354,14 +486,20 @@ fn local_installation() -> Option<LocalInstallation> {
                 .filter(|line| !line.is_empty())
                 .map(str::to_string);
             if let (Some(version), Some(path)) = (lines.next(), lines.next()) {
-                return Some(LocalInstallation { path: PathBuf::from(path), version: Some(version) });
+                return Some(LocalInstallation {
+                    path: PathBuf::from(path),
+                    version: Some(version),
+                });
             }
         }
     }
 
-    let path = installation_candidates().into_iter().find(|path| path.exists())?;
+    let path = installation_candidates()
+        .into_iter()
+        .find(|path| path.exists())?;
     let escaped_path = path.display().to_string().replace('\'', "''");
-    let version_script = format!("(Get-Item -LiteralPath '{escaped_path}').VersionInfo.ProductVersion");
+    let version_script =
+        format!("(Get-Item -LiteralPath '{escaped_path}').VersionInfo.ProductVersion");
     let version = Command::new("powershell.exe")
         .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-NonInteractive", "-Command", &version_script])
@@ -409,14 +547,20 @@ fn download_extension() -> &'static str {
 }
 
 #[cfg(target_os = "macos")]
-fn install_downloaded_app(download_path: &Path, preferred_destination: Option<&Path>) -> Result<InstallerResult, String> {
+fn install_downloaded_app(
+    download_path: &Path,
+    preferred_destination: Option<&Path>,
+) -> Result<InstallerResult, String> {
     let output = Command::new("hdiutil")
         .args(["attach", "-nobrowse", "-readonly"])
         .arg(download_path)
         .output()
         .map_err(|error| format!("mount the official ChatGPT installer: {error}"))?;
     if !output.status.success() {
-        return Err(format!("mount the official ChatGPT installer: {}", String::from_utf8_lossy(&output.stderr).trim()));
+        return Err(format!(
+            "mount the official ChatGPT installer: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
     let mount_path = String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -471,8 +615,11 @@ fn copy_macos_app(source: &Path, preferred_destination: Option<&Path>) -> Result
 
 #[cfg(target_os = "macos")]
 fn replace_macos_app(source: &Path, destination: &Path) -> Result<(), String> {
-    let parent = destination.parent().ok_or_else(|| "resolve the ChatGPT installation directory".to_string())?;
-    fs::create_dir_all(parent).map_err(|error| format!("create the ChatGPT installation directory: {error}"))?;
+    let parent = destination
+        .parent()
+        .ok_or_else(|| "resolve the ChatGPT installation directory".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("create the ChatGPT installation directory: {error}"))?;
     let operation_id = uuid::Uuid::new_v4();
     let staged = parent.join(format!(".autogateway-chatgpt-{operation_id}.app"));
     let backup = parent.join(format!(".autogateway-chatgpt-{operation_id}.backup.app"));
@@ -484,7 +631,10 @@ fn replace_macos_app(source: &Path, destination: &Path) -> Result<(), String> {
         .map_err(|error| format!("stage ChatGPT in Applications: {error}"))?;
     if !copy_output.status.success() {
         let _ = fs::remove_dir_all(&staged);
-        return Err(format!("stage ChatGPT in Applications: {}", String::from_utf8_lossy(&copy_output.stderr).trim()));
+        return Err(format!(
+            "stage ChatGPT in Applications: {}",
+            String::from_utf8_lossy(&copy_output.stderr).trim()
+        ));
     }
 
     let verify_output = Command::new("codesign")
@@ -494,7 +644,10 @@ fn replace_macos_app(source: &Path, destination: &Path) -> Result<(), String> {
         .map_err(|error| format!("verify the official ChatGPT signature: {error}"))?;
     if !verify_output.status.success() {
         let _ = fs::remove_dir_all(&staged);
-        return Err(format!("verify the official ChatGPT signature: {}", String::from_utf8_lossy(&verify_output.stderr).trim()));
+        return Err(format!(
+            "verify the official ChatGPT signature: {}",
+            String::from_utf8_lossy(&verify_output.stderr).trim()
+        ));
     }
 
     if destination.exists() {
@@ -504,7 +657,9 @@ fn replace_macos_app(source: &Path, destination: &Path) -> Result<(), String> {
         }
         if let Err(error) = fs::rename(destination, &backup) {
             let _ = fs::remove_dir_all(&staged);
-            return Err(format!("prepare the existing ChatGPT application for replacement: {error}"));
+            return Err(format!(
+                "prepare the existing ChatGPT application for replacement: {error}"
+            ));
         }
     }
     if let Err(error) = fs::rename(&staged, destination) {
@@ -556,7 +711,57 @@ fn macos_app_is_running(app_path: &Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn install_downloaded_app(download_path: &Path, _preferred_destination: Option<&Path>) -> Result<InstallerResult, String> {
+fn install_with_winget(force_update: bool) -> Result<(), String> {
+    let mut attempts = Vec::new();
+    if force_update {
+        attempts.push(vec![
+            "upgrade",
+            "--id",
+            WINDOWS_STORE_PRODUCT_ID,
+            "--exact",
+            "--source",
+            "msstore",
+        ]);
+    }
+    attempts.push(vec![
+        "install",
+        "--id",
+        WINDOWS_STORE_PRODUCT_ID,
+        "--exact",
+        "--source",
+        "msstore",
+    ]);
+
+    let mut last_error = None;
+    for arguments in attempts {
+        let output = Command::new("winget.exe")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(arguments.iter().copied().chain([
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ]))
+            .output()
+            .map_err(|error| format!("run WinGet: {error}"))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        last_error = Some(if details.is_empty() { stdout } else { details });
+    }
+
+    Err(last_error
+        .filter(|error| !error.is_empty())
+        .unwrap_or_else(|| "WinGet could not install the Microsoft Store package".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+fn install_downloaded_app(
+    download_path: &Path,
+    _preferred_destination: Option<&Path>,
+) -> Result<InstallerResult, String> {
     validate_windows_installer(download_path)?;
     Command::new(download_path)
         .creation_flags(CREATE_NO_WINDOW)
@@ -573,17 +778,26 @@ fn validate_windows_installer(download_path: &Path) -> Result<(), String> {
         return Ok(());
     }
     let _ = fs::remove_file(download_path);
-    Err("the official download service did not return a valid Windows installer; try again later".to_string())
+    Err(
+        "the official download service did not return a valid Windows installer; try again later"
+            .to_string(),
+    )
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn install_downloaded_app(_download_path: &Path, _preferred_destination: Option<&Path>) -> Result<InstallerResult, String> {
+fn install_downloaded_app(
+    _download_path: &Path,
+    _preferred_destination: Option<&Path>,
+) -> Result<InstallerResult, String> {
     Err("This desktop build supports macOS and Windows only.".to_string())
 }
 
 #[cfg(target_os = "macos")]
 fn installation_candidates() -> Vec<PathBuf> {
-    let mut paths = vec![PathBuf::from("/Applications/ChatGPT.app"), PathBuf::from("/Applications/Codex.app")];
+    let mut paths = vec![
+        PathBuf::from("/Applications/ChatGPT.app"),
+        PathBuf::from("/Applications/Codex.app"),
+    ];
     if let Some(home) = dirs::home_dir() {
         paths.push(home.join("Applications/ChatGPT.app"));
         paths.push(home.join("Applications/Codex.app"));
@@ -621,9 +835,30 @@ mod tests {
 
     #[test]
     fn compares_numeric_version_segments() {
-        assert_eq!(compare_versions("26.730.61309", "26.727.51351"), Ordering::Greater);
-        assert_eq!(compare_versions("26.730.61309", "26.730.61309"), Ordering::Equal);
-        assert_eq!(compare_versions("26.730.61309.0", "26.730.61309"), Ordering::Equal);
+        assert_eq!(
+            compare_versions("26.730.61309", "26.727.51351"),
+            Ordering::Greater
+        );
+        assert_eq!(
+            compare_versions("26.730.61309", "26.730.61309"),
+            Ordering::Equal
+        );
+        assert_eq!(
+            compare_versions("26.730.61309.0", "26.730.61309"),
+            Ordering::Equal
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn prefers_the_server_mirror_before_the_official_fallback() {
+        let release: super::PlatformVersion = serde_json::from_str(
+            r#"{"version":"26.730.61639","downloadUrl":"https://cdn.example.test/codex.dmg","fallbackUrl":"https://official.example.test/ChatGPT.dmg"}"#,
+        )
+        .expect("decode version service response");
+        let urls = super::download_urls(Some(&release)).expect("build installer candidates");
+        assert_eq!(urls[0], "https://cdn.example.test/codex.dmg");
+        assert_eq!(urls[1], "https://official.example.test/ChatGPT.dmg");
     }
 
     #[cfg(target_os = "macos")]
@@ -634,7 +869,10 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         use std::process::Command;
 
-        let root = std::env::temp_dir().join(format!("autogateway-app-replacement-test-{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "autogateway-app-replacement-test-{}",
+            uuid::Uuid::new_v4()
+        ));
         let source = root.join("Source.app");
         let destination = root.join("Destination.app");
         write_test_app(&source, "updated");
@@ -644,16 +882,22 @@ mod tests {
             .arg(&source)
             .output()
             .expect("run codesign for the test application");
-        assert!(signing.status.success(), "codesign failed: {}", String::from_utf8_lossy(&signing.stderr));
+        assert!(
+            signing.status.success(),
+            "codesign failed: {}",
+            String::from_utf8_lossy(&signing.stderr)
+        );
 
         replace_macos_app(&source, &destination).expect("replace the test application");
-        let executable = fs::read_to_string(destination.join("Contents/MacOS/TestApp")).expect("read the replaced executable");
+        let executable = fs::read_to_string(destination.join("Contents/MacOS/TestApp"))
+            .expect("read the replaced executable");
         assert!(executable.contains("updated"));
         fs::remove_dir_all(root).expect("remove the application replacement fixture");
 
         fn write_test_app(path: &std::path::Path, marker: &str) {
             let executable_directory = path.join("Contents/MacOS");
-            fs::create_dir_all(&executable_directory).expect("create the test application directory");
+            fs::create_dir_all(&executable_directory)
+                .expect("create the test application directory");
             fs::write(
                 path.join("Contents/Info.plist"),
                 r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -667,8 +911,10 @@ mod tests {
             )
             .expect("write the test application property list");
             let executable = executable_directory.join("TestApp");
-            fs::write(&executable, format!("#!/bin/sh\n# {marker}\nexit 0\n")).expect("write the test application executable");
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("make the test application executable");
+            fs::write(&executable, format!("#!/bin/sh\n# {marker}\nexit 0\n"))
+                .expect("write the test application executable");
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+                .expect("make the test application executable");
         }
     }
 }

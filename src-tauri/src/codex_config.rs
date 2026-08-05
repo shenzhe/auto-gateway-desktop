@@ -43,7 +43,8 @@ pub struct RestoreResult {
 }
 
 pub fn default_codex_paths() -> Result<CodexPaths, String> {
-    let home = dirs::home_dir().ok_or_else(|| "unable to determine the current user home directory".to_string())?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| "unable to determine the current user home directory".to_string())?;
     let codex_directory = home.join(".codex");
     Ok(CodexPaths {
         config: codex_directory.join("config.toml"),
@@ -57,10 +58,7 @@ impl CodexPaths {
             Some(content) => content
                 .parse::<DocumentMut>()
                 .map(|document| {
-                    document
-                            .get("model_provider")
-                            .and_then(Item::as_str)
-                            == Some("autogateway")
+                    document.get("model_provider").and_then(Item::as_str) == Some("autogateway")
                         && document
                             .get("model_providers")
                             .and_then(Item::as_table)
@@ -82,7 +80,11 @@ impl CodexPaths {
     }
 }
 
-pub fn apply_configuration(paths: &CodexPaths, api_key: &str, endpoint: &str) -> Result<ConfigurationResult, String> {
+pub fn apply_configuration(
+    paths: &CodexPaths,
+    api_key: &str,
+    endpoint: &str,
+) -> Result<ConfigurationResult, String> {
     let clean_key = normalize_api_key(api_key)?;
     let clean_endpoint = normalize_endpoint(endpoint)?;
     ensure_not_symlink(&paths.config)?;
@@ -92,7 +94,10 @@ pub fn apply_configuration(paths: &CodexPaths, api_key: &str, endpoint: &str) ->
     let config_after = merge_config(config_before.as_deref(), &clean_endpoint)?;
     let auth_after = merge_auth(auth_before.as_deref(), &clean_key)?;
 
-    let parent = paths.config.parent().ok_or_else(|| "unable to determine the Codex directory".to_string())?;
+    let parent = paths
+        .config
+        .parent()
+        .ok_or_else(|| "unable to determine the Codex directory".to_string())?;
     fs::create_dir_all(parent).map_err(|error| format!("create Codex directory: {error}"))?;
     let config_backup = backup_if_exists(&paths.config)?;
     let auth_backup = backup_if_exists(&paths.auth)?;
@@ -107,7 +112,10 @@ pub fn apply_configuration(paths: &CodexPaths, api_key: &str, endpoint: &str) ->
         let config_restore = restore_previous(&paths.config, config_before.as_deref());
         let auth_restore = restore_previous(&paths.auth, auth_before.as_deref());
         return Err(with_restore_result(
-            with_restore_result(format!("write Codex authentication file: {error}"), config_restore),
+            with_restore_result(
+                format!("write Codex authentication file: {error}"),
+                config_restore,
+            ),
             auth_restore,
         ));
     }
@@ -136,7 +144,10 @@ pub fn restore_latest_backups(paths: &CodexPaths) -> Result<RestoreResult, Strin
             let config_restore = restore_previous(&paths.config, config_before.as_deref());
             let auth_restore = restore_previous(&paths.auth, auth_before.as_deref());
             return Err(with_restore_result(
-                with_restore_result(format!("restore Codex authentication backup: {error}"), config_restore),
+                with_restore_result(
+                    format!("restore Codex authentication backup: {error}"),
+                    config_restore,
+                ),
                 auth_restore,
             ));
         }
@@ -152,7 +163,10 @@ fn normalize_api_key(raw: &str) -> Result<String, String> {
     if value.is_empty() {
         return Err("an AUTO Gateway API key is required".to_string());
     }
-    if !value.chars().all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')) {
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
+    {
         return Err("the API key contains unsupported characters".to_string());
     }
     Ok(value.to_string())
@@ -163,16 +177,25 @@ fn normalize_endpoint(raw: &str) -> Result<String, String> {
     if !value.starts_with("https://") {
         return Err("the gateway endpoint must start with https://".to_string());
     }
-    let parsed = url::Url::parse(value).map_err(|_| "the gateway endpoint is invalid".to_string())?;
-    if parsed.host_str().is_none() || parsed.path() != "/" || parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err("the gateway endpoint must be an origin without a query or fragment".to_string());
+    let parsed =
+        url::Url::parse(value).map_err(|_| "the gateway endpoint is invalid".to_string())?;
+    if parsed.host_str().is_none()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(
+            "the gateway endpoint must be an origin without a query or fragment".to_string(),
+        );
     }
     Ok(value.to_string())
 }
 
 fn merge_config(existing: Option<&str>, endpoint: &str) -> Result<String, String> {
     let mut document = match existing {
-        Some(content) => content.parse::<DocumentMut>().map_err(|error| format!("existing config.toml is invalid: {error}"))?,
+        Some(content) => content
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("existing config.toml is invalid: {error}"))?,
         None => DocumentMut::new(),
     };
     document["model_provider"] = value("autogateway");
@@ -182,7 +205,8 @@ fn merge_config(existing: Option<&str>, endpoint: &str) -> Result<String, String
     document["disable_response_storage"] = value(true);
     document["network_access"] = value("enabled");
 
-    if !document["model_providers"].is_table() {
+    let has_model_providers_table = document.get("model_providers").is_some_and(Item::is_table);
+    if !has_model_providers_table {
         document["model_providers"] = Item::Table(Table::new());
     }
     let mut provider = document["model_providers"]
@@ -196,7 +220,10 @@ fn merge_config(existing: Option<&str>, endpoint: &str) -> Result<String, String
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(false);
     let mut headers = toml_edit::InlineTable::new();
-    headers.insert("x-openai-actor-authorization", TomlValue::from("autogateway.cc"));
+    headers.insert(
+        "x-openai-actor-authorization",
+        TomlValue::from("autogateway.cc"),
+    );
     provider["http_headers"] = Item::Value(TomlValue::InlineTable(headers));
     let providers = document["model_providers"]
         .as_table_mut()
@@ -207,13 +234,18 @@ fn merge_config(existing: Option<&str>, endpoint: &str) -> Result<String, String
 
 fn merge_auth(existing: Option<&str>, api_key: &str) -> Result<String, String> {
     let mut object = match existing {
-        Some(content) => match serde_json::from_str::<JsonValue>(content).map_err(|error| format!("existing auth.json is invalid: {error}"))? {
+        Some(content) => match serde_json::from_str::<JsonValue>(content)
+            .map_err(|error| format!("existing auth.json is invalid: {error}"))?
+        {
             JsonValue::Object(object) => object,
             _ => return Err("existing auth.json must contain a JSON object".to_string()),
         },
         None => Map::new(),
     };
-    object.insert("OPENAI_API_KEY".to_string(), JsonValue::String(api_key.to_string()));
+    object.insert(
+        "OPENAI_API_KEY".to_string(),
+        JsonValue::String(api_key.to_string()),
+    );
     serde_json::to_string_pretty(&JsonValue::Object(object))
         .map(|content| format!("{content}\n"))
         .map_err(|error| format!("encode auth.json: {error}"))
@@ -230,7 +262,10 @@ fn read_optional(path: &Path) -> Result<Option<String>, String> {
 
 fn ensure_not_symlink(path: &Path) -> Result<(), String> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!("refusing to modify symbolic link {}", path.display())),
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "refusing to modify symbolic link {}",
+            path.display()
+        )),
         Ok(_) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("inspect {}: {error}", path.display())),
@@ -245,20 +280,35 @@ fn with_restore_result(message: String, restore: Result<(), String>) -> String {
 }
 
 fn backup_if_exists(path: &Path) -> Result<Option<PathBuf>, String> {
-    if !path.exists() {
-        return Ok(None);
-    }
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("read system clock: {error}"))?
         .as_nanos();
-    let mut backup = PathBuf::from(format!("{}.bak.{timestamp}", path.display()));
+    let was_present = path.exists();
+    let mut backup = PathBuf::from(if was_present {
+        format!("{}.bak.{timestamp}", path.display())
+    } else {
+        format!("{}.bak.{timestamp}.missing", path.display())
+    });
     let mut suffix = 0_u32;
     while backup.exists() {
         suffix += 1;
-        backup = PathBuf::from(format!("{}.bak.{timestamp}.{suffix}", path.display()));
+        backup = PathBuf::from(if was_present {
+            format!("{}.bak.{timestamp}.{suffix}", path.display())
+        } else {
+            format!("{}.bak.{timestamp}.{suffix}.missing", path.display())
+        });
     }
-    fs::copy(path, &backup).map_err(|error| format!("back up {}: {error}", path.display()))?;
+    if was_present {
+        fs::copy(path, &backup).map_err(|error| format!("back up {}: {error}", path.display()))?;
+    } else {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+            .map_err(|error| format!("record missing {}: {error}", path.display()))?;
+        set_private_permissions(&backup)?;
+    }
     Ok(Some(backup))
 }
 
@@ -275,7 +325,12 @@ fn backup_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
     let entries = match fs::read_dir(parent) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("list Codex backups in {}: {error}", parent.display())),
+        Err(error) => {
+            return Err(format!(
+                "list Codex backups in {}: {error}",
+                parent.display()
+            ))
+        }
     };
     let mut backups = Vec::new();
     for entry in entries {
@@ -302,21 +357,47 @@ fn latest_backup_path(path: &Path) -> Result<Option<PathBuf>, String> {
 fn restore_from_backup(backup: &Path, destination: &Path) -> Result<(), String> {
     ensure_not_symlink(backup)?;
     ensure_not_symlink(destination)?;
-    let content = fs::read(backup).map_err(|error| format!("read backup {}: {error}", backup.display()))?;
-    atomic_write(destination, &content).map_err(|error| format!("write {}: {error}", destination.display()))
+    if backup_represents_missing_file(backup) {
+        if destination.exists() {
+            fs::remove_file(destination).map_err(|error| {
+                format!("remove restored file {}: {error}", destination.display())
+            })?;
+        }
+        return Ok(());
+    }
+    let content =
+        fs::read(backup).map_err(|error| format!("read backup {}: {error}", backup.display()))?;
+    atomic_write(destination, &content)
+        .map_err(|error| format!("write {}: {error}", destination.display()))
+}
+
+fn backup_represents_missing_file(backup: &Path) -> bool {
+    backup
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".missing"))
 }
 
 fn restore_previous(path: &Path, previous: Option<&str>) -> Result<(), String> {
     match previous {
         Some(content) => atomic_write(path, content.as_bytes()),
-        None if path.exists() => fs::remove_file(path).map_err(|error| format!("remove incomplete {}: {error}", path.display())),
+        None if path.exists() => fs::remove_file(path)
+            .map_err(|error| format!("remove incomplete {}: {error}", path.display())),
         None => Ok(()),
     }
 }
 
 fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
-    let parent = path.parent().ok_or_else(|| format!("determine parent for {}", path.display()))?;
-    let temporary = parent.join(format!(".{}.{}.tmp", path.file_name().and_then(|name| name.to_str()).unwrap_or("codex"), std::process::id()));
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("determine parent for {}", path.display()))?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("codex"),
+        std::process::id()
+    ));
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -328,8 +409,10 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
     set_private_permissions(&temporary)?;
     if let Err(first_error) = fs::rename(&temporary, path) {
         if path.exists() {
-            fs::remove_file(path).map_err(|error| format!("replace existing configuration: {error}"))?;
-            fs::rename(&temporary, path).map_err(|error| format!("replace configuration after {first_error}: {error}"))?;
+            fs::remove_file(path)
+                .map_err(|error| format!("replace existing configuration: {error}"))?;
+            fs::rename(&temporary, path)
+                .map_err(|error| format!("replace configuration after {first_error}: {error}"))?;
         } else {
             return Err(format!("replace configuration: {first_error}"));
         }
@@ -351,8 +434,12 @@ fn set_private_permissions(_path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{backup_paths, merge_auth, merge_config, normalize_endpoint, CodexPaths};
+    use super::{
+        backup_if_exists, backup_paths, merge_auth, merge_config, normalize_endpoint,
+        restore_from_backup, CodexPaths,
+    };
     use std::fs;
+    use toml_edit::Item;
 
     #[test]
     fn merges_gateway_provider_without_removing_existing_profile_data() {
@@ -367,7 +454,8 @@ args = ["-y", "docs-mcp"]
 name = "Other"
 base_url = "https://example.com/v1"
 "#;
-        let merged = merge_config(Some(existing), "https://api.autogateway.cc").expect("merge configuration");
+        let merged = merge_config(Some(existing), "https://api.autogateway.cc")
+            .expect("merge configuration");
         assert!(merged.contains("[mcp_servers.docs]"));
         assert!(merged.contains("[model_providers.other]"));
         assert!(merged.contains("model_provider = \"autogateway\""));
@@ -375,8 +463,28 @@ base_url = "https://example.com/v1"
     }
 
     #[test]
+    fn merges_gateway_provider_when_model_providers_are_missing() {
+        let existing = "model = \"gpt-5.6-sol\"\n";
+        let merged = merge_config(Some(existing), "https://api.autogateway.cc")
+            .expect("merge configuration");
+        let document = merged
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse merged configuration");
+        assert_eq!(
+            document.get("model_provider").and_then(Item::as_str),
+            Some("autogateway")
+        );
+        assert!(document
+            .get("model_providers")
+            .and_then(Item::as_table)
+            .and_then(|providers| providers.get("autogateway"))
+            .is_some_and(Item::is_table));
+    }
+
+    #[test]
     fn merges_auth_without_removing_other_values() {
-        let merged = merge_auth(Some(r#"{ "CUSTOM_FIELD": "kept" }"#), "agk_example_secret").expect("merge auth");
+        let merged = merge_auth(Some(r#"{ "CUSTOM_FIELD": "kept" }"#), "agk_example_secret")
+            .expect("merge auth");
         assert!(merged.contains("CUSTOM_FIELD"));
         assert!(merged.contains("OPENAI_API_KEY"));
         assert!(merged.contains("agk_example_secret"));
@@ -384,14 +492,20 @@ base_url = "https://example.com/v1"
 
     #[test]
     fn accepts_https_origins_only() {
-        assert_eq!(normalize_endpoint("https://api.autogateway.cc/"), Ok("https://api.autogateway.cc".to_string()));
+        assert_eq!(
+            normalize_endpoint("https://api.autogateway.cc/"),
+            Ok("https://api.autogateway.cc".to_string())
+        );
         assert!(normalize_endpoint("http://api.autogateway.cc").is_err());
         assert!(normalize_endpoint("https://api.autogateway.cc/?key=value").is_err());
     }
 
     #[test]
     fn lists_newest_backup_first() {
-        let directory = std::env::temp_dir().join(format!("autogateway-codex-backup-test-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!(
+            "autogateway-codex-backup-test-{}",
+            std::process::id()
+        ));
         fs::create_dir_all(&directory).expect("create test directory");
         let config = directory.join("config.toml");
         fs::write(directory.join("config.toml.bak.100"), "old").expect("write old backup");
@@ -403,8 +517,33 @@ base_url = "https://example.com/v1"
     }
 
     #[test]
+    fn restores_files_that_did_not_exist_before_configuration() {
+        let directory = std::env::temp_dir().join(format!(
+            "autogateway-missing-backup-test-{}",
+            std::process::id()
+        ));
+        let config = directory.join("config.toml");
+        fs::create_dir_all(&directory).expect("create test directory");
+        let backup = backup_if_exists(&config)
+            .expect("create missing-file backup")
+            .expect("missing-file backup path");
+        assert!(backup
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".missing"));
+        fs::write(&config, "generated by AUTO Gateway").expect("write generated configuration");
+        restore_from_backup(&backup, &config).expect("restore missing file snapshot");
+        assert!(!config.exists());
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
     fn status_handles_configs_without_model_provider_tables() {
-        let directory = std::env::temp_dir().join(format!("autogateway-codex-status-test-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!(
+            "autogateway-codex-status-test-{}",
+            std::process::id()
+        ));
         fs::create_dir_all(&directory).expect("create test directory");
         let config = directory.join("config.toml");
         let auth = directory.join("auth.json");

@@ -1,12 +1,13 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { listen } from "@tauri-apps/api/event";
-import { ArrowRightIcon, ArrowsClockwiseIcon, CheckCircleIcon, CheckIcon, CircleNotchIcon, CopyIcon, CubeIcon, CurrencyDollarIcon, GearIcon, HouseIcon, UserCircleIcon } from "@phosphor-icons/react";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { ArrowRightIcon, ArrowUUpLeftIcon, ArrowsClockwiseIcon, BugIcon, CheckCircleIcon, CheckIcon, CircleNotchIcon, CopyIcon, CubeIcon, CurrencyDollarIcon, GearIcon, HouseIcon, UserCircleIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { bootstrapDesktopKey, clearStoredDesktopAPIKey, configureCodex, exchangeDesktopAuthorization, getCodexAppStatus, getCodexStatus, getDesktopAccountSummary, installCodex, openCodex, openConsole, restoreDesktopState, restoreLatestCodexBackups, updateTrayStatus, type CodexAppStatus, type CodexInstallProgress, type CodexStatus, type DesktopSession } from "./desktop";
+import { bootstrapDesktopKey, clearDesktopSession, clearStoredDesktopAPIKey, configureCodex, exchangeDesktopAuthorization, getCodexAppStatus, getCodexStatus, getDesktopAccountSummary, getDesktopAppVersion, installCodex, isAuthenticationRequired, openCodex, openConsole, openDevtools, restoreDesktopState, restoreLatestCodexBackups, showMainWindow, updateTrayStatus, type CodexAppStatus, type CodexInstallProgress, type CodexStatus, type DesktopSession } from "./desktop";
 import { readLocalePreference, resolveLocale, translate, writeLocalePreference, type LocalePreference } from "./i18n";
 import { applyTheme, readTheme, writeTheme, type ThemeMode } from "./theme";
 import "./styles.css";
@@ -72,6 +73,91 @@ function formatSyncTime(value: Date | null, locale: "en" | "zh", fallback: strin
   return value.toLocaleTimeString(locale === "zh" ? "zh-CN" : "en-US", { hour: "2-digit", minute: "2-digit" });
 }
 
+function isTrayPopupWindow(): boolean {
+  try {
+    return getCurrentWebviewWindow().label === "tray-popup";
+  } catch {
+    return false;
+  }
+}
+
+function TrayPopup() {
+  const [desktopSession, setDesktopSession] = useState<DesktopSession | null>(null);
+  const [accountBalance, setAccountBalance] = useState("");
+  const [loading, setLoading] = useState(true);
+  const theme = readTheme();
+  const localePreference = readLocalePreference();
+  const locale = resolveLocale(localePreference);
+  const tr = (key: Parameters<typeof translate>[1], values?: Record<string, string | number>) => translate(locale, key, values);
+  const accountName = desktopSession?.user.displayName || desktopSession?.user.name || desktopSession?.user.username || tr("trayLoading");
+  const accountDetail = desktopSession?.user.email || desktopSession?.user.username || "";
+
+  useEffect(() => {
+    document.body.classList.add("tray-popup-body");
+    applyTheme(theme);
+    return () => document.body.classList.remove("tray-popup-body");
+  }, [theme]);
+
+  useEffect(() => {
+    let active = true;
+    async function syncAccount() {
+      try {
+        const stored = await restoreDesktopState();
+        if (!active) return;
+        setDesktopSession(stored?.session ?? null);
+        if (!stored?.session.token) {
+          setAccountBalance(tr("trayUnavailable"));
+          return;
+        }
+        const summary = await getDesktopAccountSummary(stored.session.token);
+        if (active) setAccountBalance(summary.balance);
+      } catch (error) {
+        if (isAuthenticationRequired(error)) {
+          void clearDesktopSession();
+          if (active) setDesktopSession(null);
+          if (active) setAccountBalance(tr("trayUnavailable"));
+        }
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+    void syncAccount();
+    const interval = window.setInterval(() => void syncAccount(), 60_000);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [locale]);
+
+  async function openWorkspace() {
+    await showMainWindow();
+    await getCurrentWebviewWindow().hide();
+  }
+
+  async function quitApplication() {
+    await exit(0);
+  }
+
+  return <main className="trayPopupRoot">
+    <section className="trayCard" role="dialog" aria-label={tr("trayTitle")}>
+      <header className="trayHeader">
+        <img className="trayLogo" src="/site-icon.png" alt="" />
+        <div className="trayBrand"><strong>{tr("trayTitle")}</strong><span>{loading ? tr("trayLoading") : tr("traySignedInAs")}</span></div>
+        <span className={`trayOnlineDot ${desktopSession ? "ready" : ""}`} aria-hidden="true" />
+      </header>
+      <div className="trayAccount">
+        <div className="trayAvatar" aria-hidden="true">{accountName.slice(0, 1).toUpperCase()}</div>
+        <div className="trayAccountInfo"><strong>{accountName}</strong><small>{accountDetail || tr("trayUnavailable")}</small></div>
+        <div className="trayBalance"><span>{tr("trayBalance")}</span><strong>{accountBalance || "—"}</strong></div>
+      </div>
+      <div className="trayActions">
+        <button className="trayPrimaryButton" type="button" onClick={() => void openWorkspace()}>{tr("trayOpenWorkspace")}</button>
+        <button className="traySecondaryButton" type="button" onClick={() => void quitApplication()}>{tr("trayQuit")}</button>
+      </div>
+    </section>
+  </main>;
+}
+
 function App() {
   const [status, setStatus] = useState<CodexStatus | null>(null);
   const [appStatus, setAppStatus] = useState<CodexAppStatus | null>(null);
@@ -83,10 +169,12 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [restoringSession, setRestoringSession] = useState(true);
   const [installingCodex, setInstallingCodex] = useState(false);
+  const [checkingCodexUpdates, setCheckingCodexUpdates] = useState(false);
   const [awaitingStoreInstallation, setAwaitingStoreInstallation] = useState(false);
   const [setupCompleted, setSetupCompleted] = useState(false);
   const [accountBalance, setAccountBalance] = useState("");
   const [balanceSyncedAt, setBalanceSyncedAt] = useState<Date | null>(null);
+  const [desktopAppVersion, setDesktopAppVersion] = useState("");
   const [installProgress, setInstallProgress] = useState<CodexInstallProgress | null>(null);
   const [configurationPhase, setConfigurationPhase] = useState<ConfigurationPhase>("idle");
   const [configurationError, setConfigurationError] = useState("");
@@ -117,6 +205,25 @@ function App() {
   const accountDetail = desktopSession?.user.email || desktopSession?.user.username || "";
   const showHome = setupCompleted && Boolean(desktopSession);
 
+  async function handleSessionExpired() {
+    try {
+      await clearDesktopSession();
+    } catch {
+      // The in-memory state must still be cleared when the local session file cannot be removed.
+    }
+    setDesktopAccessToken("");
+    setDesktopSession(null);
+    setAPIKey("");
+    setAccountBalance("");
+    setBalanceSyncedAt(null);
+    setSetupCompleted(false);
+    setConfigurationPhase("idle");
+    setConfigurationError("");
+    setSelectedStep(1);
+    setMessage(tr("sessionExpired"));
+    void updateTrayStatus("", tr("trayUnavailable"));
+  }
+
   async function refreshStatus(updateMessage = true) {
     try {
       const [nextStatus, nextAppStatus] = await Promise.all([getCodexStatus(), getCodexAppStatus()]);
@@ -125,6 +232,29 @@ function App() {
       if (updateMessage) setMessage(nextStatus.configured ? tr("connected") : tr("notConfigured"));
     } catch (error) {
       setMessage(tr("readStatusFailed", { error: String(error) }));
+    }
+  }
+
+  async function handleCheckCodexUpdates() {
+    if (checkingCodexUpdates || installingCodex) return;
+    setCheckingCodexUpdates(true);
+    setMessage(tr("checkingCodexUpdates"));
+    try {
+      const nextAppStatus = await getCodexAppStatus();
+      setAppStatus(nextAppStatus);
+      if (!nextAppStatus.installed) {
+        setMessage(tr("notInstalled"));
+      } else if (nextAppStatus.updateCheckError) {
+        setMessage(tr("updateCheckUnavailable"));
+      } else if (nextAppStatus.updateAvailable) {
+        setMessage(tr("codexUpdateFound", { version: nextAppStatus.latestVersion || tr("versionUnavailable") }));
+      } else {
+        setMessage(tr("codexUpToDate"));
+      }
+    } catch (error) {
+      setMessage(tr("readStatusFailed", { error: String(error) }));
+    } finally {
+      setCheckingCodexUpdates(false);
     }
   }
 
@@ -158,6 +288,16 @@ function App() {
     setSelectedStep(previewCodexUpdate ? 2 : 3);
     setConfigurationPhase(previewComplete ? "complete" : "configuring");
     setRestoringSession(false);
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    void getDesktopAppVersion().then((version) => {
+      if (active) setDesktopAppVersion(version);
+    });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
@@ -235,7 +375,15 @@ function App() {
     let active = true;
     void restoreDesktopState()
       .then((stored) => {
-        if (!active || !stored) return;
+        if (!active) return;
+        if (!stored) {
+          setDesktopSession(null);
+          setDesktopAccessToken("");
+          setAPIKey("");
+          setSetupCompleted(false);
+          setSelectedStep(1);
+          return;
+        }
         setDesktopSession(stored.session);
         setDesktopAccessToken(stored.session.token);
         setAPIKey(stored.apiKey);
@@ -268,10 +416,14 @@ function App() {
         setAccountBalance(summary.balance);
         setBalanceSyncedAt(new Date());
         void updateTrayStatus(accountName || accountDetail, summary.balance);
-      } catch {
+      } catch (error) {
         if (!active) return;
-        setAccountBalance("");
-        void updateTrayStatus(accountName || accountDetail, tr("balanceUnavailable"));
+        if (isAuthenticationRequired(error)) {
+          void handleSessionExpired();
+          return;
+        }
+        // Keep the last confirmed balance for transient network or server failures.
+        // Authentication failures are handled above and clear the session explicitly.
       }
     }
     void syncAccountBalance();
@@ -414,6 +566,10 @@ function App() {
       await refreshStatus(false);
     } catch (error) {
       const errorMessage = String(error);
+      if (isAuthenticationRequired(error)) {
+        await handleSessionExpired();
+        return;
+      }
       setConfigurationPhase("error");
       setConfigurationError(errorMessage);
       setMessage(tr("configurationFailed", { error: errorMessage }));
@@ -540,6 +696,20 @@ function App() {
     }
   }
 
+  async function handleSwitchBackConfiguration() {
+    if (!window.confirm(tr("switchBackConfirm"))) return;
+    setBusy(true);
+    try {
+      await restoreLatestCodexBackups();
+      await refreshStatus();
+      setMessage(tr("switchedBack"));
+    } catch (error) {
+      setMessage(tr("restoreFailed", { error: String(error) }));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleOpenConsole(section?: "billing") {
     if (!desktopAccessToken) {
       setMessage(tr("signInRequired"));
@@ -548,7 +718,19 @@ function App() {
     try {
       await openConsole(desktopAccessToken, section);
     } catch (error) {
+      if (isAuthenticationRequired(error)) {
+        await handleSessionExpired();
+        return;
+      }
       setMessage(tr("consoleFailed", { error: String(error) }));
+    }
+  }
+
+  async function handleOpenDevtools() {
+    try {
+      await openDevtools();
+    } catch (error) {
+      setMessage(tr("devtoolsFailed", { error: String(error) }));
     }
   }
 
@@ -568,10 +750,11 @@ function App() {
 
   function renderHomeContent() {
     const version = appStatus?.localVersion || tr("versionUnavailable");
+    const versionStatus = !appInstalled ? tr("notInstalled") : appStatus?.updateCheckError ? tr("updateCheckUnavailable") : updateAvailable ? tr("updateAvailable") : tr("upToDate");
     const ready = accountConnected && appInstalled && configured;
     return <main className="homeShell">
       <aside className="homeRail">
-        <div className="homeBrand"><img className="homeBrandLogo" src="/site-icon.png" alt="" /><strong>AUTO Gateway</strong></div>
+        <div className="homeBrand"><img className="homeBrandLogo" src="/site-icon.png" alt="" /><div><strong>AUTO Gateway</strong><small>{tr("desktopAppVersion", { version: desktopAppVersion || "—" })}</small></div></div>
         <nav className="homeNav" aria-label={tr("homeNavigation")}>
           <button className="selected"><HouseIcon weight="bold" />{tr("home")}</button>
           <button onClick={openSetupFromHome}><CubeIcon />{tr("codexSetup")}</button>
@@ -580,7 +763,7 @@ function App() {
         <button className="homeHelp" onClick={() => void openUrl("https://autogateway.cc/docs#codex")}>{tr("needHelp")}</button>
       </aside>
       <section className="homeWorkspace">
-        <header className="topBar homeTopBar"><span className="topStatus" aria-live="polite">{message}</span><button className="userIdentity userIdentityButton" aria-label={`${tr("signedInAs")}: ${accountDetail || accountName}`} onClick={() => void handleOpenConsole()}><span className="userAvatar" aria-hidden="true"><UserCircleIcon weight="fill" /></span><span className="userIdentityText"><strong>{accountName}</strong><small>{accountDetail}</small></span></button><div className="headerBalance" aria-label={tr("accountBalance")}><div className="headerBalanceInfo"><span>{tr("accountBalance")}</span><strong>{accountBalance || tr("balanceUnavailable")}</strong><small>{tr("lastSyncedAt", { time: formatSyncTime(balanceSyncedAt, locale, tr("notSynced")) })}</small></div><button className="headerTopUpButton" onClick={() => void handleOpenConsole("billing")}><CurrencyDollarIcon weight="bold" />{tr("topUpBalance")}</button></div><button className="headerActionButton" aria-label={tr("language")} onClick={toggleLocale}>{locale === "zh" ? "EN" : "中文"}</button><button className="headerActionButton" aria-label={tr("theme")} onClick={cycleTheme}>{theme === "system" ? tr("system") : theme === "light" ? tr("light") : tr("dark")}</button></header>
+        <header className="topBar homeTopBar"><span className="topStatus" aria-live="polite">{message}</span><button className="userIdentity userIdentityButton" aria-label={`${tr("signedInAs")}: ${accountDetail || accountName}`} onClick={() => void handleOpenConsole()}><span className="userAvatar" aria-hidden="true"><UserCircleIcon weight="fill" /></span><span className="userIdentityText"><strong>{accountName}</strong><small>{accountDetail}</small></span></button><div className="headerBalance" aria-label={tr("accountBalance")}><div className="headerBalanceInfo"><span>{tr("accountBalance")}</span><strong>{accountBalance || tr("balanceUnavailable")}</strong><small>{tr("lastSyncedAt", { time: formatSyncTime(balanceSyncedAt, locale, tr("notSynced")) })}</small></div><button className="headerTopUpButton" onClick={() => void handleOpenConsole("billing")}><CurrencyDollarIcon weight="bold" />{tr("topUpBalance")}</button></div><button className="headerActionButton headerDevtoolsButton" aria-label={tr("openDevtools")} title={tr("openDevtools")} onClick={() => void handleOpenDevtools()}><BugIcon weight="bold" /></button><button className="headerActionButton" aria-label={tr("language")} onClick={toggleLocale}>{locale === "zh" ? "EN" : "中文"}</button><button className="headerActionButton" aria-label={tr("theme")} onClick={cycleTheme}>{theme === "system" ? tr("system") : theme === "light" ? tr("light") : tr("dark")}</button></header>
         <section className="homeContent">
           <p className="sectionKicker">{tr("workspace")}</p><h1>{tr("homeTitle")}</h1><p className="lead homeLead">{tr("homeLead")}</p>
           {desktopUpdate ? <section className="notice warning desktopUpdateNotice"><strong>{tr("desktopUpdateAvailable")}</strong><span>{tr("desktopUpdateDescription", { version: desktopUpdate.version })}</span><button className="secondaryButton" disabled={desktopUpdatePhase === "downloading"} onClick={() => void handleInstallDesktopUpdate()}>{desktopUpdatePhase === "downloading" ? tr("desktopUpdating", { percent: desktopUpdateProgress ?? "…" }) : tr("desktopUpdateNow")}</button></section> : null}
@@ -588,18 +771,20 @@ function App() {
           <section className="homeStatusPanel">
             <div className="homeHealth" aria-label={ready ? tr("active") : tr("checking")}><span className={`healthBadge ${ready ? "ready" : ""}`}><CheckCircleIcon weight="fill" /></span><div><span className="statusLabel">{ready ? tr("active") : tr("checking")}</span><strong>{ready ? tr("workspaceReadyTitle") : tr("workspaceCheckingTitle")}</strong><small>{ready ? tr("workspaceReadyDescription") : tr("workspaceCheckingDescription")}</small></div></div>
             <div className="homeMetric"><span>{tr("accountBalance")}</span><strong>{accountBalance || tr("balanceUnavailable")}</strong><small>{tr("lastSyncedAt", { time: formatSyncTime(balanceSyncedAt, locale, tr("notSynced")) })}</small><button onClick={() => void handleOpenConsole("billing")}>{tr("topUpBalance")}</button></div>
-            <div className="homeMetric"><span>{tr("localVersion")}</span><strong>{version}</strong><small>{updateAvailable ? tr("updateAvailable") : tr("upToDate")}</small></div>
+            <div className="homeMetric"><span>{tr("localVersion")}</span><strong>{version}</strong><small>{versionStatus}</small><button className="versionAction" disabled={checkingCodexUpdates || installingCodex || !appInstalled} onClick={() => void handleCheckCodexUpdates()}>{checkingCodexUpdates ? tr("checkingCodexUpdates") : tr("checkNow")}</button>{updateAvailable ? <button className="versionAction versionUpdateAction" disabled={installingCodex} onClick={() => void handleInstallCodex(true)}>{installingCodex ? tr("updatingCodex") : tr("updateNow")}</button> : null}</div>
             <button className="primaryButton homeOpenButton" disabled={!appInstalled} onClick={() => void handleOpenCodex()}>{tr("openCodex")}</button>
           </section>
           <section className="homeSection"><h2>{tr("quickActions")}</h2><div className="quickActions">
             <button onClick={() => void handleOpenConsole()}><UserCircleIcon /><span><strong>{tr("openConsole")}</strong><small>{tr("openConsoleDescription")}</small></span><ArrowRightIcon /></button>
-            <button onClick={() => void refreshStatus(false)}><ArrowsClockwiseIcon /><span><strong>{tr("checkUpdates")}</strong><small>{tr("checkUpdatesDescription")}</small></span><ArrowRightIcon /></button>
+            <button onClick={() => void handleCheckCodexUpdates()} disabled={checkingCodexUpdates || installingCodex || !appInstalled}><ArrowsClockwiseIcon /><span><strong>{tr("checkUpdates")}</strong><small>{tr("checkUpdatesDescription")}</small></span><ArrowRightIcon /></button>
+            {updateAvailable ? <button onClick={() => void handleInstallCodex(true)} disabled={installingCodex}><ArrowsClockwiseIcon /><span><strong>{installingCodex ? tr("updatingCodex") : tr("updateNow")}</strong><small>{tr("updateAvailableDescription")}</small></span><ArrowRightIcon /></button> : null}
             <button onClick={openSetupFromHome}><GearIcon /><span><strong>{tr("reconfigureCodex")}</strong><small>{tr("reconfigureCodexDescription")}</small></span><ArrowRightIcon /></button>
+            <button disabled={busy || backupCount === 0} onClick={() => void handleSwitchBackConfiguration()}><ArrowUUpLeftIcon /><span><strong>{tr("switchBackConfiguration")}</strong><small>{tr("switchBackConfigurationDescription")}</small></span><ArrowRightIcon /></button>
           </div></section>
           <section className="homeSection"><h2>{tr("recentSetup")}</h2><div className="recentSetup">
             <div><CheckIcon weight="bold" /><strong>{tr("connectedAccount")}</strong><span>{accountDetail}</span></div>
             <div><CheckIcon weight="bold" /><strong>{tr("codexConfigured")}</strong><span>{configured ? tr("configured") : tr("notConfigured")}</span></div>
-            <div><CheckIcon weight="bold" /><strong>{tr("versionUpToDate")}</strong><span>{updateAvailable ? tr("updateAvailable") : tr("upToDate")}</span></div>
+            <div><CheckIcon weight="bold" /><strong>{tr("versionUpToDate")}</strong><span>{versionStatus}</span></div>
           </div></section>
         </section>
       </section>
@@ -620,57 +805,64 @@ function App() {
 
   function renderSetupContent() {
     if (selectedStep === 1) {
-      return <section className="setupContent heroContent">
-        <div className="heroCopy">
-          <p className="sectionKicker heroKicker">{tr("secureSignIn")}</p>
+      return <section className="setupContent">
+        <div className="setupBody">
+          <p className="sectionKicker">{tr("secureSignIn")}</p>
           <h1>{tr("connectTitle")}</h1>
           <p className="lead">{tr("connectLead")}</p>
-          <button className="primaryButton" disabled={busy || restoringSession} onClick={() => accountConnected ? selectStep(2) : void handleStartSignIn()}>{restoringSession ? tr("restoringSession") : accountConnected ? tr("continueToCodex") : busy ? tr("openingBrowser") : tr("continueInBrowser")}</button>
-          <p className="inlineStatus"><span className="statusDot" />{accountConnected ? tr("accountConnected") : tr("noAccount")}</p>
+          <div className={`notice setupNotice ${accountConnected ? "success" : ""}`}><strong>{accountConnected ? tr("accountConnected") : tr("noAccount")}</strong><span>{accountConnected ? tr("sessionRestored") : tr("completeInBrowser")}</span></div>
         </div>
+        <div className="buttonRow setupActions"><button className="primaryButton" disabled={busy || restoringSession} onClick={() => accountConnected ? selectStep(2) : void handleStartSignIn()}>{restoringSession ? tr("restoringSession") : accountConnected ? tr("continueToCodex") : busy ? tr("openingBrowser") : tr("continueInBrowser")}</button></div>
       </section>;
     }
     if (selectedStep === 2) {
-      return <section className="setupContent taskContent">
-        <p className="sectionKicker">{tr("officialDesktopApp")}</p>
-        <h1>{tr("installTitle")}</h1>
-        <p className="lead">{tr("installLead")}</p>
-        <div className={appInstalled && !updateAvailable ? "notice success installNotice" : "notice warning installNotice"}>
-          <strong>{updateAvailable ? tr("updateAvailable") : appInstalled ? appStatus?.updateAvailable === false ? tr("upToDate") : tr("installed") : tr("notInstalled")}</strong>
-          <span>{updateAvailable ? tr("updateAvailableDescription") : appInstalled ? appStatus?.updateCheckError ? tr("updateCheckUnavailable") : tr("installedDescription") : appStatus ? tr("notInstalledDescription") : tr("checkingInstallation")}</span>
-          {appInstalled ? <div className="versionGrid" aria-label={tr("installed")}>
-            <div className="versionItem"><span>{tr("localVersion")}</span><strong>{appStatus?.localVersion || tr("versionUnavailable")}</strong></div>
-            <div className="versionItem"><span>{tr("latestVersion")}</span><strong>{appStatus?.latestVersion || tr("versionUnavailable")}</strong></div>
-            {updateAvailable ? <button className="secondaryButton updateButton versionUpdateButton" disabled={installingCodex} onClick={() => void handleInstallCodex(true)}>{installingCodex ? installPercent === undefined ? tr("updatingCodex") : `${tr("updatingCodex")} ${installPercent}%` : tr("updateNow")}</button> : null}
-          </div> : null}
-          {installingCodex ? <div className="installProgress" aria-live="polite"><progress max="100" value={installPercent} /><small>{installPercent === undefined ? tr("working") : tr("downloadPercent", { percent: installPercent })}</small></div> : null}
-          {awaitingStoreInstallation ? <div className="installProgress" aria-live="polite"><small>{tr("storeInstallationInProgress")}</small></div> : null}
+      return <section className="setupContent">
+        <div className="setupBody">
+          <p className="sectionKicker">{tr("officialDesktopApp")}</p>
+          <h1>{tr("installTitle")}</h1>
+          <p className="lead">{tr("installLead")}</p>
+          <div className={appInstalled && !updateAvailable ? "notice success installNotice setupNotice" : "notice warning installNotice setupNotice"}>
+            <strong>{updateAvailable ? tr("updateAvailable") : appInstalled ? appStatus?.updateAvailable === false ? tr("upToDate") : tr("installed") : tr("notInstalled")}</strong>
+            <span>{updateAvailable ? tr("updateAvailableDescription") : appInstalled ? appStatus?.updateCheckError ? tr("updateCheckUnavailable") : tr("installedDescription") : appStatus ? tr("notInstalledDescription") : tr("checkingInstallation")}</span>
+            {appInstalled ? <div className="versionGrid" aria-label={tr("installed")}>
+              <div className="versionItem"><span>{tr("localVersion")}</span><strong>{appStatus?.localVersion || tr("versionUnavailable")}</strong></div>
+              <div className="versionItem"><span>{tr("latestVersion")}</span><strong>{appStatus?.latestVersion || tr("versionUnavailable")}</strong></div>
+              <button className="secondaryButton updateButton versionUpdateButton" disabled={checkingCodexUpdates || installingCodex} onClick={() => void handleCheckCodexUpdates()}>{checkingCodexUpdates ? tr("checkingCodexUpdates") : tr("checkNow")}</button>
+              {updateAvailable ? <button className="secondaryButton primaryUpdateButton versionUpdateButton" disabled={installingCodex} onClick={() => void handleInstallCodex(true)}>{installingCodex ? installPercent === undefined ? tr("updatingCodex") : `${tr("updatingCodex")} ${installPercent}%` : tr("updateNow")}</button> : null}
+            </div> : null}
+            {installingCodex ? <div className="installProgress" aria-live="polite"><progress max="100" value={installPercent} /><small>{installPercent === undefined ? tr("working") : tr("downloadPercent", { percent: installPercent })}</small></div> : null}
+            {awaitingStoreInstallation ? <div className="installProgress" aria-live="polite"><small>{tr("storeInstallationInProgress")}</small></div> : null}
+          </div>
         </div>
-        <div className="buttonRow"><button className="secondaryButton" onClick={() => selectStep(1)}>{tr("previous")}</button>{appInstalled ? <button className="primaryButton" disabled={installingCodex} onClick={() => selectStep(3)}>{tr("next")}</button> : awaitingStoreInstallation ? <button className="primaryButton" onClick={() => void checkStoreInstallation()}>{tr("checkInstallation")}</button> : <button className="primaryButton" disabled={installingCodex} onClick={() => void handleInstallCodex()}>{installingCodex ? installPercent === undefined ? tr("installingCodex") : `${tr("installingCodex")} ${installPercent}%` : tr("installAutomatically")}</button>}</div>
+        <div className="buttonRow setupActions"><button className="secondaryButton" onClick={() => selectStep(1)}>{tr("previous")}</button>{appInstalled ? <button className="primaryButton" disabled={installingCodex} onClick={() => selectStep(3)}>{tr("next")}</button> : awaitingStoreInstallation ? <button className="primaryButton" onClick={() => void checkStoreInstallation()}>{tr("checkInstallation")}</button> : <button className="primaryButton" disabled={installingCodex} onClick={() => void handleInstallCodex()}>{installingCodex ? installPercent === undefined ? tr("installingCodex") : `${tr("installingCodex")} ${installPercent}%` : tr("installAutomatically")}</button>}</div>
       </section>;
     }
     if (selectedStep === 3) {
       const configurationRunning = configurationPhase === "creatingKey" || configurationPhase === "configuring";
       const noticeTitle = configurationPhase === "creatingKey" ? tr("creatingAPIKey") : configurationPhase === "configuring" ? tr("automaticConfiguring") : configurationPhase === "complete" ? tr("automaticConfigurationComplete") : configurationPhase === "error" ? tr("automaticConfigurationFailed") : tr("preparingConfiguration");
       const noticeDescription = configurationPhase === "creatingKey" ? tr("creatingAPIKeyDescription") : configurationPhase === "configuring" ? tr("automaticConfiguringDescription") : configurationPhase === "complete" ? tr("automaticConfigurationCompleteDescription") : configurationPhase === "error" ? tr("automaticConfigurationFailedDescription", { error: configurationError }) : tr("preparingConfigurationDescription");
-      return <section className="setupContent taskContent configurationContent">
-        <p className="sectionKicker">{tr("safeConfiguration")}</p>
-        <h1>{tr("configureTitle")}</h1>
-        <p className="lead">{tr("configureLead")}</p>
-        <div className={`notice configurationNotice ${configurationPhase === "error" ? "warning" : "success"}`}>
-          <strong>{noticeTitle}</strong>
-          <span>{noticeDescription}</span>
-          {apiKey ? <div className="apiKeyReveal"><label>{tr("generatedAPIKey")}</label><div><code>{apiKey}</code><button type="button" onClick={() => void handleCopyAPIKey()} aria-label={tr("copyAPIKey")}>{apiKeyCopied ? <CheckIcon aria-hidden="true" weight="bold" /> : <CopyIcon aria-hidden="true" weight="bold" />}<span>{apiKeyCopied ? tr("copiedAPIKey") : tr("copyAPIKey")}</span></button></div></div> : null}
+      return <section className="setupContent">
+        <div className="setupBody">
+          <p className="sectionKicker">{tr("safeConfiguration")}</p>
+          <h1>{tr("configureTitle")}</h1>
+          <p className="lead">{tr("configureLead")}</p>
+          <div className={`notice setupNotice configurationNotice ${configurationPhase === "error" ? "warning" : "success"}`}>
+            <strong>{noticeTitle}</strong>
+            <span>{noticeDescription}</span>
+            {apiKey ? <div className="apiKeyReveal"><label>{tr("generatedAPIKey")}</label><div><code>{apiKey}</code><button type="button" onClick={() => void handleCopyAPIKey()} aria-label={tr("copyAPIKey")}>{apiKeyCopied ? <CheckIcon aria-hidden="true" weight="bold" /> : <CopyIcon aria-hidden="true" weight="bold" />}<span>{apiKeyCopied ? tr("copiedAPIKey") : tr("copyAPIKey")}</span></button></div></div> : null}
+          </div>
         </div>
-        <div className="buttonRow"><button className="secondaryButton" disabled={configurationRunning} onClick={() => selectStep(2)}>{tr("previous")}</button>{configurationPhase === "complete" ? <button className="primaryButton" onClick={handleConfigurationNext}>{tr("next")}</button> : configurationPhase === "error" ? <button className="primaryButton" onClick={() => void runAutomaticConfiguration()}>{tr("retryConfiguration")}</button> : <button className="primaryButton configurationLoadingButton" disabled><CircleNotchIcon aria-hidden="true" weight="bold" />{tr("configuring")}</button>}</div>
+        <div className="buttonRow setupActions"><button className="secondaryButton" disabled={configurationRunning} onClick={() => selectStep(2)}>{tr("previous")}</button>{configurationPhase === "complete" ? <button className="primaryButton" onClick={handleConfigurationNext}>{tr("next")}</button> : configurationPhase === "error" ? <button className="primaryButton" onClick={() => void runAutomaticConfiguration()}>{tr("retryConfiguration")}</button> : <button className="primaryButton configurationLoadingButton" disabled><CircleNotchIcon aria-hidden="true" weight="bold" />{tr("configuring")}</button>}</div>
       </section>;
     }
-    return <section className="setupContent taskContent completionContent">
-      <p className="sectionKicker">{tr("setupComplete")}</p>
-      <h1>{tr("completeTitle")}</h1>
-      <p className="lead">{tr("completeLead")}</p>
-      <div className="notice success"><strong>{configured ? tr("configured") : tr("readyToVerify")}</strong><span>{message}</span></div>
-        <div className="buttonRow"><button className="secondaryButton" onClick={() => selectStep(3)}>{tr("previous")}</button><button className="primaryButton" disabled={!appInstalled || !configured} onClick={enterWorkspace}>{tr("enterWorkspace")}</button><button className="secondaryButton" disabled={!desktopAccessToken} onClick={() => void handleOpenConsole()}>{tr("openConsole")}</button></div>
+    return <section className="setupContent">
+      <div className="setupBody">
+        <p className="sectionKicker">{tr("setupComplete")}</p>
+        <h1>{tr("completeTitle")}</h1>
+        <p className="lead">{tr("completeLead")}</p>
+        <div className="notice success setupNotice"><strong>{configured ? tr("configured") : tr("readyToVerify")}</strong><span>{message}</span></div>
+      </div>
+      <div className="buttonRow setupActions"><button className="secondaryButton" onClick={() => selectStep(3)}>{tr("previous")}</button><button className="primaryButton" disabled={!appInstalled || !configured} onClick={enterWorkspace}>{tr("enterWorkspace")}</button></div>
     </section>;
   }
 
@@ -686,10 +878,10 @@ function App() {
       </nav>
     </aside>
     <section className="workspace">
-      <header className="topBar"><span className="topStatus" aria-live="polite">{busy || installingCodex || restoringSession ? tr("working") : message}</span>{desktopSession ? <button className="userIdentity userIdentityButton" aria-label={`${tr("signedInAs")}: ${accountDetail || accountName}`} onClick={() => void handleOpenConsole()}><span className="userAvatar" aria-hidden="true"><UserCircleIcon weight="fill" /></span><span className="userIdentityText"><strong>{accountName}</strong><small>{accountDetail}</small></span></button> : null}<button className="headerActionButton" aria-label={tr("language")} onClick={toggleLocale}>{locale === "zh" ? "EN" : "中文"}</button><button className="headerActionButton" aria-label={tr("theme")} onClick={cycleTheme}>{theme === "system" ? tr("system") : theme === "light" ? tr("light") : tr("dark")}</button><button className="helpButton" onClick={() => void openUrl("https://autogateway.cc/docs#codex")}>{tr("needHelp")}</button></header>
+      <header className="topBar"><span className="topStatus" aria-live="polite">{busy || installingCodex || checkingCodexUpdates || restoringSession ? tr("working") : message}</span>{desktopSession ? <button className="userIdentity userIdentityButton" aria-label={`${tr("signedInAs")}: ${accountDetail || accountName}`} onClick={() => void handleOpenConsole()}><span className="userAvatar" aria-hidden="true"><UserCircleIcon weight="fill" /></span><span className="userIdentityText"><strong>{accountName}</strong><small>{accountDetail}</small></span></button> : null}<button className="headerActionButton headerDevtoolsButton" aria-label={tr("openDevtools")} title={tr("openDevtools")} onClick={() => void handleOpenDevtools()}><BugIcon weight="bold" /></button><button className="headerActionButton" aria-label={tr("language")} onClick={toggleLocale}>{locale === "zh" ? "EN" : "中文"}</button><button className="headerActionButton" aria-label={tr("theme")} onClick={cycleTheme}>{theme === "system" ? tr("system") : theme === "light" ? tr("light") : tr("dark")}</button></header>
       {showSettings ? <section className="settingsContent"><p className="sectionKicker">{tr("settings")}</p><h1>{tr("connectionRecovery")}</h1><p className="lead">{tr("connectionRecoveryLead")}</p><div className="preferencesPanel"><strong>{tr("appearance")}</strong><label className="fieldLabel">{tr("theme")}<select value={theme} onChange={(event) => changeTheme(event.target.value as ThemeMode)}><option value="system">{tr("system")}</option><option value="light">{tr("light")}</option><option value="dark">{tr("dark")}</option></select></label><label className="fieldLabel">{tr("language")}<select value={localePreference} onChange={(event) => changeLocale(event.target.value as LocalePreference)}><option value="system">{tr("automatic")}</option><option value="zh">{tr("chinese")}</option><option value="en">{tr("english")}</option></select></label></div><label className="fieldLabel">{tr("endpoint")}<input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} autoComplete="url" /></label><div className="settingsDivider" /><div className="recoveryRow"><div><strong>{tr("backups")}</strong><span>{tr("backupsAvailable", { count: backupCount, suffix: backupCount === 1 ? "" : "s" })}</span></div><button className="secondaryButton" disabled={busy || backupCount === 0} onClick={() => void handleRestoreBackups()}>{tr("restoreLatest")}</button></div><button className="secondaryButton backButton" onClick={() => setShowSettings(false)}>{tr("backToSetup")}</button></section> : renderSetupContent()}
     </section>
   </main>;
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(isTrayPopupWindow() ? <TrayPopup /> : <App />);

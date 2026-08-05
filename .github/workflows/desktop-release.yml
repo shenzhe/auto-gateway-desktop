@@ -1,0 +1,221 @@
+name: Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version matching package.json
+        required: true
+        type: string
+      release_notes:
+        description: Release notes shown by the in-app updater
+        required: false
+        default: Bug fixes and improvements.
+        type: string
+  push:
+    tags:
+      - "desktop-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  macos:
+    name: Build, sign, and notarize macOS
+    runs-on: macos-14
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    env:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - id: release
+        name: Validate release version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          if [[ -z "$version" ]]; then
+            version="${GITHUB_REF_NAME#desktop-v}"
+          fi
+          package_version="$(node -p "require('./package.json').version")"
+          cargo_version="$(awk -F ' = ' '/^version = / { gsub(/\"/, "", $2); print $2; exit }' src-tauri/Cargo.toml)"
+          tauri_version="$(jq -r '.version' src-tauri/tauri.conf.json)"
+          if [[ "$version" != "$package_version" || "$version" != "$cargo_version" || "$version" != "$tauri_version" ]]; then
+            echo "Release version must match package.json, Cargo.toml, and tauri.conf.json." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Import Developer ID certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/autogateway-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/autogateway-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" | grep -F 'Developer ID Application: WANG JING (UFC4M35743)'
+          printf '%s' "$APPLE_NOTARY_KEY_BASE64" | base64 -D > "$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          echo "APPLE_SIGNING_IDENTITY=Developer ID Application: WANG JING (UFC4M35743)" >> "$GITHUB_ENV"
+          echo "NOTARY_KEY_PATH=$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8" >> "$GITHUB_ENV"
+
+      - name: Build signed macOS application
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run tauri build -- --target aarch64-apple-darwin --bundles app
+
+      - name: Notarize and staple the application
+        shell: bash
+        env:
+          APP_PATH: src-tauri/target/aarch64-apple-darwin/release/bundle/macos/AUTO Gateway Desktop.app
+        run: bash scripts/notarize-macos.sh
+
+      - name: Write updater signing key
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > "$RUNNER_TEMP/tauri-updater.key"
+          chmod 600 "$RUNNER_TEMP/tauri-updater.key"
+
+      - name: Create notarized installer and updater archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.release.outputs.version }}"
+          app_path="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/AUTO Gateway Desktop.app"
+          release_dir="$RUNNER_TEMP/release"
+          mkdir -p "$release_dir"
+          dmg="$release_dir/AUTO Gateway Desktop_${version}_aarch64.dmg"
+          archive="$release_dir/AUTO Gateway Desktop_${version}_aarch64.app.tar.gz"
+          hdiutil create -volname "AUTO Gateway Desktop" -srcfolder "$app_path" -ov -format UDZO "$dmg"
+          tar -C "$(dirname "$app_path")" -czf "$archive" "$(basename "$app_path")"
+          ./node_modules/.bin/tauri signer sign --private-key-path "$RUNNER_TEMP/tauri-updater.key" --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$archive"
+
+      - name: Publish macOS build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos-${{ steps.release.outputs.version }}
+          path: ${{ runner.temp }}/release/*
+          if-no-files-found: error
+
+  windows:
+    name: Build Windows
+    runs-on: windows-2022
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - id: release
+        name: Validate release version
+        shell: pwsh
+        run: |
+          $version = '${{ inputs.version }}'
+          if ([string]::IsNullOrWhiteSpace($version)) { $version = $env:GITHUB_REF_NAME -replace '^desktop-v', '' }
+          $packageVersion = node -p "require('./package.json').version"
+          $cargoVersion = ((Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value)
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          if ($version -ne $packageVersion -or $version -ne $cargoVersion -or $version -ne $tauriVersion) { throw 'Release version must match package.json, Cargo.toml, and tauri.conf.json.' }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          npm ci
+          npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
+
+      - name: Collect Windows release files
+        shell: pwsh
+        run: |
+          $version = '${{ steps.release.outputs.version }}'
+          $source = Get-ChildItem -Path src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter '*-setup.exe' | Select-Object -First 1
+          if ($null -eq $source) { throw 'The Windows NSIS installer was not produced.' }
+          $releaseDir = Join-Path $env:RUNNER_TEMP 'release'
+          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+          $target = Join-Path $releaseDir "AUTO Gateway Desktop_$version`_x64-setup.exe"
+          Copy-Item $source.FullName $target
+          Copy-Item "$($source.FullName).sig" "$target.sig"
+
+      - name: Publish Windows build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-${{ steps.release.outputs.version }}
+          path: ${{ runner.temp }}/release/*
+          if-no-files-found: error
+
+  publish-r2:
+    name: Publish artifacts to R2
+    needs: [macos, windows]
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ needs.macos.outputs.version }}
+      RELEASE_NOTES: ${{ inputs.release_notes || 'Bug fixes and improvements.' }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      AWS_EC2_METADATA_DISABLED: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: release
+          merge-multiple: true
+
+      - name: Publish artifacts and updater manifest
+        shell: bash
+        env:
+          RELEASE_DIR: ${{ github.workspace }}/release
+        run: bash scripts/publish-r2.sh

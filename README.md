@@ -15,36 +15,81 @@ This directory contains the Tauri desktop application for onboarding AUTO Gatewa
 
 The desktop updater uses Tauri's signed update artifacts. The public verification key is committed in `src-tauri/tauri.conf.json`; the private signing key must stay outside the repository and be supplied only by a release machine or CI secret. The configured static manifest URL is `https://cdn.autogateway.cc/downloads/desktop/latest.json`.
 
-The macOS bundle declares native PNG and ICNS assets, and the Windows NSIS installer explicitly uses the website-derived ICO asset for both install and uninstall screens. Local Codex status detection tolerates incomplete or custom `config.toml` files. Version 0.1.1 fixes a startup panic caused by missing `model_providers` entries in existing Codex configuration files. Version 0.1.2 introduces the guided setup-wizard UI. Version 0.1.3 applies the AUTO Gateway website color tokens and adds system-aware themes and Chinese/English UI.
+The macOS bundle declares native PNG and ICNS assets, and the Windows NSIS installer explicitly uses the website-derived ICO asset for both install and uninstall screens. During an upgrade, the installer recreates desktop and Start menu shortcuts so Windows refreshes the embedded AUTO Gateway icon instead of retaining a stale shortcut icon. Local Codex status detection tolerates incomplete or custom `config.toml` files. Version 0.1.1 fixes a startup panic caused by missing `model_providers` entries in existing Codex configuration files. Version 0.1.2 introduces the guided setup-wizard UI. Version 0.1.3 applies the AUTO Gateway website color tokens and adds system-aware themes and Chinese/English UI.
+
+On Windows, Codex installation and updates first use the official Microsoft Store product through WinGet (`9PLM9XGG6VKS`) so an existing package is upgraded in place. If WinGet is unavailable, the app falls back to the official Microsoft installer and Store flow.
+
+The Codex installer download uses `GET https://api.autogateway.cc/public/api/desktop/codex-version` for the platform version and download candidates. The server mirrors the official macOS DMG and Windows Microsoft installer stub to Cloudflare R2 every three hours; the desktop app tries the advertised `downloadUrl` first and then `fallbackUrl` from the official source. If the version service or R2 is unavailable, the built-in official URL remains the final fallback.
 
 ## Signed desktop releases
 
 Create updater artifacts with the same private key for every release. Do not commit the key or place it in the application bundle:
 
 ```bash
-TAURI_SIGNING_PRIVATE_KEY="$(< /secure/path/desktop-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(< /secure/path/desktop-updater.key.password)" npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
+TAURI_SIGNING_PRIVATE_KEY="$(< /secure/path/desktop-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(< /secure/path/desktop-updater.key.password)" npm run tauri build -- --target x86_64-pc-windows-msvc --runner cargo-xwin --bundles nsis
 TAURI_SIGNING_PRIVATE_KEY="$(< /secure/path/desktop-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(< /secure/path/desktop-updater.key.password)" npm run tauri build -- --bundles app
 ```
+
+The Windows package can be built from macOS with `cargo-xwin` 0.23 or newer. It supplies the Windows CRT and SDK through the local xwin cache, while `clang-cl` and `lld-link` provide the compiler and linker. Install the tool and LLVM/NSIS once, then run:
+
+```bash
+rustup target add x86_64-pc-windows-msvc
+cargo install cargo-xwin --locked
+eval "$(cargo xwin env --target x86_64-pc-windows-msvc)"
+TAURI_SIGNING_PRIVATE_KEY="$(< /secure/path/desktop-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(< /secure/path/desktop-updater.key.password)" npm run tauri build -- --target x86_64-pc-windows-msvc --runner cargo-xwin --bundles nsis
+```
+
+On a native Windows release host with Visual Studio Build Tools and the Windows SDK installed, use the same Tauri command without `--runner cargo-xwin`.
 
 The release job must publish each generated installer artifact and its `.sig` file, then update `latest.json` at the configured URL. A static manifest has this shape:
 
 ```json
 {
-  "version": "0.1.19",
+  "version": "0.1.23",
   "notes": "Bug fixes and improvements.",
   "pub_date": "2026-08-05T00:00:00Z",
   "platforms": {
     "windows-x86_64": {
-      "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop_0.1.19_x64-setup.exe",
+      "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop_0.1.23_x64-setup.exe",
       "signature": "<contents of the matching .sig file>"
     },
     "darwin-aarch64": {
-      "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop.app.tar.gz",
+      "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop_0.1.23_aarch64.app.tar.gz",
       "signature": "<contents of the matching .sig file>"
     }
   }
 }
 ```
+
+## GitHub Actions release pipeline
+
+`.github/workflows/desktop-release.yml` creates a distribution release without relying on a developer workstation:
+
+1. The macOS job imports the existing `Developer ID Application: WANG JING (UFC4M35743)` certificate, signs the Apple Silicon app, submits it to Apple notarization, staples the accepted ticket to the app, and produces a DMG plus a Tauri updater archive.
+2. The Windows job builds the x64 NSIS installer on a native Windows runner and creates its Tauri updater signature.
+3. The publish job downloads both verified artifacts, uploads them to R2, and only then writes `downloads/desktop/latest.json`. This prevents the updater from seeing a release with one platform missing.
+
+Create the following repository secrets before dispatching the workflow. Secrets must be set in GitHub; never commit certificates, private keys, or R2 credentials.
+
+| Secret | Value |
+| --- | --- |
+| `APPLE_CERTIFICATE_BASE64` | Base64-encoded `.p12` export of `Developer ID Application: WANG JING (UFC4M35743)`. |
+| `APPLE_CERTIFICATE_PASSWORD` | Password chosen for that `.p12` export. |
+| `APPLE_NOTARY_KEY_BASE64` | Base64-encoded App Store Connect API key `.p8` file. |
+| `APPLE_NOTARY_KEY_ID` | App Store Connect API key ID. |
+| `APPLE_NOTARY_ISSUER_ID` | App Store Connect issuer ID. |
+| `TAURI_SIGNING_PRIVATE_KEY` | Existing Tauri updater private key contents. |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the Tauri updater private key. |
+| `R2_ENDPOINT` | S3-compatible Cloudflare R2 endpoint. |
+| `R2_BUCKET` | R2 bucket name. |
+| `R2_ACCESS_KEY_ID` | R2 API token access key ID with object read/write permission. |
+| `R2_SECRET_ACCESS_KEY` | R2 API token secret access key. |
+
+Also create the repository variable `R2_PUBLIC_BASE_URL`, for example `https://cdn.autogateway.cc`.
+
+To authorize the current signing identity for CI, export it once on a trusted Mac as a password-protected `.p12`, base64-encode the file, and save the result as `APPLE_CERTIFICATE_BASE64`. Create a narrowly scoped App Store Connect API key with access to notarization, base64-encode its `.p8` file, and save it as `APPLE_NOTARY_KEY_BASE64`. The workflow does not use the local login keychain after those secrets are configured.
+
+Dispatch **Desktop Release** in GitHub Actions with the version already present in `package.json`, `Cargo.toml`, and `tauri.conf.json`, or push a matching `desktop-v<version>` tag. The workflow rejects mismatched versions before building.
 
 ## Standalone repository migration
 
