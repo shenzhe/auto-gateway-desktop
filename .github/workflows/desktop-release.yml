@@ -122,9 +122,11 @@ jobs:
           mkdir -p "$release_dir"
           dmg="$release_dir/AUTO Gateway Desktop_${version}_aarch64.dmg"
           archive="$release_dir/AUTO Gateway Desktop_${version}_aarch64.app.tar.gz"
+          signing_password="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
           hdiutil create -volname "AUTO Gateway Desktop" -srcfolder "$app_path" -ov -format UDZO "$dmg"
           tar -C "$(dirname "$app_path")" -czf "$archive" "$(basename "$app_path")"
-          ./node_modules/.bin/tauri signer sign --private-key-path "$RUNNER_TEMP/tauri-updater.key" --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$archive"
+          env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PASSWORD \
+            ./node_modules/.bin/tauri signer sign --private-key-path "$RUNNER_TEMP/tauri-updater.key" --password "$signing_password" "$archive"
 
       - name: Publish macOS build artifact
         uses: actions/upload-artifact@v4
