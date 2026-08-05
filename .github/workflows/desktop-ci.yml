@@ -63,7 +63,7 @@ jobs:
       - name: Build unsigned macOS application
         run: |
           npm ci
-          npm run tauri build -- --target aarch64-apple-darwin --bundles app
+          npm run tauri build -- --target aarch64-apple-darwin --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       - name: Run Rust tests
         working-directory: src-tauri
@@ -95,4 +95,4 @@ jobs:
         shell: pwsh
         run: |
           npm ci
-          npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
+          npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'

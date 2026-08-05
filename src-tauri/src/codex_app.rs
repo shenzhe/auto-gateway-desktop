@@ -167,8 +167,9 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
 
     let preferred_destination = existing_installation.map(|installation| installation.path);
     emit_install_progress(app, "installing", 0, None);
+    let installer_path = download_path.clone();
     let install_result = tauri::async_runtime::spawn_blocking(move || {
-        install_downloaded_app(&download_path, preferred_destination.as_deref())
+        install_downloaded_app(&installer_path, preferred_destination.as_deref())
     })
     .await
     .map_err(|error| format!("wait for the official ChatGPT installer: {error}"))?;
@@ -535,7 +536,8 @@ fn download_extension(_download_urls: &[String]) -> &'static str {
 fn download_extension(download_urls: &[String]) -> &'static str {
     let uses_msix = download_urls.iter().any(|url| {
         url.split_once('?')
-            .map_or(url, |(path, _)| path)
+            .map(|(path, _)| path)
+            .unwrap_or(url.as_str())
             .to_ascii_lowercase()
             .ends_with(".msix")
     });
