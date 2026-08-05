@@ -19,7 +19,7 @@ The macOS bundle declares native PNG and ICNS assets, and the Windows NSIS insta
 
 On Windows, Codex installation and updates first use the official Microsoft Store product through WinGet (`9PLM9XGG6VKS`) so an existing package is upgraded in place. If WinGet is unavailable, the app falls back to the official Microsoft installer and Store flow.
 
-The Codex installer download uses `GET https://api.autogateway.cc/public/api/desktop/codex-version` for the platform version and download candidates. The server mirrors the official macOS DMG and Windows Microsoft installer stub to Cloudflare R2 every three hours; the desktop app tries the advertised `downloadUrl` first and then `fallbackUrl` from the official source. If the version service or R2 is unavailable, the built-in official URL remains the final fallback.
+The Codex installer download uses `GET https://api.autogateway.cc/public/api/desktop/codex-version` for the platform version and download candidates. The server mirrors the official macOS DMG and Windows installer executable to Cloudflare R2 every three hours. The desktop app downloads the advertised R2 `downloadUrl` first. On Windows, an unavailable or failed R2 installer falls back to Microsoft Store; on macOS, the official DMG URL remains the final fallback.
 
 ## Signed desktop releases
 

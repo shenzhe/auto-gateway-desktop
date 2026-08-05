@@ -21,9 +21,6 @@ use tauri::{AppHandle, Emitter};
 const MACOS_DOWNLOAD_URL: &str = "https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg";
 const CODEX_VERSION_API_URL: &str = "https://api.autogateway.cc/public/api/desktop/codex-version";
 #[cfg(target_os = "windows")]
-const WINDOWS_DOWNLOAD_URL: &str =
-    "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi";
-#[cfg(target_os = "windows")]
 const WINDOWS_STORE_PRODUCT_ID: &str = "9PLM9XGG6VKS";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -136,51 +133,21 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
         });
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        // WinGet talks to the Microsoft Store catalog directly and can upgrade an
-        // existing Store package in place. This avoids the delete-then-install flow
-        // and keeps the user's package registration and data intact.
-        emit_install_progress(app, "installing", 0, None);
-        let winget_result =
-            tauri::async_runtime::spawn_blocking(move || install_with_winget(force_update))
-                .await
-                .map_err(|error| format!("wait for the Windows package upgrade: {error}"))?;
-        if winget_result.is_ok() {
-            emit_install_progress(app, "verifying", 0, None);
-            let status = status().await;
-            if status.installed {
-                if force_update {
-                    if let (Some(expected), Some(installed)) = (
-                        status.latest_version.as_deref(),
-                        status.local_version.as_deref(),
-                    ) {
-                        if compare_versions(installed, expected) == Ordering::Less {
-                            return Err(format!("the update finished, but version {installed} is still installed; expected {expected}"));
-                        }
-                    }
-                    open_installed_app()?;
-                }
-                emit_install_progress(app, "complete", 0, None);
-                return Ok(CodexInstallResult {
-                    installed: true,
-                    path: status.path,
-                    message: if force_update {
-                        "ChatGPT and Codex were updated successfully.".to_string()
-                    } else {
-                        "ChatGPT and Codex are installed and ready for the next step.".to_string()
-                    },
-                    awaiting_installation: false,
-                });
-            }
-        }
-    }
-
-    // The version service advertises an R2 mirror first and the official URL
-    // as a fallback. If the service is unavailable, retain the built-in
-    // official URL so installation remains possible offline from our API.
+    // The version service advertises a versioned R2 mirror. On Windows the
+    // Microsoft Store is intentionally a last resort because it is slower than
+    // downloading the verified installer directly from R2.
     let latest_release = latest_release().await.ok();
-    let download_urls = download_urls(latest_release.as_ref())?;
+    let download_urls = match download_urls(latest_release.as_ref()) {
+        Ok(urls) => urls,
+        Err(error) => {
+            #[cfg(target_os = "windows")]
+            {
+                return install_with_microsoft_store_fallback(app, force_update, &error).await;
+            }
+            #[cfg(not(target_os = "windows"))]
+            return Err(error);
+        }
+    };
     let extension = download_extension();
     let download_path = env::temp_dir().join(format!(
         "autogateway-chatgpt-{}.{}",
@@ -190,6 +157,11 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
     emit_install_progress(app, "preparing", 0, None);
     if let Err(error) = download_installer(app, &download_urls, &download_path).await {
         let _ = fs::remove_file(&download_path);
+        #[cfg(target_os = "windows")]
+        {
+            return install_with_microsoft_store_fallback(app, force_update, &error).await;
+        }
+        #[cfg(not(target_os = "windows"))]
         return Err(error);
     }
 
@@ -200,6 +172,16 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
     })
     .await
     .map_err(|error| format!("wait for the official ChatGPT installer: {error}"))?;
+    #[cfg(target_os = "windows")]
+    let installer_result = match install_result {
+        Ok(result) => result,
+        Err(error) => {
+            let _ = fs::remove_file(&download_path);
+            return install_with_microsoft_store_fallback(app, force_update, &error).await;
+        }
+    };
+
+    #[cfg(not(target_os = "windows"))]
     let installer_result = install_result?;
 
     #[cfg(not(target_os = "windows"))]
@@ -213,7 +195,7 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
         return Ok(CodexInstallResult {
             installed: false,
             path: None,
-            message: "Microsoft Store has opened the official ChatGPT installer. Finish the installation there; this page will continue automatically.".to_string(),
+            message: "The official ChatGPT installer has opened. Finish the installation there; this page will continue automatically.".to_string(),
             awaiting_installation: true,
         });
     }
@@ -402,6 +384,7 @@ async fn latest_release() -> Result<PlatformVersion, String> {
     Err("Codex update checks are available on macOS and Windows only.".to_string())
 }
 
+#[cfg(target_os = "macos")]
 fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String> {
     let fallback = download_url()?.to_string();
     let mut urls = Vec::with_capacity(2);
@@ -427,6 +410,23 @@ fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String
         urls.push(fallback);
     }
     Ok(urls)
+}
+
+#[cfg(target_os = "windows")]
+fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String> {
+    let mirror_url = latest
+        .and_then(|release| release.download_url.as_deref())
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| {
+            "the R2 ChatGPT installer is unavailable; opening Microsoft Store instead".to_string()
+        })?;
+    Ok(vec![mirror_url.to_string()])
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn download_urls(_latest: Option<&PlatformVersion>) -> Result<Vec<String>, String> {
+    Err("This desktop build supports macOS and Windows only.".to_string())
 }
 
 fn compare_versions(left: &str, right: &str) -> Ordering {
@@ -519,11 +519,6 @@ fn local_installation() -> Option<LocalInstallation> {
 #[cfg(target_os = "macos")]
 fn download_url() -> Result<&'static str, String> {
     Ok(MACOS_DOWNLOAD_URL)
-}
-
-#[cfg(target_os = "windows")]
-fn download_url() -> Result<&'static str, String> {
-    Ok(WINDOWS_DOWNLOAD_URL)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -758,6 +753,74 @@ fn install_with_winget(force_update: bool) -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
+async fn install_with_microsoft_store_fallback(
+    app: &AppHandle,
+    force_update: bool,
+    _mirror_error: &str,
+) -> Result<CodexInstallResult, String> {
+    emit_install_progress(app, "installing", 0, None);
+    let winget_result =
+        tauri::async_runtime::spawn_blocking(move || install_with_winget(force_update))
+            .await
+            .map_err(|error| format!("wait for the Microsoft Store installation: {error}"))?;
+
+    if winget_result.is_err() {
+        open_microsoft_store()?;
+        return Ok(CodexInstallResult {
+            installed: false,
+            path: None,
+            message: "The R2 installer is unavailable, so Microsoft Store has opened. Finish the installation there; this page will continue automatically.".to_string(),
+            awaiting_installation: true,
+        });
+    }
+
+    emit_install_progress(app, "verifying", 0, None);
+    let status = status().await;
+    if status.installed {
+        if force_update {
+            if let (Some(expected), Some(installed)) = (
+                status.latest_version.as_deref(),
+                status.local_version.as_deref(),
+            ) {
+                if compare_versions(installed, expected) == Ordering::Less {
+                    return Err(format!("the update finished, but version {installed} is still installed; expected {expected}"));
+                }
+            }
+            open_installed_app()?;
+        }
+        emit_install_progress(app, "complete", 0, None);
+        return Ok(CodexInstallResult {
+            installed: true,
+            path: status.path,
+            message: if force_update {
+                "ChatGPT and Codex were updated successfully.".to_string()
+            } else {
+                "ChatGPT and Codex are installed and ready for the next step.".to_string()
+            },
+            awaiting_installation: false,
+        });
+    }
+
+    Ok(CodexInstallResult {
+        installed: false,
+        path: None,
+        message: "Microsoft Store is installing ChatGPT. This page will continue automatically when the installation finishes.".to_string(),
+        awaiting_installation: true,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn open_microsoft_store() -> Result<(), String> {
+    let store_uri = format!("ms-windows-store://pdp/?productid={WINDOWS_STORE_PRODUCT_ID}");
+    Command::new("explorer.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .arg(store_uri)
+        .spawn()
+        .map_err(|error| format!("open Microsoft Store: {error}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn install_downloaded_app(
     download_path: &Path,
     _preferred_destination: Option<&Path>,
@@ -849,7 +912,7 @@ mod tests {
         );
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     #[test]
     fn prefers_the_server_mirror_before_the_official_fallback() {
         let release: super::PlatformVersion = serde_json::from_str(
@@ -859,6 +922,17 @@ mod tests {
         let urls = super::download_urls(Some(&release)).expect("build installer candidates");
         assert_eq!(urls[0], "https://cdn.example.test/codex.dmg");
         assert_eq!(urls[1], "https://official.example.test/ChatGPT.dmg");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_uses_only_the_server_mirror() {
+        let release: super::PlatformVersion = serde_json::from_str(
+            r#"{"version":"26.730.8199.0","downloadUrl":"https://cdn.example.test/ChatGPT-Installer.exe","fallbackUrl":"https://official.example.test/ChatGPT-Installer.exe"}"#,
+        )
+        .expect("decode version service response");
+        let urls = super::download_urls(Some(&release)).expect("build installer candidates");
+        assert_eq!(urls, ["https://cdn.example.test/ChatGPT-Installer.exe"]);
     }
 
     #[cfg(target_os = "macos")]
