@@ -1,0 +1,15 @@
+{
+  "version": "0.1.19",
+  "notes": "Bug fixes and improvements.",
+  "pub_date": "2026-08-05T00:00:00Z",
+  "platforms": {
+    "windows-x86_64": {
+      "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop_0.1.19_x64-setup.exe",
+      "signature": "<contents of the matching .sig file>"
+    },
+    "darwin-aarch64": {
+      "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop.app.tar.gz",
+      "signature": "<contents of the matching .sig file>"
+    }
+  }
+}

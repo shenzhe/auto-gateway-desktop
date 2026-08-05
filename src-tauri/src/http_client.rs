@@ -1,0 +1,38 @@
+use std::time::Duration;
+
+pub fn desktop_user_agent() -> String {
+    format!(
+        "AUTO-Gateway-Desktop/{} ({}; {})",
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+pub fn client() -> Result<reqwest::Client, String> {
+    client_with_timeout(None)
+}
+
+pub fn client_with_timeout(timeout: Option<Duration>) -> Result<reqwest::Client, String> {
+    let mut builder = reqwest::Client::builder().user_agent(desktop_user_agent());
+    if let Some(timeout) = timeout {
+        builder = builder.timeout(timeout);
+    }
+    builder
+        .build()
+        .map_err(|error| format!("create desktop HTTP client: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::desktop_user_agent;
+
+    #[test]
+    fn desktop_user_agent_identifies_the_product_version_and_platform() {
+        let user_agent = desktop_user_agent();
+        assert!(user_agent.starts_with("AUTO-Gateway-Desktop/"));
+        assert!(user_agent.contains(env!("CARGO_PKG_VERSION")));
+        assert!(user_agent.contains(std::env::consts::OS));
+        assert!(user_agent.contains(std::env::consts::ARCH));
+    }
+}

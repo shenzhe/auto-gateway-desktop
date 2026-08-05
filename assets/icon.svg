@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="AUTO Gateway Desktop">
+  <rect width="512" height="512" rx="112" fill="#0d1b2a"/>
+  <path d="M96 344 256 80l160 264h-72l-88-146-88 146H96Z" fill="#54d6bb"/>
+  <path d="M184 344h144l-72 80-72-80Z" fill="#f8fafc"/>
+</svg>
