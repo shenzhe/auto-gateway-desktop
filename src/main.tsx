@@ -7,7 +7,7 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { ArrowRightIcon, ArrowUUpLeftIcon, ArrowsClockwiseIcon, BugIcon, CheckCircleIcon, CheckIcon, CircleNotchIcon, CopyIcon, CubeIcon, CurrencyDollarIcon, GearIcon, HouseIcon, UserCircleIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { bootstrapDesktopKey, clearDesktopSession, clearStoredDesktopAPIKey, configureCodex, exchangeDesktopAuthorization, getCodexAppStatus, getCodexStatus, getDesktopAccountSummary, getDesktopAppVersion, installCodex, isAuthenticationRequired, openCodex, openConsole, openDevtools, refreshDesktopState, restoreDesktopState, restoreLatestCodexBackups, showMainWindow, updateTrayStatus, type CodexAppStatus, type CodexInstallProgress, type CodexStatus, type DesktopAccountSummary, type DesktopSession } from "./desktop";
+import { bootstrapDesktopKey, clearDesktopSession, clearStoredDesktopAPIKey, configureCodex, exchangeDesktopAuthorization, getCodexAppStatus, getCodexStatus, getDesktopAccountSummary, getDesktopAppVersion, getLocalCodexAppStatus, installCodex, isAuthenticationRequired, openCodex, openConsole, openDevtools, refreshDesktopState, restoreDesktopState, restoreLatestCodexBackups, showMainWindow, updateTrayStatus, type CodexAppStatus, type CodexInstallProgress, type CodexStatus, type DesktopAccountSummary, type DesktopSession } from "./desktop";
 import { readLocalePreference, resolveLocale, translate, writeLocalePreference, type LocalePreference } from "./i18n";
 import { applyTheme, readTheme, writeTheme, type ThemeMode } from "./theme";
 import "./styles.css";
@@ -193,6 +193,7 @@ function App() {
   const [desktopUpdate, setDesktopUpdate] = useState<Update | null>(null);
   const [desktopUpdatePhase, setDesktopUpdatePhase] = useState<DesktopUpdatePhase>("idle");
   const [desktopUpdateProgress, setDesktopUpdateProgress] = useState<number | null>(null);
+  const [desktopUpdateError, setDesktopUpdateError] = useState("");
   const [homeActionError, setHomeActionError] = useState("");
   const [selectedStep, setSelectedStep] = useState<WizardStep>(1);
   const [showSettings, setShowSettings] = useState(false);
@@ -237,7 +238,7 @@ function App() {
 
   async function refreshStatus(updateMessage = true) {
     try {
-      const [nextStatus, nextAppStatus] = await Promise.all([getCodexStatus(), getCodexAppStatus()]);
+      const [nextStatus, nextAppStatus] = await Promise.all([getCodexStatus(), getLocalCodexAppStatus()]);
       setStatus(nextStatus);
       setAppStatus(nextAppStatus);
       if (updateMessage) setMessage(nextStatus.configured ? tr("connected") : tr("notConfigured"));
@@ -266,6 +267,23 @@ function App() {
       setMessage(tr("readStatusFailed", { error: String(error) }));
     } finally {
       setCheckingCodexUpdates(false);
+    }
+  }
+
+  async function checkDesktopUpdate(manual = false) {
+    if (desktopUpdatePhase === "checking" || desktopUpdatePhase === "downloading") return;
+    setDesktopUpdatePhase("checking");
+    setDesktopUpdateError("");
+    try {
+      const nextUpdate = await check();
+      setDesktopUpdate(nextUpdate);
+      setDesktopUpdatePhase(nextUpdate ? "ready" : "idle");
+      if (manual) setMessage(nextUpdate ? tr("desktopUpdateFound", { version: nextUpdate.version }) : tr("desktopUpToDate"));
+    } catch (error) {
+      const errorMessage = String(error);
+      setDesktopUpdatePhase("error");
+      setDesktopUpdateError(errorMessage);
+      if (manual) setMessage(tr("desktopUpdateCheckUnavailable"));
     }
   }
 
@@ -318,23 +336,9 @@ function App() {
 
   useEffect(() => {
     if (designPreviewState || !import.meta.env.PROD) return;
-    let active = true;
-    async function checkDesktopUpdate() {
-      if (!active) return;
-      setDesktopUpdatePhase("checking");
-      try {
-        const nextUpdate = await check();
-        if (!active) return;
-        setDesktopUpdate(nextUpdate);
-        setDesktopUpdatePhase(nextUpdate ? "ready" : "idle");
-      } catch {
-        if (active) setDesktopUpdatePhase("error");
-      }
-    }
     void checkDesktopUpdate();
-    const interval = window.setInterval(() => void checkDesktopUpdate(), 6 * 60 * 60 * 1000);
+    const interval = window.setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000);
     return () => {
-      active = false;
       window.clearInterval(interval);
     };
   }, []);
@@ -793,6 +797,7 @@ function App() {
         <section className="homeContent">
           <p className="sectionKicker">{tr("workspace")}</p><h1>{tr("homeTitle")}</h1><p className="lead homeLead">{tr("homeLead")}</p>
           {desktopUpdate ? <section className="notice warning desktopUpdateNotice"><strong>{tr("desktopUpdateAvailable")}</strong><span>{tr("desktopUpdateDescription", { version: desktopUpdate.version })}</span><button className="secondaryButton" disabled={desktopUpdatePhase === "downloading"} onClick={() => void handleInstallDesktopUpdate()}>{desktopUpdatePhase === "downloading" ? tr("desktopUpdating", { percent: desktopUpdateProgress ?? "…" }) : tr("desktopUpdateNow")}</button></section> : null}
+          {desktopUpdatePhase === "error" ? <section className="notice warning desktopUpdateNotice"><strong>{tr("desktopUpdateCheckUnavailable")}</strong><span>{desktopUpdateError || tr("desktopUpdateCheckUnavailable")}</span><button className="secondaryButton" onClick={() => void checkDesktopUpdate(true)}>{tr("desktopUpdateCheckNow")}</button></section> : null}
           {homeActionError ? <p className="homeActionMessage" role="alert">{homeActionError}</p> : null}
           <section className="homeStatusPanel">
             <div className="homeHealth" aria-label={ready ? tr("active") : tr("checking")}><span className={`healthBadge ${ready ? "ready" : ""}`}><CheckCircleIcon weight="fill" /></span><div><span className="statusLabel">{ready ? tr("active") : tr("checking")}</span><strong>{ready ? tr("workspaceReadyTitle") : tr("workspaceCheckingTitle")}</strong><small>{ready ? tr("workspaceReadyDescription") : tr("workspaceCheckingDescription")}</small></div></div>
@@ -803,6 +808,7 @@ function App() {
           <section className="homeSection"><h2>{tr("quickActions")}</h2><div className="quickActions">
             <button onClick={() => void handleOpenConsole()}><UserCircleIcon /><span><strong>{tr("openConsole")}</strong><small>{tr("openConsoleDescription")}</small></span><ArrowRightIcon /></button>
             <button onClick={() => void handleCheckCodexUpdates()} disabled={checkingCodexUpdates || installingCodex || !appInstalled}><ArrowsClockwiseIcon /><span><strong>{tr("checkUpdates")}</strong><small>{tr("checkUpdatesDescription")}</small></span><ArrowRightIcon /></button>
+            <button onClick={() => void checkDesktopUpdate(true)} disabled={desktopUpdatePhase === "checking" || desktopUpdatePhase === "downloading"}><ArrowsClockwiseIcon /><span><strong>{desktopUpdatePhase === "checking" ? tr("desktopCheckingUpdates") : tr("desktopUpdateCheckNow")}</strong><small>{tr("desktopUpdateCheckDescription")}</small></span><ArrowRightIcon /></button>
             {updateAvailable ? <button onClick={() => void handleInstallCodex(true)} disabled={installingCodex}><ArrowsClockwiseIcon /><span><strong>{installingCodex ? tr("updatingCodex") : tr("updateNow")}</strong><small>{tr("updateAvailableDescription")}</small></span><ArrowRightIcon /></button> : null}
             <button onClick={openSetupFromHome}><GearIcon /><span><strong>{tr("reconfigureCodex")}</strong><small>{tr("reconfigureCodexDescription")}</small></span><ArrowRightIcon /></button>
             <button disabled={busy || backupCount === 0} onClick={() => void handleSwitchBackConfiguration()}><ArrowUUpLeftIcon /><span><strong>{tr("switchBackConfiguration")}</strong><small>{tr("switchBackConfigurationDescription")}</small></span><ArrowRightIcon /></button>

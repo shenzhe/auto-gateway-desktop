@@ -107,7 +107,7 @@ struct PlatformArtifact {
     fallback_url: Option<String>,
 }
 
-pub async fn status() -> CodexAppStatus {
+pub fn local_status() -> CodexAppStatus {
     let Some(installation) = local_installation() else {
         return CodexAppStatus {
             installed: false,
@@ -120,11 +120,29 @@ pub async fn status() -> CodexAppStatus {
         };
     };
 
+    CodexAppStatus {
+        installed: true,
+        path: Some(installation.path.display().to_string()),
+        local_version: installation.version,
+        latest_version: None,
+        update_available: None,
+        update_check_error: None,
+        platform_message:
+            "The official ChatGPT desktop application is installed. It includes Codex.".to_string(),
+    }
+}
+
+pub async fn status() -> CodexAppStatus {
+    let mut local = local_status();
+    if !local.installed {
+        return local;
+    }
+
     let latest_result = latest_release().await;
     let (latest_version, update_available, update_check_error) = match latest_result {
         Ok(latest) => {
-            let available = installation
-                .version
+            let available = local
+                .local_version
                 .as_deref()
                 .map(|local| compare_versions(&latest.version, local) == Ordering::Greater);
             (Some(latest.version), available, None)
@@ -132,16 +150,10 @@ pub async fn status() -> CodexAppStatus {
         Err(error) => (None, None, Some(error)),
     };
 
-    CodexAppStatus {
-        installed: true,
-        path: Some(installation.path.display().to_string()),
-        local_version: installation.version,
-        latest_version,
-        update_available,
-        update_check_error,
-        platform_message:
-            "The official ChatGPT desktop application is installed. It includes Codex.".to_string(),
-    }
+    local.latest_version = latest_version;
+    local.update_available = update_available;
+    local.update_check_error = update_check_error;
+    local
 }
 
 pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstallResult, String> {

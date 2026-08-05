@@ -6,8 +6,8 @@ mod desktop_auth;
 mod http_client;
 
 use codex_app::{
-    install as install_codex_app, open_installed_app, status as codex_app_status, CodexAppStatus,
-    CodexInstallResult,
+    install as install_codex_app, local_status as local_codex_app_status, open_installed_app,
+    status as codex_app_status, CodexAppStatus, CodexInstallResult,
 };
 use codex_config::{
     apply_configuration, default_codex_paths, restore_latest_backups, CodexStatus,
@@ -36,6 +36,11 @@ fn get_codex_status() -> Result<CodexStatus, String> {
 #[tauri::command]
 async fn get_codex_app_status() -> CodexAppStatus {
     codex_app_status().await
+}
+
+#[tauri::command]
+fn get_local_codex_app_status() -> CodexAppStatus {
+    local_codex_app_status()
 }
 
 #[tauri::command]
@@ -307,6 +312,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_codex_status,
             get_codex_app_status,
+            get_local_codex_app_status,
             install_codex,
             open_codex,
             configure_codex,

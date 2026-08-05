@@ -81,6 +81,10 @@ export function getCodexAppStatus(): Promise<CodexAppStatus> {
   return invoke<CodexAppStatus>("get_codex_app_status");
 }
 
+export function getLocalCodexAppStatus(): Promise<CodexAppStatus> {
+  return invoke<CodexAppStatus>("get_local_codex_app_status");
+}
+
 export function installCodex(forceUpdate = false): Promise<CodexInstallResult> {
   return invoke<CodexInstallResult>("install_codex", { forceUpdate });
 }
