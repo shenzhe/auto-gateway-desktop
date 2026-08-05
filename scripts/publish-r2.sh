@@ -7,13 +7,18 @@ set -euo pipefail
 : "${R2_BUCKET:?R2_BUCKET is required}"
 : "${R2_PUBLIC_BASE_URL:?R2_PUBLIC_BASE_URL is required}"
 
-mac_dmg="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_aarch64.dmg"
-mac_updater="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_aarch64.app.tar.gz"
-mac_signature="$mac_updater.sig"
-windows_installer="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_x64-setup.exe"
-windows_signature="$windows_installer.sig"
+mac_arm64_dmg="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_aarch64.dmg"
+mac_arm64_updater="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_aarch64.app.tar.gz"
+mac_arm64_signature="$mac_arm64_updater.sig"
+mac_x64_dmg="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_x64.dmg"
+mac_x64_updater="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_x64.app.tar.gz"
+mac_x64_signature="$mac_x64_updater.sig"
+windows_x64_installer="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_x64-setup.exe"
+windows_x64_signature="$windows_x64_installer.sig"
+windows_arm64_installer="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_arm64-setup.exe"
+windows_arm64_signature="$windows_arm64_installer.sig"
 
-for artifact in "$mac_dmg" "$mac_updater" "$mac_signature" "$windows_installer" "$windows_signature"; do
+for artifact in "$mac_arm64_dmg" "$mac_arm64_updater" "$mac_arm64_signature" "$mac_x64_dmg" "$mac_x64_updater" "$mac_x64_signature" "$windows_x64_installer" "$windows_x64_signature" "$windows_arm64_installer" "$windows_arm64_signature"; do
   if [[ ! -s "$artifact" ]]; then
     echo "Required release artifact is missing or empty: $artifact" >&2
     exit 1
@@ -43,36 +48,55 @@ upload() {
     --cache-control "$cache_control"
 }
 
-upload "$mac_dmg" "application/x-apple-diskimage" "public, max-age=31536000, immutable"
-upload "$mac_updater" "application/gzip" "public, max-age=31536000, immutable"
-upload "$mac_signature" "text/plain; charset=utf-8" "public, max-age=31536000, immutable"
-upload "$windows_installer" "application/vnd.microsoft.portable-executable" "public, max-age=31536000, immutable"
-upload "$windows_signature" "text/plain; charset=utf-8" "public, max-age=31536000, immutable"
+upload "$mac_arm64_dmg" "application/x-apple-diskimage" "public, max-age=31536000, immutable"
+upload "$mac_arm64_updater" "application/gzip" "public, max-age=31536000, immutable"
+upload "$mac_arm64_signature" "text/plain; charset=utf-8" "public, max-age=31536000, immutable"
+upload "$mac_x64_dmg" "application/x-apple-diskimage" "public, max-age=31536000, immutable"
+upload "$mac_x64_updater" "application/gzip" "public, max-age=31536000, immutable"
+upload "$mac_x64_signature" "text/plain; charset=utf-8" "public, max-age=31536000, immutable"
+upload "$windows_x64_installer" "application/vnd.microsoft.portable-executable" "public, max-age=31536000, immutable"
+upload "$windows_x64_signature" "text/plain; charset=utf-8" "public, max-age=31536000, immutable"
+upload "$windows_arm64_installer" "application/vnd.microsoft.portable-executable" "public, max-age=31536000, immutable"
+upload "$windows_arm64_signature" "text/plain; charset=utf-8" "public, max-age=31536000, immutable"
 
 manifest_path="$RELEASE_DIR/latest.json"
-mac_url="$base_url/$prefix/$(basename "$mac_updater" | sed 's/ /%20/g')"
-windows_url="$base_url/$prefix/$(basename "$windows_installer" | sed 's/ /%20/g')"
+mac_arm64_url="$base_url/$prefix/$(basename "$mac_arm64_updater" | sed 's/ /%20/g')"
+mac_x64_url="$base_url/$prefix/$(basename "$mac_x64_updater" | sed 's/ /%20/g')"
+windows_x64_url="$base_url/$prefix/$(basename "$windows_x64_installer" | sed 's/ /%20/g')"
+windows_arm64_url="$base_url/$prefix/$(basename "$windows_arm64_installer" | sed 's/ /%20/g')"
 
 jq -n \
   --arg version "$VERSION" \
   --arg notes "${RELEASE_NOTES:-Bug fixes and improvements.}" \
   --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --arg mac_url "$mac_url" \
-  --rawfile mac_signature "$mac_signature" \
-  --arg windows_url "$windows_url" \
-  --rawfile windows_signature "$windows_signature" \
+  --arg mac_arm64_url "$mac_arm64_url" \
+  --rawfile mac_arm64_signature "$mac_arm64_signature" \
+  --arg mac_x64_url "$mac_x64_url" \
+  --rawfile mac_x64_signature "$mac_x64_signature" \
+  --arg windows_x64_url "$windows_x64_url" \
+  --rawfile windows_x64_signature "$windows_x64_signature" \
+  --arg windows_arm64_url "$windows_arm64_url" \
+  --rawfile windows_arm64_signature "$windows_arm64_signature" \
   '{
     version: $version,
     notes: $notes,
     pub_date: $pub_date,
     platforms: {
       "darwin-aarch64": {
-        url: $mac_url,
-        signature: ($mac_signature | rtrimstr("\n"))
+        url: $mac_arm64_url,
+        signature: ($mac_arm64_signature | rtrimstr("\n"))
+      },
+      "darwin-x86_64": {
+        url: $mac_x64_url,
+        signature: ($mac_x64_signature | rtrimstr("\n"))
       },
       "windows-x86_64": {
-        url: $windows_url,
-        signature: ($windows_signature | rtrimstr("\n"))
+        url: $windows_x64_url,
+        signature: ($windows_x64_signature | rtrimstr("\n"))
+      },
+      "windows-aarch64": {
+        url: $windows_arm64_url,
+        signature: ($windows_arm64_signature | rtrimstr("\n"))
       }
     }
   }' > "$manifest_path"

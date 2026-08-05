@@ -11,7 +11,7 @@ This directory contains the Tauri desktop application for onboarding AUTO Gatewa
 - Back up and merge the AUTO Gateway provider into `config.toml`.
 - Back up and merge `OPENAI_API_KEY` into `auth.json`, with an explicit restore-latest-backup action.
 - Open the existing AUTO Gateway console in a separate, capability-isolated WebView using a short-lived, single-use sign-in ticket.
-- Check for signed AUTO Gateway Desktop updates at launch and every six hours, then download, verify, install, and restart from the home screen.
+- Check for signed AUTO Gateway Desktop updates at launch and every five minutes, with a manual check action, then download, verify, install, and restart from the home screen.
 
 The desktop updater uses Tauri's signed update artifacts. The public verification key is committed in `src-tauri/tauri.conf.json`; the private signing key must stay outside the repository and be supplied only by a release machine or CI secret. The configured static manifest URL is `https://cdn.autogateway.cc/downloads/desktop/latest.json`.
 
@@ -56,6 +56,14 @@ The release job must publish each generated installer artifact and its `.sig` fi
     "darwin-aarch64": {
       "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop_0.1.23_aarch64.app.tar.gz",
       "signature": "<contents of the matching .sig file>"
+    },
+    "darwin-x86_64": {
+      "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop_0.1.23_x64.app.tar.gz",
+      "signature": "<contents of the matching .sig file>"
+    },
+    "windows-aarch64": {
+      "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop_0.1.23_arm64-setup.exe",
+      "signature": "<contents of the matching .sig file>"
     }
   }
 }
@@ -65,9 +73,9 @@ The release job must publish each generated installer artifact and its `.sig` fi
 
 `.github/workflows/desktop-release.yml` creates a distribution release without relying on a developer workstation:
 
-1. The macOS job imports the existing `Developer ID Application: WANG JING (UFC4M35743)` certificate, signs the Apple Silicon app, submits it to Apple notarization, staples the accepted ticket to the app, and produces a DMG plus a Tauri updater archive.
-2. The Windows job builds the x64 NSIS installer on a native Windows runner and creates its Tauri updater signature.
-3. The publish job downloads both verified artifacts, uploads them to R2, and only then writes `downloads/desktop/latest.json`. This prevents the updater from seeing a release with one platform missing.
+1. The macOS matrix imports the existing `Developer ID Application: WANG JING (UFC4M35743)` certificate, signs, notarizes, staples, and packages both Apple Silicon and Intel apps.
+2. The Windows matrix builds signed x64 and ARM64 NSIS installers on the Windows runner.
+3. The publish job requires all four verified artifacts, uploads them to R2, and only then writes `downloads/desktop/latest.json`. This prevents the updater from seeing a release with one platform missing.
 
 Create the following repository secrets before dispatching the workflow. Secrets must be set in GitHub; never commit certificates, private keys, or R2 credentials.
 
@@ -89,7 +97,7 @@ Also create the repository variable `R2_PUBLIC_BASE_URL`, for example `https://c
 
 To authorize the current signing identity for CI, export it once on a trusted Mac as a password-protected `.p12`, base64-encode the file, and save the result as `APPLE_CERTIFICATE_BASE64`. Create a narrowly scoped App Store Connect API key with access to notarization, base64-encode its `.p8` file, and save it as `APPLE_NOTARY_KEY_BASE64`. The workflow does not use the local login keychain after those secrets are configured.
 
-Dispatch **Desktop Release** in GitHub Actions with the version already present in `package.json`, `Cargo.toml`, and `tauri.conf.json`, or push a matching `desktop-v<version>` tag. The workflow rejects mismatched versions before building.
+Dispatch **Desktop Release** in GitHub Actions with the version already present in `package.json`, `Cargo.toml`, and `tauri.conf.json`, or push a matching `v<version>` tag. The workflow rejects mismatched versions before building.
 
 ## Standalone repository migration
 

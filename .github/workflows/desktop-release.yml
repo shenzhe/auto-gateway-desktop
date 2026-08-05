@@ -28,11 +28,52 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  macos:
-    name: Build, sign, and notarize macOS
-    runs-on: macos-14
+  prepare:
+    name: Validate release version
+    runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ inputs.version }}"
+          if [[ -z "$version" ]]; then
+            version="${GITHUB_REF_NAME#desktop-v}"
+            version="${version#v}"
+          fi
+          package_version="$(node -p "require('./package.json').version")"
+          cargo_version="$(awk -F ' = ' '/^version = / { gsub(/"/, "", $2); print $2; exit }' src-tauri/Cargo.toml)"
+          tauri_version="$(jq -r '.version' src-tauri/tauri.conf.json)"
+          if [[ "$version" != "$package_version" || "$version" != "$cargo_version" || "$version" != "$tauri_version" ]]; then
+            echo "Release version must match package.json, Cargo.toml, and tauri.conf.json." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  macos:
+    name: Build, sign, and notarize macOS (${{ matrix.label }})
+    needs: prepare
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            suffix: aarch64
+            label: Apple Silicon
+          - target: x86_64-apple-darwin
+            suffix: x64
+            label: Intel
     env:
       APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -52,31 +93,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust dependencies and build output
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
-
-      - id: release
-        name: Validate release version
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ inputs.version }}"
-          if [[ -z "$version" ]]; then
-            version="${GITHUB_REF_NAME#desktop-v}"
-            version="${version#v}"
-          fi
-          package_version="$(node -p "require('./package.json').version")"
-          cargo_version="$(awk -F ' = ' '/^version = / { gsub(/\"/, "", $2); print $2; exit }' src-tauri/Cargo.toml)"
-          tauri_version="$(jq -r '.version' src-tauri/tauri.conf.json)"
-          if [[ "$version" != "$package_version" || "$version" != "$cargo_version" || "$version" != "$tauri_version" ]]; then
-            echo "Release version must match package.json, Cargo.toml, and tauri.conf.json." >&2
-            exit 1
-          fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Import Developer ID certificate
         shell: bash
@@ -104,12 +126,12 @@ jobs:
         run: |
           set -euo pipefail
           npm ci
-          npm run tauri build -- --target aarch64-apple-darwin --bundles app
+          npm run tauri build -- --target "${{ matrix.target }}" --bundles app
 
       - name: Notarize and staple the application
         shell: bash
         env:
-          APP_PATH: src-tauri/target/aarch64-apple-darwin/release/bundle/macos/AUTO Gateway Desktop.app
+          APP_PATH: src-tauri/target/${{ matrix.target }}/release/bundle/macos/AUTO Gateway Desktop.app
         run: bash scripts/notarize-macos.sh
 
       - name: Write updater signing key
@@ -123,34 +145,41 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          version="${{ steps.release.outputs.version }}"
-          app_path="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/AUTO Gateway Desktop.app"
+          version="${{ needs.prepare.outputs.version }}"
+          app_path="src-tauri/target/${{ matrix.target }}/release/bundle/macos/AUTO Gateway Desktop.app"
           release_dir="$RUNNER_TEMP/release"
           dmg_staging_dir="$RUNNER_TEMP/dmg-staging"
-          mkdir -p "$release_dir"
-          mkdir -p "$dmg_staging_dir"
-          dmg="$release_dir/AUTO Gateway Desktop_${version}_aarch64.dmg"
-          archive="$release_dir/AUTO Gateway Desktop_${version}_aarch64.app.tar.gz"
-          signing_password="$TAURI_SIGNING_PRIVATE_KEY_PASSWORD"
+          mkdir -p "$release_dir" "$dmg_staging_dir"
+          dmg="$release_dir/AUTO Gateway Desktop_${version}_${{ matrix.suffix }}.dmg"
+          archive="$release_dir/AUTO Gateway Desktop_${version}_${{ matrix.suffix }}.app.tar.gz"
           ditto "$app_path" "$dmg_staging_dir/AUTO Gateway Desktop.app"
           ln -s /Applications "$dmg_staging_dir/Applications"
           hdiutil create -volname "AUTO Gateway Desktop" -srcfolder "$dmg_staging_dir" -ov -format UDZO "$dmg"
           tar -C "$(dirname "$app_path")" -czf "$archive" "$(basename "$app_path")"
           env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PASSWORD \
-            ./node_modules/.bin/tauri signer sign --private-key-path "$RUNNER_TEMP/tauri-updater.key" --password "$signing_password" "$archive"
+            ./node_modules/.bin/tauri signer sign --private-key-path "$RUNNER_TEMP/tauri-updater.key" --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" "$archive"
 
       - name: Publish macOS build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-macos-${{ steps.release.outputs.version }}
+          name: desktop-macos-${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
           path: ${{ runner.temp }}/release/*
           if-no-files-found: error
 
   windows:
-    name: Build Windows
+    name: Build Windows (${{ matrix.label }})
+    needs: prepare
     runs-on: windows-2022
-    outputs:
-      version: ${{ steps.release.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            suffix: x64
+            label: x64
+          - target: aarch64-pc-windows-msvc
+            suffix: arm64
+            label: ARM64
     env:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -165,56 +194,44 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust dependencies and build output
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: "src-tauri -> target"
 
-      - id: release
-        name: Validate release version
-        shell: pwsh
-        run: |
-          $version = '${{ inputs.version }}'
-          if ([string]::IsNullOrWhiteSpace($version)) { $version = ($env:GITHUB_REF_NAME -replace '^desktop-v', '') -replace '^v', '' }
-          $packageVersion = node -p "require('./package.json').version"
-          $cargoVersion = ((Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value)
-          $tauriVersion = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
-          if ($version -ne $packageVersion -or $version -ne $cargoVersion -or $version -ne $tauriVersion) { throw 'Release version must match package.json, Cargo.toml, and tauri.conf.json.' }
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
       - name: Build Windows installer
         shell: pwsh
         run: |
           npm ci
-          npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis
+          npm run tauri build -- --target ${{ matrix.target }} --bundles nsis
 
       - name: Collect Windows release files
         shell: pwsh
         run: |
-          $version = '${{ steps.release.outputs.version }}'
-          $source = Get-ChildItem -Path src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter '*-setup.exe' | Select-Object -First 1
+          $version = '${{ needs.prepare.outputs.version }}'
+          $source = Get-ChildItem -Path src-tauri/target/${{ matrix.target }}/release/bundle/nsis -Filter '*-setup.exe' | Select-Object -First 1
           if ($null -eq $source) { throw 'The Windows NSIS installer was not produced.' }
           $releaseDir = Join-Path $env:RUNNER_TEMP 'release'
           New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
-          $target = Join-Path $releaseDir "AUTO Gateway Desktop_$version`_x64-setup.exe"
+          $target = Join-Path $releaseDir "AUTO Gateway Desktop_$version`_${{ matrix.suffix }}-setup.exe"
           Copy-Item $source.FullName $target
           Copy-Item "$($source.FullName).sig" "$target.sig"
 
       - name: Publish Windows build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-windows-${{ steps.release.outputs.version }}
+          name: desktop-windows-${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
           path: ${{ runner.temp }}/release/*
           if-no-files-found: error
 
   publish-r2:
     name: Publish artifacts to R2
-    needs: [macos, windows]
+    needs: [prepare, macos, windows]
     runs-on: ubuntu-24.04
     env:
-      VERSION: ${{ needs.macos.outputs.version }}
+      VERSION: ${{ needs.prepare.outputs.version }}
       RELEASE_NOTES: ${{ inputs.release_notes || 'Bug fixes and improvements.' }}
       R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
       R2_BUCKET: ${{ secrets.R2_BUCKET }}
