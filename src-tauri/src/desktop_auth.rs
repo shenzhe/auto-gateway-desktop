@@ -18,7 +18,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-const AUTO_GATEWAY_SITE: &str = "https://autogateway.cc";
+const AUTO_GATEWAY_API_BASE_URL: &str = "https://api.autogateway.cc";
 const INSTALLATION_ID_FILE: &str = "installation-id";
 const ENCRYPTED_STATE_FILE: &str = "desktop-session.enc.json";
 const ENCRYPTED_STATE_FORMAT: &str = "autogateway-desktop-session";
@@ -161,7 +161,9 @@ pub async fn exchange_desktop_authorization(
     state: &str,
 ) -> Result<DesktopSession, String> {
     let response = desktop_http_client()?
-        .post(format!("{AUTO_GATEWAY_SITE}/user/api/desktop/exchange"))
+        .post(format!(
+            "{AUTO_GATEWAY_API_BASE_URL}/user/api/desktop/exchange"
+        ))
         .json(&DesktopExchangeRequest {
             code,
             code_verifier,
@@ -233,7 +235,9 @@ pub async fn bootstrap_desktop_key(
     rotate_existing: bool,
 ) -> Result<DesktopBootstrapKey, String> {
     let response = desktop_http_client()?
-        .post(format!("{AUTO_GATEWAY_SITE}/user/api/desktop/bootstrap"))
+        .post(format!(
+            "{AUTO_GATEWAY_API_BASE_URL}/user/api/desktop/bootstrap"
+        ))
         .bearer_auth(access_token.trim())
         .json(&DesktopBootstrapRequest {
             installation_id,
@@ -250,7 +254,7 @@ pub async fn create_desktop_console_ticket(
 ) -> Result<DesktopConsoleTicket, String> {
     let response = desktop_http_client()?
         .post(format!(
-            "{AUTO_GATEWAY_SITE}/user/api/desktop/console-ticket"
+            "{AUTO_GATEWAY_API_BASE_URL}/user/api/desktop/console-ticket"
         ))
         .bearer_auth(access_token.trim())
         .send()
@@ -261,7 +265,7 @@ pub async fn create_desktop_console_ticket(
 
 pub async fn desktop_account_summary(access_token: &str) -> Result<DesktopAccountSummary, String> {
     let response = desktop_http_client()?
-        .get(format!("{AUTO_GATEWAY_SITE}/user/api/purchase"))
+        .get(format!("{AUTO_GATEWAY_API_BASE_URL}/user/api/purchase"))
         .bearer_auth(access_token.trim())
         .send()
         .await
@@ -278,7 +282,9 @@ async fn refresh_desktop_session(
 ) -> Result<DesktopSession, SessionRefreshError> {
     let response = desktop_http_client()
         .map_err(SessionRefreshError::Other)?
-        .post(format!("{AUTO_GATEWAY_SITE}/user/api/session/refresh"))
+        .post(format!(
+            "{AUTO_GATEWAY_API_BASE_URL}/user/api/session/refresh"
+        ))
         .json(&RefreshSessionRequest { refresh_token })
         .send()
         .await
