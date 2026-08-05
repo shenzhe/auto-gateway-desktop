@@ -41,13 +41,21 @@ TAURI_SIGNING_PRIVATE_KEY="$(< /secure/path/desktop-updater.key)" TAURI_SIGNING_
 
 On a native Windows release host with Visual Studio Build Tools and the Windows SDK installed, use the same Tauri command without `--runner cargo-xwin`.
 
-The release job must publish each generated installer artifact and its `.sig` file, then update `latest.json` at the configured URL. A static manifest has this shape:
+The release job publishes four native updater artifacts and two unified download installers, then updates `latest.json` at the configured URL. The `downloads` block is for the public download page; Tauri ignores it and continues using the architecture-specific `platforms` block for safe native updates. A static manifest has this shape:
 
 ```json
 {
   "version": "0.1.23",
   "notes": "Bug fixes and improvements.",
   "pub_date": "2026-08-05T00:00:00Z",
+  "downloads": {
+    "macos": {
+      "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop_0.1.23_universal.dmg"
+    },
+    "windows": {
+      "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop_0.1.23_setup.exe"
+    }
+  },
   "platforms": {
     "windows-x86_64": {
       "url": "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop_0.1.23_x64-setup.exe",
@@ -73,25 +81,25 @@ The release job must publish each generated installer artifact and its `.sig` fi
 
 `.github/workflows/desktop-release.yml` creates a distribution release without relying on a developer workstation:
 
-1. The macOS matrix imports the existing `Developer ID Application: WANG JING (UFC4M35743)` certificate, signs, notarizes, staples, and packages both Apple Silicon and Intel apps.
-2. The Windows matrix builds signed x64 and ARM64 NSIS installers on the Windows runner.
-3. The publish job requires all four verified artifacts, uploads them to R2, and only then writes `downloads/desktop/latest.json`. This prevents the updater from seeing a release with one platform missing.
+1. The macOS matrix imports the existing `Developer ID Application: WANG JING (UFC4M35743)` certificate, signs, notarizes, staples, and packages both Apple Silicon and Intel apps for the updater. A separate job creates one notarized Universal DMG for downloads.
+2. The Windows matrix builds x64 and ARM64 NSIS installers. A unified installer embeds both and selects the native payload on the user's machine.
+3. The publish job requires all native and unified artifacts, uploads them to R2, and only then writes `downloads/desktop/latest.json`. This prevents the updater from seeing a release with one platform missing.
 
 Create the following repository secrets before dispatching the workflow. Secrets must be set in GitHub; never commit certificates, private keys, or R2 credentials.
 
-| Secret | Value |
-| --- | --- |
-| `APPLE_CERTIFICATE_BASE64` | Base64-encoded `.p12` export of `Developer ID Application: WANG JING (UFC4M35743)`. |
-| `APPLE_CERTIFICATE_PASSWORD` | Password chosen for that `.p12` export. |
-| `APPLE_NOTARY_KEY_BASE64` | Base64-encoded App Store Connect API key `.p8` file. |
-| `APPLE_NOTARY_KEY_ID` | App Store Connect API key ID. |
-| `APPLE_NOTARY_ISSUER_ID` | App Store Connect issuer ID. |
-| `TAURI_SIGNING_PRIVATE_KEY` | Existing Tauri updater private key contents. |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the Tauri updater private key. |
-| `R2_ENDPOINT` | S3-compatible Cloudflare R2 endpoint. |
-| `R2_BUCKET` | R2 bucket name. |
-| `R2_ACCESS_KEY_ID` | R2 API token access key ID with object read/write permission. |
-| `R2_SECRET_ACCESS_KEY` | R2 API token secret access key. |
+| Secret                               | Value                                                                               |
+| ------------------------------------ | ----------------------------------------------------------------------------------- |
+| `APPLE_CERTIFICATE_BASE64`           | Base64-encoded `.p12` export of `Developer ID Application: WANG JING (UFC4M35743)`. |
+| `APPLE_CERTIFICATE_PASSWORD`         | Password chosen for that `.p12` export.                                             |
+| `APPLE_NOTARY_KEY_BASE64`            | Base64-encoded App Store Connect API key `.p8` file.                                |
+| `APPLE_NOTARY_KEY_ID`                | App Store Connect API key ID.                                                       |
+| `APPLE_NOTARY_ISSUER_ID`             | App Store Connect issuer ID.                                                        |
+| `TAURI_SIGNING_PRIVATE_KEY`          | Existing Tauri updater private key contents.                                        |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the Tauri updater private key.                                         |
+| `R2_ENDPOINT`                        | S3-compatible Cloudflare R2 endpoint.                                               |
+| `R2_BUCKET`                          | R2 bucket name.                                                                     |
+| `R2_ACCESS_KEY_ID`                   | R2 API token access key ID with object read/write permission.                       |
+| `R2_SECRET_ACCESS_KEY`               | R2 API token secret access key.                                                     |
 
 Also create the repository variable `R2_PUBLIC_BASE_URL`, for example `https://cdn.autogateway.cc`.
 

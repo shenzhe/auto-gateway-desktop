@@ -17,8 +17,10 @@ windows_x64_installer="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_x64-setup.ex
 windows_x64_signature="$windows_x64_installer.sig"
 windows_arm64_installer="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_arm64-setup.exe"
 windows_arm64_signature="$windows_arm64_installer.sig"
+mac_universal_dmg="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_universal.dmg"
+windows_unified_installer="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_setup.exe"
 
-for artifact in "$mac_arm64_dmg" "$mac_arm64_updater" "$mac_arm64_signature" "$mac_x64_dmg" "$mac_x64_updater" "$mac_x64_signature" "$windows_x64_installer" "$windows_x64_signature" "$windows_arm64_installer" "$windows_arm64_signature"; do
+for artifact in "$mac_arm64_dmg" "$mac_arm64_updater" "$mac_arm64_signature" "$mac_x64_dmg" "$mac_x64_updater" "$mac_x64_signature" "$windows_x64_installer" "$windows_x64_signature" "$windows_arm64_installer" "$windows_arm64_signature" "$mac_universal_dmg" "$windows_unified_installer"; do
   if [[ ! -s "$artifact" ]]; then
     echo "Required release artifact is missing or empty: $artifact" >&2
     exit 1
@@ -58,12 +60,16 @@ upload "$windows_x64_installer" "application/vnd.microsoft.portable-executable" 
 upload "$windows_x64_signature" "text/plain; charset=utf-8" "public, max-age=31536000, immutable"
 upload "$windows_arm64_installer" "application/vnd.microsoft.portable-executable" "public, max-age=31536000, immutable"
 upload "$windows_arm64_signature" "text/plain; charset=utf-8" "public, max-age=31536000, immutable"
+upload "$mac_universal_dmg" "application/x-apple-diskimage" "public, max-age=31536000, immutable"
+upload "$windows_unified_installer" "application/vnd.microsoft.portable-executable" "public, max-age=31536000, immutable"
 
 manifest_path="$RELEASE_DIR/latest.json"
 mac_arm64_url="$base_url/$prefix/$(basename "$mac_arm64_updater" | sed 's/ /%20/g')"
 mac_x64_url="$base_url/$prefix/$(basename "$mac_x64_updater" | sed 's/ /%20/g')"
 windows_x64_url="$base_url/$prefix/$(basename "$windows_x64_installer" | sed 's/ /%20/g')"
 windows_arm64_url="$base_url/$prefix/$(basename "$windows_arm64_installer" | sed 's/ /%20/g')"
+mac_universal_url="$base_url/$prefix/$(basename "$mac_universal_dmg" | sed 's/ /%20/g')"
+windows_unified_url="$base_url/$prefix/$(basename "$windows_unified_installer" | sed 's/ /%20/g')"
 
 jq -n \
   --arg version "$VERSION" \
@@ -77,10 +83,16 @@ jq -n \
   --rawfile windows_x64_signature "$windows_x64_signature" \
   --arg windows_arm64_url "$windows_arm64_url" \
   --rawfile windows_arm64_signature "$windows_arm64_signature" \
+  --arg mac_universal_url "$mac_universal_url" \
+  --arg windows_unified_url "$windows_unified_url" \
   '{
     version: $version,
     notes: $notes,
     pub_date: $pub_date,
+    downloads: {
+      macos: { url: $mac_universal_url },
+      windows: { url: $windows_unified_url }
+    },
     platforms: {
       "darwin-aarch64": {
         url: $mac_arm64_url,

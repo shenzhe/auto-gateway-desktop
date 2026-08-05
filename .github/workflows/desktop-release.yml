@@ -166,6 +166,90 @@ jobs:
           path: ${{ runner.temp }}/release/*
           if-no-files-found: error
 
+  macos-universal:
+    name: Build, sign, and notarize Universal macOS installer
+    needs: prepare
+    runs-on: macos-14
+    env:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Rust dependencies and build output
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: Import Developer ID certificate
+        shell: bash
+        run: |
+          set -euo pipefail
+          certificate_path="$RUNNER_TEMP/autogateway-developer-id.p12"
+          keychain_path="$RUNNER_TEMP/autogateway-signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" -k "$keychain_path" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security find-identity -v -p codesigning "$keychain_path" | grep -F 'Developer ID Application: WANG JING (UFC4M35743)'
+          printf '%s' "$APPLE_NOTARY_KEY_BASE64" | base64 -D > "$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          echo "APPLE_SIGNING_IDENTITY=Developer ID Application: WANG JING (UFC4M35743)" >> "$GITHUB_ENV"
+          echo "NOTARY_KEY_PATH=$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8" >> "$GITHUB_ENV"
+
+      - name: Build signed Universal macOS application
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run tauri build -- --target universal-apple-darwin --bundles app
+
+      - name: Notarize and staple the Universal application
+        shell: bash
+        env:
+          APP_PATH: src-tauri/target/universal-apple-darwin/release/bundle/macos/AUTO Gateway Desktop.app
+        run: bash scripts/notarize-macos.sh
+
+      - name: Create notarized Universal macOS installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.prepare.outputs.version }}"
+          app_path="src-tauri/target/universal-apple-darwin/release/bundle/macos/AUTO Gateway Desktop.app"
+          release_dir="$RUNNER_TEMP/release"
+          dmg_staging_dir="$RUNNER_TEMP/dmg-staging"
+          mkdir -p "$release_dir" "$dmg_staging_dir"
+          ditto "$app_path" "$dmg_staging_dir/AUTO Gateway Desktop.app"
+          ln -s /Applications "$dmg_staging_dir/Applications"
+          hdiutil create -volname "AUTO Gateway Desktop" -srcfolder "$dmg_staging_dir" -ov -format UDZO "$release_dir/AUTO Gateway Desktop_${version}_universal.dmg"
+
+      - name: Publish Universal macOS installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos-${{ needs.prepare.outputs.version }}-universal
+          path: ${{ runner.temp }}/release/*_universal.dmg
+          if-no-files-found: error
+
   windows:
     name: Build Windows (${{ matrix.label }})
     needs: prepare
@@ -226,9 +310,49 @@ jobs:
           path: ${{ runner.temp }}/release/*
           if-no-files-found: error
 
+  windows-unified-installer:
+    name: Build Windows unified installer
+    needs: [prepare, windows]
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-windows-${{ needs.prepare.outputs.version }}-*
+          path: ${{ runner.temp }}/windows-artifacts
+          merge-multiple: true
+
+      - name: Build architecture-selecting installer
+        shell: pwsh
+        run: |
+          $version = '${{ needs.prepare.outputs.version }}'
+          $artifactDir = Join-Path $env:RUNNER_TEMP 'windows-artifacts'
+          $payloadDir = Join-Path $env:RUNNER_TEMP 'unified-payload'
+          $releaseDir = Join-Path $env:RUNNER_TEMP 'release'
+          $x64Source = Get-ChildItem -Path $artifactDir -Filter "AUTO Gateway Desktop_$version`_x64-setup.exe" | Select-Object -First 1
+          $arm64Source = Get-ChildItem -Path $artifactDir -Filter "AUTO Gateway Desktop_$version`_arm64-setup.exe" | Select-Object -First 1
+          if ($null -eq $x64Source -or $null -eq $arm64Source) { throw 'Both native Windows installers are required for the unified installer.' }
+          New-Item -ItemType Directory -Force -Path $payloadDir, $releaseDir | Out-Null
+          Copy-Item $x64Source.FullName (Join-Path $payloadDir 'AUTO-Gateway-Desktop-x64-setup.exe')
+          Copy-Item $arm64Source.FullName (Join-Path $payloadDir 'AUTO-Gateway-Desktop-arm64-setup.exe')
+          choco install nsis --no-progress --yes
+          $makensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
+          if (-not (Test-Path $makensis)) { throw 'NSIS compiler was not installed.' }
+          $output = Join-Path $releaseDir "AUTO Gateway Desktop_$version`_setup.exe"
+          & $makensis "/DPAYLOAD_DIR=$payloadDir" "/DOUTFILE=$output" "/DAPP_VERSION=$version" scripts/windows-unified-installer.nsi
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $output)) { throw 'The unified Windows installer was not produced.' }
+
+      - name: Publish unified Windows installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-${{ needs.prepare.outputs.version }}-universal
+          path: ${{ runner.temp }}/release/*_setup.exe
+          if-no-files-found: error
+
   publish-r2:
     name: Publish artifacts to R2
-    needs: [prepare, macos, windows]
+    needs: [prepare, macos, macos-universal, windows, windows-unified-installer]
     runs-on: ubuntu-24.04
     env:
       VERSION: ${{ needs.prepare.outputs.version }}

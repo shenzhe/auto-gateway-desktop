@@ -8,8 +8,9 @@ Usage: scripts/build-release.sh [macos|windows|all] [--notarize]
 Builds signed release artifacts on their native platform.
 
 macOS:
-  Builds an arm64 application signed with APPLE_SIGNING_IDENTITY and writes a
-  DMG to dist/release. Pass --notarize to staple the app using:
+  Builds one Universal application for Apple Silicon and Intel, signs it with
+  APPLE_SIGNING_IDENTITY, and writes a DMG to dist/release. Pass --notarize to
+  staple the app using:
   NOTARY_KEY_PATH, APPLE_NOTARY_KEY_ID, and APPLE_NOTARY_ISSUER_ID.
   Set TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD, or set
   TAURI_SIGNING_PRIVATE_KEY_FILE to a protected private-key file plus its
@@ -49,9 +50,9 @@ build_macos() {
 
   local version app_path output_dir dmg_path
   version="$(node -p "require('./package.json').version")"
-  app_path="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/AUTO Gateway Desktop.app"
+  app_path="src-tauri/target/universal-apple-darwin/release/bundle/macos/AUTO Gateway Desktop.app"
   output_dir="$root_dir/dist/release"
-  dmg_path="$output_dir/AUTO Gateway Desktop_${version}_aarch64.dmg"
+  dmg_path="$output_dir/AUTO Gateway Desktop_${version}_universal.dmg"
 
   export APPLE_SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-Developer ID Application: WANG JING (UFC4M35743)}"
   if [[ -n "${TAURI_SIGNING_PRIVATE_KEY_FILE:-}" ]]; then
@@ -61,8 +62,9 @@ build_macos() {
   : "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:?Set TAURI_SIGNING_PRIVATE_KEY_PASSWORD}"
   security find-identity -v -p codesigning | grep -F "$APPLE_SIGNING_IDENTITY" >/dev/null
 
+  rustup target add aarch64-apple-darwin x86_64-apple-darwin
   npm ci
-  npm run tauri build -- --target aarch64-apple-darwin --bundles app
+  npm run tauri build -- --target universal-apple-darwin --bundles app
 
   if [[ "$notarize" == true ]]; then
     APP_PATH="$app_path" bash scripts/notarize-macos.sh
