@@ -72,6 +72,10 @@ const dictionaries = {
     replacingCodex: "Codex will quit while the verified update is installed…",
     windowsInstalling:
       "Windows is registering ChatGPT. This can take several minutes; keep this page open.",
+    windowsInstallationTimedOutTitle: "Windows registration is taking too long",
+    windowsInstallationTimedOut:
+      "Windows did not finish registering ChatGPT within 5 minutes. Download the installer again and retry.",
+    retryCodexInstallation: "Download and install again",
     verifyingCodex: "Verifying the installed Codex version…",
     downloadPercent: "{percent}% downloaded",
     installedReady:
@@ -304,6 +308,10 @@ const dictionaries = {
     replacingCodex: "正在退出 Codex 并安装已验证的更新…",
     windowsInstalling:
       "Windows 正在注册 ChatGPT，可能需要几分钟；请保持此页面打开。",
+    windowsInstallationTimedOutTitle: "Windows 注册超时",
+    windowsInstallationTimedOut:
+      "Windows 在 5 分钟内没有完成 ChatGPT 注册。请重新下载安装包并重试。",
+    retryCodexInstallation: "重新下载并安装",
     verifyingCodex: "正在验证已安装的 Codex 版本…",
     downloadPercent: "已下载 {percent}%",
     installedReady: "ChatGPT 和 Codex 已安装，可以进入下一步。",

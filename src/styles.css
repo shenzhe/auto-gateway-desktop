@@ -725,6 +725,11 @@ h1 {
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
+.installRecoveryActions {
+  display: flex;
+  justify-content: flex-start;
+  margin-top: 12px;
+}
 .indeterminateProgress {
   grid-template-columns: minmax(0, 1fr);
   gap: 10px;

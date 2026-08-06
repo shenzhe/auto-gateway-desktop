@@ -204,7 +204,11 @@ pub async fn status() -> CodexAppStatus {
     local
 }
 
-pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstallResult, String> {
+pub async fn install(
+    app: &AppHandle,
+    force_update: bool,
+    force_redownload: bool,
+) -> Result<CodexInstallResult, String> {
     let existing_installation = local_installation();
     if let Some(installation) = existing_installation.as_ref().filter(|_| !force_update) {
         return Ok(CodexInstallResult {
@@ -237,6 +241,10 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
             .map(|release| release.version.as_str()),
         extension,
     );
+    if force_redownload && download_path.is_file() {
+        let _ = fs::remove_file(&download_path);
+        let _ = fs::remove_file(completed_download_marker(&download_path));
+    }
     let preferred_destination = existing_installation
         .as_ref()
         .map(|installation| installation.path.clone());
@@ -303,7 +311,7 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
             path: None,
             message: "The official ChatGPT installer has opened. Finish the installation there; this page will continue automatically.".to_string(),
             awaiting_installation: true,
-            can_retry_cached_installer: false,
+            can_retry_cached_installer: completed_installer_available(),
         });
     }
 

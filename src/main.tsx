@@ -67,6 +67,7 @@ const defaultEndpoint = "https://api.autogateway.cc";
 const pendingAuthorizationStorageKey =
   "autogateway.desktop.pending-authorization";
 const setupCompletedStoragePrefix = "autogateway.desktop.setup-completed";
+const externalInstallationTimeoutMs = 5 * 60 * 1000;
 const designPreviewState = import.meta.env.DEV
   ? new URLSearchParams(window.location.search).get("preview")
   : null;
@@ -384,11 +385,14 @@ function App() {
   const [restoringSession, setRestoringSession] = useState(true);
   const [installingCodex, setInstallingCodex] = useState(false);
   const [checkingCodexUpdates, setCheckingCodexUpdates] = useState(false);
-  const [awaitingStoreInstallation, setAwaitingStoreInstallation] =
+  const [awaitingExternalInstallation, setAwaitingExternalInstallation] =
     useState(false);
   const [storeInstallForceUpdate, setStoreInstallForceUpdate] = useState(false);
   const [canRetryCachedInstaller, setCanRetryCachedInstaller] = useState(false);
-  const [storeInstallationMessage, setStoreInstallationMessage] = useState("");
+  const [externalInstallationMessage, setExternalInstallationMessage] =
+    useState("");
+  const [installationTimedOut, setInstallationTimedOut] = useState(false);
+  const externalInstallationStartedAt = useRef<number | null>(null);
   const storeAutoRetryAttempted = useRef(false);
   const [setupCompleted, setSetupCompleted] = useState(false);
   const [accountBalance, setAccountBalance] = useState("");
@@ -491,9 +495,11 @@ function App() {
     setSetupCompleted(false);
     setConfigurationPhase("idle");
     setConfigurationError("");
-    setAwaitingStoreInstallation(false);
+    externalInstallationStartedAt.current = null;
+    setAwaitingExternalInstallation(false);
     setCanRetryCachedInstaller(false);
-    setStoreInstallationMessage("");
+    setExternalInstallationMessage("");
+    setInstallationTimedOut(false);
     storeAutoRetryAttempted.current = false;
     setSelectedStep(1);
     setHomeActionError("");
@@ -687,22 +693,52 @@ function App() {
     return () => unlisten?.();
   }, [locale, designPreviewState]);
 
+  function completeExternalInstallation(nextAppStatus: CodexAppStatus) {
+    externalInstallationStartedAt.current = null;
+    setAppStatus(nextAppStatus);
+    setAwaitingExternalInstallation(false);
+    setInstallingCodex(false);
+    setInstallProgress(null);
+    setCanRetryCachedInstaller(false);
+    setExternalInstallationMessage("");
+    setInstallationTimedOut(false);
+    setMessage(
+      tr(storeInstallForceUpdate ? "updatedReady" : "installedReady"),
+    );
+  }
+
+  function timeoutExternalInstallation(nextAppStatus: CodexAppStatus) {
+    externalInstallationStartedAt.current = null;
+    setAppStatus(nextAppStatus);
+    setAwaitingExternalInstallation(false);
+    setInstallingCodex(false);
+    setInstallProgress(null);
+    setInstallationTimedOut(true);
+    setCanRetryCachedInstaller(
+      nextAppStatus.cachedInstallerAvailable || canRetryCachedInstaller,
+    );
+    setExternalInstallationMessage("");
+    setMessage(tr("windowsInstallationTimedOut"));
+  }
+
   useEffect(() => {
-    if (!awaitingStoreInstallation || designPreviewState) return;
+    if (!awaitingExternalInstallation || designPreviewState) return;
     let active = true;
     let checking = false;
-    async function checkStoreInstallation() {
+    async function checkExternalInstallation() {
       if (checking) return;
       checking = true;
       try {
         const nextAppStatus = await getLocalCodexAppStatus();
         if (!active) return;
-        setAppStatus(nextAppStatus);
+        const startedAt = externalInstallationStartedAt.current;
         if (nextAppStatus.installed) {
-          setAwaitingStoreInstallation(false);
-          setCanRetryCachedInstaller(false);
-          setStoreInstallationMessage("");
-          setMessage(tr("installedReady"));
+          completeExternalInstallation(nextAppStatus);
+        } else if (
+          startedAt !== null &&
+          Date.now() - startedAt >= externalInstallationTimeoutMs
+        ) {
+          timeoutExternalInstallation(nextAppStatus);
         } else if (
           nextAppStatus.cachedInstallerAvailable &&
           canRetryCachedInstaller &&
@@ -713,14 +749,14 @@ function App() {
           void handleInstallCodex(storeInstallForceUpdate, true);
         }
       } catch {
-        // The user can continue checking after the temporary Store installation state changes.
+        // The user can continue checking after the temporary external installation state changes.
       } finally {
         checking = false;
       }
     }
-    void checkStoreInstallation();
+    void checkExternalInstallation();
     const interval = window.setInterval(
-      () => void checkStoreInstallation(),
+      () => void checkExternalInstallation(),
       4000,
     );
     return () => {
@@ -728,7 +764,7 @@ function App() {
       window.clearInterval(interval);
     };
   }, [
-    awaitingStoreInstallation,
+    awaitingExternalInstallation,
     designPreviewState,
     installingCodex,
     canRetryCachedInstaller,
@@ -1099,42 +1135,54 @@ function App() {
   async function handleInstallCodex(
     forceUpdate = false,
     automaticRetry = false,
+    forceRedownload = false,
   ) {
-    setAwaitingStoreInstallation(false);
+    externalInstallationStartedAt.current = null;
+    setAwaitingExternalInstallation(false);
     setStoreInstallForceUpdate(forceUpdate);
     setCanRetryCachedInstaller(false);
-    setStoreInstallationMessage("");
+    setExternalInstallationMessage("");
+    setInstallationTimedOut(false);
     setInstallingCodex(true);
     setInstallProgress({ stage: "preparing", downloadedBytes: 0 });
     setMessage(
       tr(
         automaticRetry
           ? "reinstallingCodex"
-          : forceUpdate
+        : forceUpdate
             ? "updating"
             : "installing",
       ),
     );
+    let waitingForExternalInstallation = false;
     try {
-      const result = await installCodex(forceUpdate);
+      const result = await installCodex(forceUpdate, forceRedownload);
       if (result.awaitingInstallation) {
+        waitingForExternalInstallation = true;
+        externalInstallationStartedAt.current = Date.now();
         storeAutoRetryAttempted.current = automaticRetry;
-        setAwaitingStoreInstallation(true);
+        setAwaitingExternalInstallation(true);
         setCanRetryCachedInstaller(result.canRetryCachedInstaller);
-        setStoreInstallationMessage(result.message);
+        setExternalInstallationMessage(result.message);
+        setInstallProgress({
+          stage: "windows-installing",
+          downloadedBytes: 0,
+        });
         setMessage(result.message);
         return;
       }
-      setAwaitingStoreInstallation(false);
+      setAwaitingExternalInstallation(false);
       setCanRetryCachedInstaller(false);
-      setStoreInstallationMessage("");
+      setExternalInstallationMessage("");
       await refreshStatus();
       setMessage(tr(forceUpdate ? "updatedReady" : "installedReady"));
     } catch (error) {
       setMessage(tr("installationFailed", { error: String(error) }));
     } finally {
-      setInstallingCodex(false);
-      setInstallProgress(null);
+      if (!waitingForExternalInstallation) {
+        setInstallingCodex(false);
+        setInstallProgress(null);
+      }
     }
   }
 
@@ -1172,17 +1220,20 @@ function App() {
     }
   }
 
-  async function checkStoreInstallation() {
+  async function checkExternalInstallation() {
     try {
       const nextAppStatus = await getLocalCodexAppStatus();
-      setAppStatus(nextAppStatus);
       if (nextAppStatus.installed) {
-        setAwaitingStoreInstallation(false);
-        setCanRetryCachedInstaller(false);
-        setStoreInstallationMessage("");
-        setMessage(tr("installedReady"));
+        completeExternalInstallation(nextAppStatus);
+      } else if (
+        externalInstallationStartedAt.current !== null &&
+        Date.now() - externalInstallationStartedAt.current >=
+          externalInstallationTimeoutMs
+      ) {
+        timeoutExternalInstallation(nextAppStatus);
       } else {
-        setMessage(tr("storeInstallationInProgress"));
+        setAppStatus(nextAppStatus);
+        setMessage(tr("windowsInstalling"));
       }
     } catch (error) {
       setMessage(tr("readStatusFailed", { error: String(error) }));
@@ -1705,25 +1756,45 @@ function App() {
               }
             >
               <strong>
-                {updateAvailable
-                  ? tr("updateAvailable")
-                  : appInstalled
-                    ? appStatus?.updateAvailable === false
-                      ? tr("upToDate")
-                      : tr("installed")
-                    : tr("notInstalled")}
+                {installationTimedOut
+                  ? tr("windowsInstallationTimedOutTitle")
+                  : updateAvailable
+                    ? tr("updateAvailable")
+                    : appInstalled
+                      ? appStatus?.updateAvailable === false
+                        ? tr("upToDate")
+                        : tr("installed")
+                      : tr("notInstalled")}
               </strong>
               <span>
-                {updateAvailable
-                  ? tr("updateAvailableDescription")
-                  : appInstalled
-                    ? appStatus?.updateCheckError
-                      ? tr("updateCheckUnavailable")
-                      : tr("installedDescription")
-                    : appStatus
-                      ? tr("notInstalledDescription")
-                      : tr("checkingInstallation")}
+                {installationTimedOut
+                  ? tr("windowsInstallationTimedOut")
+                  : updateAvailable
+                    ? tr("updateAvailableDescription")
+                    : appInstalled
+                      ? appStatus?.updateCheckError
+                        ? tr("updateCheckUnavailable")
+                        : tr("installedDescription")
+                      : appStatus
+                        ? tr("notInstalledDescription")
+                        : tr("checkingInstallation")}
               </span>
+              {installationTimedOut ? (
+                <div className="installRecoveryActions">
+                  <button
+                    className="secondaryButton"
+                    onClick={() =>
+                      void handleInstallCodex(
+                        storeInstallForceUpdate,
+                        false,
+                        true,
+                      )
+                    }
+                  >
+                    {tr("retryCodexInstallation")}
+                  </button>
+                </div>
+              ) : null}
               {appInstalled ? (
                 <div className="versionGrid" aria-label={tr("installed")}>
                   <div className="versionItem">
@@ -1802,36 +1873,15 @@ function App() {
                 >
                   <div className="progressStatusRow">
                     <span className="progressSpinner" aria-hidden="true" />
-                    <small>{tr("windowsInstalling")}</small>
+                    <small>
+                      {externalInstallationMessage || tr("windowsInstalling")}
+                    </small>
                   </div>
                   <div
                     className="indeterminateProgressTrack"
                     role="progressbar"
                     aria-label={tr("windowsInstalling")}
                     aria-valuetext={tr("windowsInstalling")}
-                  >
-                    <span />
-                  </div>
-                </div>
-              ) : null}
-              {awaitingStoreInstallation ? (
-                <div
-                  className="installProgress indeterminateProgress"
-                  aria-live="polite"
-                  aria-busy="true"
-                >
-                  <div className="progressStatusRow">
-                    <span className="progressSpinner" aria-hidden="true" />
-                    <small>
-                      {storeInstallationMessage ||
-                        tr("storeInstallationInProgress")}
-                    </small>
-                  </div>
-                  <div
-                    className="indeterminateProgressTrack"
-                    role="progressbar"
-                    aria-label={tr("storeInstallationInProgress")}
-                    aria-valuetext={tr("storeInstallationInProgress")}
                   >
                     <span />
                   </div>
@@ -1851,10 +1901,10 @@ function App() {
               >
                 {tr("next")}
               </button>
-            ) : awaitingStoreInstallation ? (
+            ) : awaitingExternalInstallation ? (
               <button
                 className="primaryButton"
-                onClick={() => void checkStoreInstallation()}
+                onClick={() => void checkExternalInstallation()}
               >
                 {tr("checkInstallation")}
               </button>

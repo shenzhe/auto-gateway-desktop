@@ -46,8 +46,12 @@ async fn get_local_codex_app_status() -> CodexAppStatus {
 }
 
 #[tauri::command]
-async fn install_codex(app: AppHandle, force_update: bool) -> Result<CodexInstallResult, String> {
-    install_codex_app(&app, force_update).await
+async fn install_codex(
+    app: AppHandle,
+    force_update: bool,
+    force_redownload: bool,
+) -> Result<CodexInstallResult, String> {
+    install_codex_app(&app, force_update, force_redownload).await
 }
 
 #[tauri::command]
