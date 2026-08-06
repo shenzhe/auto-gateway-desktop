@@ -206,6 +206,9 @@ if [[ "$skip_install" != true ]]; then
   npm ci
 fi
 npm run build
+# Vite clears the frontend dist directory, so recreate the release output
+# directory before writing native bundles into it.
+mkdir -p "$release_dir"
 
 host_is_macos=false
 host_is_windows=false
