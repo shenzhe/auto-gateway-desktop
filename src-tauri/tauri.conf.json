@@ -71,7 +71,7 @@
       }
     },
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE5N0E5MThFN0Q2NTJDMjIKUldRaUxHVjlqcEY2R2JQQWplTWNPVHJ0MjJ5cFFIanBYeG5hODBIc2UzYkZuQmNxK2RrY1B4b24K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFCMkMzRUE0RUU3Qzg5REUKUldUZWlYenVwRDRzcTJRd0tXVU9tcUJYMndlRVdZTUNvTExORnBSbUVVZ0haVEpVLzUxRFBIOWkK",
       "endpoints": ["https://cdn.autogateway.cc/downloads/desktop/latest.json"]
     }
   }
