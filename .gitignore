@@ -4,5 +4,6 @@ src-tauri/target/
 .env
 .env.*
 !.env.example
+configs/r2.env
 *.key
 *.key.pub

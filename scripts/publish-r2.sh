@@ -7,6 +7,15 @@ set -euo pipefail
 : "${R2_BUCKET:?R2_BUCKET is required}"
 : "${R2_PUBLIC_BASE_URL:?R2_PUBLIC_BASE_URL is required}"
 
+command -v aws >/dev/null || {
+  echo "AWS CLI is required to publish artifacts to R2." >&2
+  exit 1
+}
+command -v jq >/dev/null || {
+  echo "jq is required to generate the updater manifest." >&2
+  exit 1
+}
+
 mac_arm64_dmg="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_aarch64.dmg"
 mac_arm64_updater="$RELEASE_DIR/AUTO Gateway Desktop_${VERSION}_aarch64.app.tar.gz"
 mac_arm64_signature="$mac_arm64_updater.sig"
@@ -40,8 +49,7 @@ upload() {
   local file="$1"
   local content_type="$2"
   local cache_control="$3"
-  local name
-  name="$(basename "$file")"
+  local name="${4:-$(basename "$file")}"
   aws s3 cp "$file" "s3://$R2_BUCKET/$prefix/$name" \
     --endpoint-url "$endpoint" \
     --no-progress \
@@ -62,6 +70,28 @@ upload "$windows_arm64_installer" "application/vnd.microsoft.portable-executable
 upload "$windows_arm64_signature" "text/plain; charset=utf-8" "public, max-age=31536000, immutable"
 upload "$mac_universal_dmg" "application/x-apple-diskimage" "public, max-age=31536000, immutable"
 upload "$windows_unified_installer" "application/vnd.microsoft.portable-executable" "public, max-age=31536000, immutable"
+
+checksums_path="$RELEASE_DIR/checksums-$VERSION.txt"
+sha256() {
+  if command -v sha256sum >/dev/null; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+{
+  for artifact in \
+    "$mac_arm64_dmg" "$mac_arm64_updater" "$mac_arm64_signature" \
+    "$mac_x64_dmg" "$mac_x64_updater" "$mac_x64_signature" \
+    "$windows_x64_installer" "$windows_x64_signature" \
+    "$windows_arm64_installer" "$windows_arm64_signature" \
+    "$mac_universal_dmg" "$windows_unified_installer"; do
+    printf '%s  %s\n' "$(sha256 "$artifact")" "$(basename "$artifact")"
+  done
+} > "$checksums_path"
+upload "$checksums_path" "text/plain; charset=utf-8" "public, max-age=31536000, immutable"
+upload "$checksums_path" "text/plain; charset=utf-8" "no-cache" "checksums.txt"
 
 manifest_path="$RELEASE_DIR/latest.json"
 mac_arm64_url="$base_url/$prefix/$(basename "$mac_arm64_updater" | sed 's/ /%20/g')"
@@ -112,6 +142,8 @@ jq -n \
       }
     }
   }' > "$manifest_path"
+
+jq -e '.version and .downloads.macos.url and .downloads.windows.url and .platforms' "$manifest_path" >/dev/null
 
 aws s3 cp "$manifest_path" "s3://$R2_BUCKET/$prefix/latest.json" \
   --endpoint-url "$endpoint" \

@@ -23,23 +23,70 @@ The Codex installer download uses `GET https://api.autogateway.cc/public/api/des
 
 ## Signed desktop releases
 
-Create updater artifacts with the same private key for every release. Do not commit the key or place it in the application bundle:
+Use the same Tauri updater private key for every release. Never commit the key
+or place it in the application bundle. The local release script builds all
+native artifacts, validates the version files, and can publish the completed
+release to R2:
 
 ```bash
-TAURI_SIGNING_PRIVATE_KEY="$(< /secure/path/desktop-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(< /secure/path/desktop-updater.key.password)" npm run tauri build -- --target x86_64-pc-windows-msvc --runner cargo-xwin --bundles nsis
-TAURI_SIGNING_PRIVATE_KEY="$(< /secure/path/desktop-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(< /secure/path/desktop-updater.key.password)" npm run tauri build -- --bundles app
+export TAURI_SIGNING_PRIVATE_KEY_FILE=/secure/path/desktop-updater.key
+export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(< /secure/path/desktop-updater.key.password)"
+npm run release:build -- --clean
 ```
 
-The Windows package can be built from macOS with `cargo-xwin` 0.23 or newer. It supplies the Windows CRT and SDK through the local xwin cache, while `clang-cl` and `lld-link` provide the compiler and linker. Install the tool and LLVM/NSIS once, then run:
+The script produces these files in `dist/release`:
+
+- macOS Apple Silicon and Intel updater archives, signatures, and DMGs;
+- one notarized/universal macOS DMG;
+- Windows x64 and ARM64 NSIS installers with updater signatures;
+- one Windows unified installer that selects the native payload at install time.
+
+On macOS/Linux, Windows builds use `cargo-xwin` and a local NSIS installation.
+`cargo-xwin` supplies the Windows CRT and SDK through its local cache, while
+`clang-cl` and `lld-link` provide the compiler and linker. Install the tools once:
 
 ```bash
-rustup target add x86_64-pc-windows-msvc
 cargo install cargo-xwin --locked
-eval "$(cargo xwin env --target x86_64-pc-windows-msvc)"
-TAURI_SIGNING_PRIVATE_KEY="$(< /secure/path/desktop-updater.key)" TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(< /secure/path/desktop-updater.key.password)" npm run tauri build -- --target x86_64-pc-windows-msvc --runner cargo-xwin --bundles nsis
+brew install llvm nsis
 ```
 
-On a native Windows release host with Visual Studio Build Tools and the Windows SDK installed, use the same Tauri command without `--runner cargo-xwin`.
+On a native Windows host with Visual Studio Build Tools and the Windows SDK,
+the same script uses the installed MSVC toolchain directly. Use
+`npm run release:build -- windows` when only the Windows installers are needed.
+
+To notarize the macOS applications locally, add `--notarize` and provide
+`APPLE_NOTARY_KEY_BASE64` (or `NOTARY_KEY_PATH`), `APPLE_NOTARY_KEY_ID`, and
+`APPLE_NOTARY_ISSUER_ID`. The default signing identity is
+`Developer ID Application: WANG JING (UFC4M35743)` and can be overridden with
+`APPLE_SIGNING_IDENTITY`.
+
+R2 publishing is explicit so a local test build never changes production data:
+
+```bash
+npm run release:build -- --notarize --publish-r2 --r2-env configs/r2.env
+```
+
+After the release commit is ready, the same script can create and push the
+version tag. Tagging happens only after the build and optional R2 publication
+complete successfully:
+
+```bash
+npm run release:build -- --notarize --publish-r2 --r2-env configs/r2.env --tag --push
+```
+
+`--tag` requires a clean working tree and creates `v<package-version>`.
+`--push` additionally pushes the current branch and tag to `origin`, which
+triggers the GitHub release workflow. Existing local or remote tags are never
+overwritten.
+
+The environment file may define `R2_ENDPOINT`, `R2_BUCKET`,
+`R2_PUBLIC_BASE_URL`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY`. It can
+also reuse the gateway repository's existing `AI_GATEWAY_SUPPORT_ATTACHMENT_R2_*`
+variables; the local script maps those names automatically. The publisher uploads every versioned artifact first and writes
+`downloads/desktop/latest.json` only after all required files are present. It
+also publishes a versioned checksum file and the non-cached
+`downloads/desktop/checksums.txt` alias.
+Install the AWS CLI before publishing (`brew install awscli` on macOS).
 
 The release job publishes four native updater artifacts and two unified download installers, then updates `latest.json` at the configured URL. The `downloads` block is for the public download page; Tauri ignores it and continues using the architecture-specific `platforms` block for safe native updates. A static manifest has this shape:
 
@@ -83,7 +130,7 @@ The release job publishes four native updater artifacts and two unified download
 
 1. The macOS matrix imports the existing `Developer ID Application: WANG JING (UFC4M35743)` certificate, signs, notarizes, staples, and packages both Apple Silicon and Intel apps for the updater. A separate job creates one notarized Universal DMG for downloads.
 2. The Windows matrix builds x64 and ARM64 NSIS installers. A unified installer embeds both and selects the native payload on the user's machine.
-3. The publish job requires all native and unified artifacts, uploads them to R2, and only then writes `downloads/desktop/latest.json`. This prevents the updater from seeing a release with one platform missing.
+3. The publish job requires all native and unified artifacts, uploads them to R2, and only then writes `downloads/desktop/latest.json`. The unified NSIS bootstrapper is packaged on Ubuntu, so publishing does not depend on a second Windows runner being available.
 
 Create the following repository secrets before dispatching the workflow. Secrets must be set in GitHub; never commit certificates, private keys, or R2 credentials.
 

@@ -1,12 +1,14 @@
 {
   "name": "@autogateway/desktop",
   "private": true,
-  "version": "0.1.35",
+  "version": "0.1.36",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "tsc --noEmit && vite build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "release:build": "bash scripts/build-release.sh",
+    "release:publish": "bash scripts/build-release.sh --publish-r2"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",

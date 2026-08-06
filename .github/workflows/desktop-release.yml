@@ -313,35 +313,52 @@ jobs:
   windows-unified-installer:
     name: Build Windows unified installer
     needs: [prepare, windows]
-    runs-on: windows-2022
+    # The unified installer is only an NSIS bootstrapper. Building it on an
+    # Ubuntu runner avoids consuming another Windows runner and keeps this
+    # packaging step independent from the native Windows compiler toolchain.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/download-artifact@v4
         with:
-          pattern: desktop-windows-${{ needs.prepare.outputs.version }}-*
-          path: ${{ runner.temp }}/windows-artifacts
-          merge-multiple: true
+          name: desktop-windows-${{ needs.prepare.outputs.version }}-x64
+          path: ${{ runner.temp }}/windows-artifacts/x64
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: desktop-windows-${{ needs.prepare.outputs.version }}-arm64
+          path: ${{ runner.temp }}/windows-artifacts/arm64
 
       - name: Build architecture-selecting installer
-        shell: pwsh
+        shell: bash
         run: |
-          $version = '${{ needs.prepare.outputs.version }}'
-          $artifactDir = Join-Path $env:RUNNER_TEMP 'windows-artifacts'
-          $payloadDir = Join-Path $env:RUNNER_TEMP 'unified-payload'
-          $releaseDir = Join-Path $env:RUNNER_TEMP 'release'
-          $x64Source = Get-ChildItem -Path $artifactDir -Filter "AUTO Gateway Desktop_$version`_x64-setup.exe" | Select-Object -First 1
-          $arm64Source = Get-ChildItem -Path $artifactDir -Filter "AUTO Gateway Desktop_$version`_arm64-setup.exe" | Select-Object -First 1
-          if ($null -eq $x64Source -or $null -eq $arm64Source) { throw 'Both native Windows installers are required for the unified installer.' }
-          New-Item -ItemType Directory -Force -Path $payloadDir, $releaseDir | Out-Null
-          Copy-Item $x64Source.FullName (Join-Path $payloadDir 'AUTO-Gateway-Desktop-x64-setup.exe')
-          Copy-Item $arm64Source.FullName (Join-Path $payloadDir 'AUTO-Gateway-Desktop-arm64-setup.exe')
-          choco install nsis --no-progress --yes
-          $makensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
-          if (-not (Test-Path $makensis)) { throw 'NSIS compiler was not installed.' }
-          $output = Join-Path $releaseDir "AUTO Gateway Desktop_$version`_setup.exe"
-          & $makensis "/DPAYLOAD_DIR=$payloadDir" "/DOUTFILE=$output" "/DAPP_VERSION=$version" scripts/windows-unified-installer.nsi
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path $output)) { throw 'The unified Windows installer was not produced.' }
+          set -euo pipefail
+          version='${{ needs.prepare.outputs.version }}'
+          artifact_dir="$RUNNER_TEMP/windows-artifacts"
+          payload_dir="$RUNNER_TEMP/unified-payload"
+          release_dir="$RUNNER_TEMP/release"
+          x64_source="$artifact_dir/x64/AUTO Gateway Desktop_${version}_x64-setup.exe"
+          arm64_source="$artifact_dir/arm64/AUTO Gateway Desktop_${version}_arm64-setup.exe"
+          [[ -s "$x64_source" && -s "$arm64_source" ]] || {
+            echo 'Both native Windows installers are required for the unified installer.' >&2
+            exit 1
+          }
+          mkdir -p "$payload_dir" "$release_dir"
+          cp "$x64_source" "$payload_dir/AUTO-Gateway-Desktop-x64-setup.exe"
+          cp "$arm64_source" "$payload_dir/AUTO-Gateway-Desktop-arm64-setup.exe"
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends --yes nsis
+          output="$release_dir/AUTO Gateway Desktop_${version}_setup.exe"
+          makensis \
+            "-DPAYLOAD_DIR=$payload_dir" \
+            "-DOUTFILE=$output" \
+            "-DAPP_VERSION=$version" \
+            scripts/windows-unified-installer.nsi
+          [[ -s "$output" ]] || {
+            echo 'The unified Windows installer was not produced.' >&2
+            exit 1
+          }
 
       - name: Publish unified Windows installer artifact
         uses: actions/upload-artifact@v4
