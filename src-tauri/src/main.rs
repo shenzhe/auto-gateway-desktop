@@ -336,10 +336,13 @@ async fn open_console(
     console_url
         .query_pairs_mut()
         .append_pair("desktopTicket", &ticket.ticket);
-    if section.as_deref() == Some("billing") {
+    if let Some(section) = section
+        .as_deref()
+        .filter(|section| matches!(*section, "billing" | "support"))
+    {
         console_url
             .query_pairs_mut()
-            .append_pair("section", "billing");
+            .append_pair("section", section);
     }
     if let Some(window) = app.get_webview_window("console") {
         window

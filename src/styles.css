@@ -959,7 +959,7 @@ h1 {
   margin-top: 76px;
 }
 .homeNav button,
-.homeHelp {
+.homeSupportLink {
   display: flex;
   align-items: center;
   gap: 15px;
@@ -974,7 +974,7 @@ h1 {
   text-align: left;
 }
 .homeNav button svg,
-.homeHelp svg {
+.homeSupportLink svg {
   width: 22px;
   height: 22px;
 }
@@ -987,14 +987,17 @@ h1 {
 .homeNav button.selected {
   box-shadow: inset 3px 0 var(--primary);
 }
-.homeHelp {
+.homeSupportLinks {
+  display: grid;
+  gap: 4px;
   margin-top: auto;
+  padding-top: 16px;
   border-top: 1px solid var(--line);
-  border-radius: 0;
-  color: var(--muted);
 }
-.homeHelp:hover {
+.homeSupportLink:hover {
+  border-color: color-mix(in oklch, var(--primary) 20%, var(--line));
   color: var(--primary);
+  background: color-mix(in oklch, var(--primary-soft) 54%, transparent);
 }
 .homeWorkspace {
   min-width: 0;
@@ -1600,7 +1603,7 @@ h1 {
   .homeNav button svg {
     display: none;
   }
-  .homeHelp {
+  .homeSupportLinks {
     display: none;
   }
   .homeTopBar {

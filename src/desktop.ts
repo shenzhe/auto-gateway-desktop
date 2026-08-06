@@ -129,7 +129,7 @@ export function restoreLatestCodexBackups(): Promise<RestoreResult> {
 
 export function openConsole(
   accessToken: string,
-  section?: "billing",
+  section?: "billing" | "support",
 ): Promise<void> {
   return invoke<void>("open_console", { accessToken, section });
 }

@@ -17,6 +17,8 @@ import {
   CurrencyDollarIcon,
   GearIcon,
   HouseIcon,
+  ChatCircleTextIcon,
+  QuestionIcon,
   SignOutIcon,
   UserCircleIcon,
   WarningIcon,
@@ -1327,7 +1329,7 @@ function App() {
     }
   }
 
-  async function handleOpenConsole(section?: "billing") {
+  async function handleOpenConsole(section?: "billing" | "support") {
     if (!desktopAccessToken) {
       setMessage(tr("signInRequired"));
       return;
@@ -1453,12 +1455,22 @@ function App() {
               {tr("userConsole")}
             </button>
           </nav>
-          <button
-            className="homeHelp"
-            onClick={() => void openUrl("https://autogateway.cc/docs#codex")}
-          >
-            {tr("needHelp")}
-          </button>
+          <div className="homeSupportLinks">
+            <button
+              className="homeSupportLink"
+              onClick={() => void openUrl("https://autogateway.cc/docs#codex")}
+            >
+              <QuestionIcon weight="bold" />
+              {tr("needHelp")}
+            </button>
+            <button
+              className="homeSupportLink"
+              onClick={() => void handleOpenConsole("support")}
+            >
+              <ChatCircleTextIcon weight="bold" />
+              {tr("reportIssue")}
+            </button>
+          </div>
         </aside>
         <section className="homeWorkspace">
           <header className="topBar homeTopBar">
