@@ -50,6 +50,7 @@ const DOWNLOAD_SOURCE_PROBE_BYTES: usize = 512 * 1024;
 #[serde(rename_all = "camelCase")]
 pub struct CodexAppStatus {
     pub installed: bool,
+    pub cached_installer_available: bool,
     pub path: Option<String>,
     pub local_version: Option<String>,
     pub latest_version: Option<String>,
@@ -65,6 +66,7 @@ pub struct CodexInstallResult {
     pub path: Option<String>,
     pub message: String,
     pub awaiting_installation: bool,
+    pub can_retry_cached_installer: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -132,6 +134,7 @@ pub fn local_status() -> CodexAppStatus {
     let Some(installation) = local_installation() else {
         return CodexAppStatus {
             installed: false,
+            cached_installer_available: completed_installer_available(),
             path: None,
             local_version: None,
             latest_version: None,
@@ -143,6 +146,7 @@ pub fn local_status() -> CodexAppStatus {
 
     CodexAppStatus {
         installed: true,
+        cached_installer_available: completed_installer_available(),
         path: Some(installation.path.display().to_string()),
         local_version: installation.version,
         latest_version: None,
@@ -185,6 +189,7 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
             path: Some(installation.path.display().to_string()),
             message: "The official ChatGPT desktop application is already installed.".to_string(),
             awaiting_installation: false,
+            can_retry_cached_installer: false,
         });
     }
 
@@ -209,37 +214,58 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
             .map(|release| release.version.as_str()),
         extension,
     );
+    let preferred_destination = existing_installation
+        .as_ref()
+        .map(|installation| installation.path.clone());
     emit_install_progress(app, "preparing", 0, None);
-    if let Err(error) = download_installer(app, &download_urls, &download_path).await {
-        #[cfg(target_os = "windows")]
-        {
-            return install_with_microsoft_store_fallback(app, force_update, &error).await;
+    let mut installer_result = None;
+    if download_path.is_file() {
+        let cached_download_complete = completed_download_marker(&download_path).is_file();
+        match install_downloaded_path(app, &download_path, preferred_destination.as_deref()).await {
+            Ok(result) => installer_result = Some(result),
+            Err(error) => {
+                if !cached_download_complete {
+                    let _ = fs::remove_file(completed_download_marker(&download_path));
+                } else {
+                    #[cfg(target_os = "windows")]
+                    {
+                        return install_with_microsoft_store_fallback(
+                            app,
+                            force_update,
+                            &format!("reinstall the completed ChatGPT installer: {error}"),
+                        )
+                        .await;
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    return Err(error);
+                }
+            }
         }
-        #[cfg(not(target_os = "windows"))]
-        return Err(error);
     }
 
-    let preferred_destination = existing_installation.map(|installation| installation.path);
-    emit_install_progress(app, "installing", 0, None);
-    #[cfg(target_os = "windows")]
-    emit_install_progress(app, "windows-installing", 0, None);
-    let installer_path = download_path.clone();
-    let install_result = tauri::async_runtime::spawn_blocking(move || {
-        install_downloaded_app(&installer_path, preferred_destination.as_deref())
-    })
-    .await
-    .map_err(|error| format!("wait for the official ChatGPT installer: {error}"))?;
-    #[cfg(target_os = "windows")]
-    let installer_result = match install_result {
-        Ok(result) => result,
-        Err(error) => {
-            let _ = fs::remove_file(&download_path);
-            return install_with_microsoft_store_fallback(app, force_update, &error).await;
+    if installer_result.is_none() {
+        if let Err(error) = download_installer(app, &download_urls, &download_path).await {
+            #[cfg(target_os = "windows")]
+            {
+                return install_with_microsoft_store_fallback(app, force_update, &error).await;
+            }
+            #[cfg(not(target_os = "windows"))]
+            return Err(error);
         }
-    };
+        match install_downloaded_path(app, &download_path, preferred_destination.as_deref()).await {
+            Ok(result) => installer_result = Some(result),
+            Err(error) => {
+                #[cfg(target_os = "windows")]
+                {
+                    return install_with_microsoft_store_fallback(app, force_update, &error).await;
+                }
+                #[cfg(not(target_os = "windows"))]
+                return Err(error);
+            }
+        }
+    }
 
-    #[cfg(not(target_os = "windows"))]
-    let installer_result = install_result?;
+    let installer_result = installer_result.expect("installer result should be available");
 
     #[cfg(not(target_os = "windows"))]
     let _ = installer_result;
@@ -254,14 +280,25 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
             path: None,
             message: "The official ChatGPT installer has opened. Finish the installation there; this page will continue automatically.".to_string(),
             awaiting_installation: true,
+            can_retry_cached_installer: false,
         });
     }
 
     emit_install_progress(app, "verifying", 0, None);
     let status = status().await;
     if !status.installed {
-        return Err("the official ChatGPT installer finished, but the application could not be found. Open the installer once, then return here and check again.".to_string());
+        let error =
+            "the official ChatGPT installer finished, but the application could not be found";
+        #[cfg(target_os = "windows")]
+        {
+            return install_with_microsoft_store_fallback(app, force_update, error).await;
+        }
+        #[cfg(not(target_os = "windows"))]
+        return Err(format!(
+            "{error}. Open the installer once, then return here and check again."
+        ));
     }
+    let _ = fs::remove_file(completed_download_marker(&download_path));
     if force_update {
         let expected_version = status.latest_version.as_deref();
         let installed_version = status.local_version.as_deref();
@@ -282,7 +319,26 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
             "ChatGPT and Codex are installed and ready for the next step.".to_string()
         },
         awaiting_installation: false,
+        can_retry_cached_installer: false,
     })
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn install_downloaded_path(
+    app: &AppHandle,
+    download_path: &Path,
+    preferred_destination: Option<&Path>,
+) -> Result<InstallerResult, String> {
+    emit_install_progress(app, "installing", 0, None);
+    #[cfg(target_os = "windows")]
+    emit_install_progress(app, "windows-installing", 0, None);
+    let installer_path = download_path.to_path_buf();
+    let preferred_destination = preferred_destination.map(Path::to_path_buf);
+    tauri::async_runtime::spawn_blocking(move || {
+        install_downloaded_app(&installer_path, preferred_destination.as_deref())
+    })
+    .await
+    .map_err(|error| format!("wait for the official ChatGPT installer: {error}"))?
 }
 
 async fn download_installer(
@@ -313,6 +369,7 @@ async fn download_installer_from_url(
     download_path: &Path,
 ) -> Result<(), String> {
     let source = download_source_label(download_url);
+    let _ = fs::remove_file(completed_download_marker(download_path));
     let existing_bytes = fs::metadata(download_path)
         .map(|metadata| metadata.len())
         .or_else(|error| {
@@ -392,6 +449,8 @@ async fn download_installer_from_url(
     }
     file.sync_all()
         .map_err(|error| format!("finish saving the ChatGPT installer: {error}"))?;
+    fs::write(completed_download_marker(download_path), b"complete")
+        .map_err(|error| format!("mark the ChatGPT installer as complete: {error}"))?;
     Ok(())
 }
 
@@ -413,6 +472,35 @@ fn resumable_download_path(version: Option<&str>, extension: &str) -> PathBuf {
         std::env::consts::OS,
         native_architecture(),
     ))
+}
+
+fn completed_download_marker(download_path: &Path) -> PathBuf {
+    let mut marker = download_path.as_os_str().to_os_string();
+    marker.push(".complete");
+    PathBuf::from(marker)
+}
+
+fn completed_installer_available() -> bool {
+    let prefix = format!(
+        "autogateway-chatgpt-{}-{}-",
+        std::env::consts::OS,
+        native_architecture()
+    );
+    let Ok(entries) = fs::read_dir(env::temp_dir()) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let marker = entry.path();
+        let Some(name) = marker.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        if !name.starts_with(&prefix) || !name.ends_with(".complete") {
+            return false;
+        }
+        let installer_name = name.trim_end_matches(".complete");
+        let installer = marker.with_file_name(installer_name);
+        installer.is_file() && marker.is_file()
+    })
 }
 
 async fn rank_download_sources(download_urls: &[String]) -> Vec<String> {
@@ -560,9 +648,56 @@ pub fn open_installed_app() -> Result<(), String> {
     Ok(())
 }
 
+pub fn is_installed_app_running() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        for process_name in ["ChatGPT", "Codex"] {
+            if process_name_running(process_name)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let script = "$process = Get-Process -Name 'ChatGPT','Codex','OpenAI.Codex' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -eq $process) { exit 1 }; exit 0";
+        let output = Command::new("powershell.exe")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .map_err(|error| format!("check whether ChatGPT is open: {error}"))?;
+        return match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(format!(
+                "check whether ChatGPT is open: PowerShell exited with {}",
+                output.status
+            )),
+        };
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Err("This desktop build supports macOS and Windows only.".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn process_name_running(process_name: &str) -> Result<bool, String> {
+    let output = Command::new("pgrep")
+        .args(["-x", process_name])
+        .output()
+        .map_err(|error| format!("check whether {process_name} is open: {error}"))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "check whether {process_name} is open: pgrep exited with {}",
+            output.status
+        )),
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn windows_app_user_model_id() -> Result<String, String> {
-    let script = "$package = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -eq $package) { exit 1 }; $manifest = Get-AppxPackageManifest -Package $package; $application = $manifest.Package.Applications.Application | Select-Object -First 1; if ($null -eq $application) { exit 1 }; Write-Output ($package.PackageFamilyName + '!' + $application.Id)";
+    let script = "$package = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)(chatgpt|codex)' } | Select-Object -First 1; if ($null -eq $package) { exit 1 }; $manifest = Get-AppxPackageManifest -Package $package; $application = $manifest.Package.Applications.Application | Select-Object -First 1; if ($null -eq $application) { exit 1 }; Write-Output ($package.PackageFamilyName + '!' + $application.Id)";
     let output = Command::new("powershell.exe")
         .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
@@ -715,7 +850,7 @@ fn local_installation() -> Option<LocalInstallation> {
 
 #[cfg(target_os = "windows")]
 fn local_installation() -> Option<LocalInstallation> {
-    let script = "$package = Get-AppxPackage -Name 'OpenAI.Codex' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -ne $package) { Write-Output $package.Version.ToString(); Write-Output $package.InstallLocation }";
+    let script = "$package = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)(chatgpt|codex)' } | Select-Object -First 1; if ($null -ne $package) { Write-Output $package.Version.ToString(); Write-Output $package.InstallLocation }";
     if let Ok(output) = Command::new("powershell.exe")
         .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
@@ -1014,7 +1149,7 @@ fn install_with_winget(force_update: bool) -> Result<(), String> {
 async fn install_with_microsoft_store_fallback(
     app: &AppHandle,
     force_update: bool,
-    _mirror_error: &str,
+    mirror_error: &str,
 ) -> Result<CodexInstallResult, String> {
     emit_install_progress(app, "installing", 0, None);
     let winget_result =
@@ -1024,11 +1159,20 @@ async fn install_with_microsoft_store_fallback(
 
     if winget_result.is_err() {
         open_microsoft_store()?;
+        let reason = mirror_error.trim();
+        let message = if reason.is_empty() {
+            "Microsoft Store has opened. Finish the ChatGPT installation there; this page will continue automatically.".to_string()
+        } else {
+            format!(
+                "The direct ChatGPT installer could not be completed ({reason}). Microsoft Store has opened; finish the installation there and this page will continue automatically."
+            )
+        };
         return Ok(CodexInstallResult {
             installed: false,
             path: None,
-            message: "The R2 installer is unavailable, so Microsoft Store has opened. Finish the installation there; this page will continue automatically.".to_string(),
+            message,
             awaiting_installation: true,
+            can_retry_cached_installer: completed_installer_available(),
         });
     }
 
@@ -1056,14 +1200,22 @@ async fn install_with_microsoft_store_fallback(
                 "ChatGPT and Codex are installed and ready for the next step.".to_string()
             },
             awaiting_installation: false,
+            can_retry_cached_installer: false,
         });
     }
 
     Ok(CodexInstallResult {
         installed: false,
         path: None,
-        message: "Microsoft Store is installing ChatGPT. This page will continue automatically when the installation finishes.".to_string(),
+        message: if mirror_error.trim().is_empty() {
+            "Microsoft Store is installing ChatGPT. This page will continue automatically when the installation finishes.".to_string()
+        } else {
+            format!(
+                "The direct ChatGPT installer could not be completed ({mirror_error}). Microsoft Store is installing ChatGPT; this page will continue automatically when the installation finishes."
+            )
+        },
         awaiting_installation: true,
+        can_retry_cached_installer: completed_installer_available(),
     })
 }
 
@@ -1113,7 +1265,7 @@ try {{
     if ($null -eq $entry) {{ throw 'the downloaded MSIX package does not contain AppxManifest.xml' }}
     $reader = New-Object System.IO.StreamReader($entry.Open())
     try {{ [xml]$manifest = $reader.ReadToEnd() }} finally {{ $reader.Dispose() }}
-    if ($manifest.Package.Identity.Name -ne 'OpenAI.Codex') {{
+    if ($manifest.Package.Identity.Name -notmatch '^(OpenAI\.)?(ChatGPT|Codex)$') {{
         throw 'the downloaded MSIX package is not the official OpenAI.Codex package'
     }}
 }} finally {{

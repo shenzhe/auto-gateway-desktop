@@ -319,6 +319,16 @@ select:focus-visible {
   padding: 9px 13px;
   font-size: 13px;
 }
+.headerSignOutButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--primary);
+}
+.headerSignOutButton svg {
+  width: 16px;
+  height: 16px;
+}
 .headerDevtoolsButton {
   display: inline-grid;
   width: 38px;
@@ -690,6 +700,64 @@ h1 {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   text-align: right;
+}
+.indeterminateProgress {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+}
+.progressStatusRow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 9px;
+}
+.progressStatusRow small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+  white-space: nowrap;
+}
+.progressSpinner {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  border: 2px solid color-mix(in oklch, var(--primary) 22%, transparent);
+  border-top-color: var(--primary);
+  border-radius: 50%;
+  animation: progress-spin 0.85s linear infinite;
+}
+.indeterminateProgressTrack {
+  position: relative;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: color-mix(in oklch, var(--primary) 12%, var(--line));
+}
+.indeterminateProgressTrack span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -38%;
+  width: 38%;
+  border-radius: inherit;
+  background: var(--primary);
+  animation: progress-slide 1.35s ease-in-out infinite;
+}
+@keyframes progress-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes progress-slide {
+  0% {
+    left: -38%;
+  }
+  55%,
+  100% {
+    left: 100%;
+  }
 }
 .downloadProgress {
   grid-template-columns: minmax(0, 1fr);
@@ -1389,6 +1457,13 @@ h1 {
   .userIdentity {
     margin-right: 0;
     padding-right: 10px;
+  }
+  .headerSignOutButton {
+    min-width: 38px;
+    padding-inline: 10px;
+  }
+  .headerSignOutButton span {
+    display: none;
   }
   .headerBalanceInfo span,
   .headerBalanceInfo small {

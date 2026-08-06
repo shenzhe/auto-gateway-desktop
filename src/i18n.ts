@@ -21,10 +21,10 @@ const dictionaries = {
     sessionRestoreFailed:
       "Unable to restore the saved desktop session: {error}",
     signInFailed: "Desktop sign-in could not be completed: {error}",
-    continueInBrowser: "Continue in browser",
-    openingBrowser: "Opening browser…",
-    completeInBrowser:
-      "Complete sign-in or registration in your browser, then return to AUTO Gateway Desktop.",
+    continueInApp: "Sign in or register",
+    openingSignIn: "Opening secure sign-in…",
+    completeInApp:
+      "Sign in or register in the secure window opened inside AUTO Gateway Desktop. It will close automatically after success.",
     startSignInFailed: "Unable to start desktop sign-in: {error}",
     configurationWritten:
       "Configuration written.{backup} Fully quit and reopen ChatGPT/Codex.",
@@ -77,6 +77,8 @@ const dictionaries = {
     installationFailed: "Codex installation failed: {error}",
     storeInstallationInProgress:
       "Finish the ChatGPT installation in Microsoft Store. This page is checking automatically.",
+    reinstallingCodex:
+      "A completed installer was found. Retrying the Codex installation…",
     checkInstallation: "Check installation",
     restoreConfirm:
       "Restore the latest Codex configuration backups? This replaces the current local configuration files.",
@@ -94,19 +96,27 @@ const dictionaries = {
       "Sign in with AUTO Gateway before opening the user console.",
     sessionExpired:
       "Your sign-in has expired. Connect your account again to continue.",
+    signOut: "Sign out",
+    signOutConfirm:
+      "Sign out of AUTO Gateway on this device? Your Codex configuration will not be changed.",
+    signedOut: "You have been signed out. Connect an account to continue.",
+    signOutFailed: "Unable to sign out: {error}",
     consoleFailed: "Unable to open the console: {error}",
     openDevtools: "Open DevTools",
     devtoolsFailed: "Unable to open DevTools: {error}",
     openCodexFailed: "Unable to open Codex: {error}",
+    openingCodex: "Opening Codex…",
+    codexOpened: "Codex is open",
+    codexOpenTimeout: "Codex did not finish opening. Try again.",
     stepConnect: "Connect account",
     stepInstall: "Install Codex",
     stepConfigure: "Configure AUTO Gateway",
     stepFinish: "Finish",
     setupSteps: "Setup steps",
-    secureSignIn: "Secure browser sign-in",
+    secureSignIn: "Secure in-app sign-in",
     connectTitle: "Connect your AUTO Gateway account",
     connectLead:
-      "We’ll open your browser so you can sign in securely. Your AUTO Gateway password never enters this app.",
+      "Sign in or create your AUTO Gateway account inside the app. Your password never enters this app.",
     continueToCodex: "Continue to Codex",
     accountConnected: "Account connected",
     noAccount: "No account connected yet",
@@ -137,6 +147,7 @@ const dictionaries = {
     installingCodex: "Installing Codex…",
     updateNow: "Update Codex",
     updatingCodex: "Updating Codex…",
+    installNow: "Install now",
     checkNow: "Check now",
     checkingCodexUpdates: "Checking for Codex updates…",
     codexUpdateFound: "Codex {version} is ready to update.",
@@ -246,10 +257,10 @@ const dictionaries = {
     sessionRestored: "已安全恢复 AUTO Gateway 登录状态。",
     sessionRestoreFailed: "无法恢复已保存的桌面登录状态：{error}",
     signInFailed: "无法完成桌面端登录：{error}",
-    continueInBrowser: "在浏览器中继续",
-    openingBrowser: "正在打开浏览器…",
-    completeInBrowser:
-      "请在浏览器中完成登录或注册，然后回到 AUTO Gateway Desktop。",
+    continueInApp: "登录或注册",
+    openingSignIn: "正在打开安全登录页…",
+    completeInApp:
+      "请在 AUTO Gateway Desktop 内打开的安全窗口中完成登录或注册，成功后窗口会自动关闭。",
     startSignInFailed: "无法开始桌面端登录：{error}",
     configurationWritten:
       "配置已写入。{backup}请完全退出并重新打开 ChatGPT/Codex。",
@@ -295,6 +306,7 @@ const dictionaries = {
     installationFailed: "Codex 安装失败：{error}",
     storeInstallationInProgress:
       "请在 Microsoft Store 完成 ChatGPT 安装；此页面会自动检查。",
+    reinstallingCodex: "发现已下载完成的安装包，正在自动重试安装 Codex…",
     checkInstallation: "检查安装状态",
     restoreConfirm: "要恢复最新的 Codex 配置备份吗？这会替换当前本地配置文件。",
     restored: "已恢复最新备份。请完全退出并重新打开 ChatGPT/Codex。",
@@ -308,19 +320,27 @@ const dictionaries = {
       "Codex 已切换回原来的配置。请完全退出并重新打开 ChatGPT/Codex。",
     signInRequired: "请先登录 AUTO Gateway，再打开用户控制台。",
     sessionExpired: "登录状态已失效，请重新连接账户后继续。",
+    signOut: "退出登录",
+    signOutConfirm:
+      "要退出此设备上的 AUTO Gateway 登录吗？Codex 配置不会被修改。",
+    signedOut: "已退出登录，请重新连接账户。",
+    signOutFailed: "退出登录失败：{error}",
     consoleFailed: "无法打开控制台：{error}",
     openDevtools: "打开 DevTools",
     devtoolsFailed: "无法打开 DevTools：{error}",
     openCodexFailed: "无法打开 Codex：{error}",
+    openingCodex: "正在打开 Codex…",
+    codexOpened: "Codex 已打开",
+    codexOpenTimeout: "Codex 未能完成打开，请重试。",
     stepConnect: "连接账户",
     stepInstall: "安装 Codex",
     stepConfigure: "配置 AUTO Gateway",
     stepFinish: "完成",
     setupSteps: "设置步骤",
-    secureSignIn: "安全浏览器登录",
+    secureSignIn: "应用内安全登录",
     connectTitle: "连接你的 AUTO Gateway 账户",
     connectLead:
-      "我们会打开浏览器，让你安全地登录。AUTO Gateway 密码不会进入此应用。",
+      "请直接在应用内登录或注册 AUTO Gateway 账户，密码不会进入此应用。",
     continueToCodex: "继续安装 Codex",
     accountConnected: "账户已连接",
     noAccount: "尚未连接账户",
@@ -347,6 +367,7 @@ const dictionaries = {
     installingCodex: "正在安装 Codex…",
     updateNow: "更新 Codex",
     updatingCodex: "正在更新 Codex…",
+    installNow: "立即安装",
     checkNow: "立即检查",
     checkingCodexUpdates: "正在检查 Codex 更新…",
     codexUpdateFound: "Codex {version} 已有可用更新。",

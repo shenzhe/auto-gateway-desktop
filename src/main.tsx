@@ -17,6 +17,7 @@ import {
   CurrencyDollarIcon,
   GearIcon,
   HouseIcon,
+  SignOutIcon,
   UserCircleIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
@@ -33,13 +34,16 @@ import {
   getDesktopAppVersion,
   getLocalCodexAppStatus,
   installCodex,
+  isCodexRunning,
   isAuthenticationRequired,
+  openDesktopSignIn,
   openCodex,
   openConsole,
   openDevtools,
   refreshDesktopState,
   restoreDesktopState,
   restoreLatestCodexBackups,
+  signOutDesktop,
   showMainWindow,
   updateTrayStatus,
   type CodexAppStatus,
@@ -76,6 +80,7 @@ type ConfigurationPhase =
   "idle" | "creatingKey" | "configuring" | "complete" | "error";
 type DesktopUpdatePhase =
   "idle" | "checking" | "ready" | "downloading" | "error";
+type CodexOpenPhase = "closed" | "opening" | "opened";
 
 function base64URL(bytes: Uint8Array): string {
   let binary = "";
@@ -265,6 +270,20 @@ function TrayPopup() {
     await exit(0);
   }
 
+  async function signOut() {
+    if (!window.confirm(tr("signOutConfirm"))) return;
+    try {
+      await signOutDesktop();
+      setDesktopSession(null);
+      setAccountBalance("");
+      await updateTrayStatus("", tr("trayUnavailable"));
+      await showMainWindow();
+      await getCurrentWebviewWindow().hide();
+    } catch {
+      setAccountBalance(tr("trayUnavailable"));
+    }
+  }
+
   return (
     <main className="trayPopupRoot">
       <section className="trayCard" role="dialog" aria-label={tr("trayTitle")}>
@@ -303,6 +322,13 @@ function TrayPopup() {
           <button
             className="traySecondaryButton"
             type="button"
+            onClick={() => void signOut()}
+          >
+            {tr("signOut")}
+          </button>
+          <button
+            className="traySecondaryButton"
+            type="button"
             onClick={() => void quitApplication()}
           >
             {tr("trayQuit")}
@@ -329,6 +355,10 @@ function App() {
   const [checkingCodexUpdates, setCheckingCodexUpdates] = useState(false);
   const [awaitingStoreInstallation, setAwaitingStoreInstallation] =
     useState(false);
+  const [storeInstallForceUpdate, setStoreInstallForceUpdate] = useState(false);
+  const [canRetryCachedInstaller, setCanRetryCachedInstaller] = useState(false);
+  const [storeInstallationMessage, setStoreInstallationMessage] = useState("");
+  const storeAutoRetryAttempted = useRef(false);
   const [setupCompleted, setSetupCompleted] = useState(false);
   const [accountBalance, setAccountBalance] = useState("");
   const [balanceSyncedAt, setBalanceSyncedAt] = useState<Date | null>(null);
@@ -347,6 +377,8 @@ function App() {
   >(null);
   const [desktopUpdateError, setDesktopUpdateError] = useState("");
   const [homeActionError, setHomeActionError] = useState("");
+  const [codexOpenPhase, setCodexOpenPhase] =
+    useState<CodexOpenPhase>("closed");
   const [selectedStep, setSelectedStep] = useState<WizardStep>(1);
   const [showSettings, setShowSettings] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
@@ -411,23 +443,53 @@ function App() {
     desktopSession?.user.email || desktopSession?.user.username || "";
   const showHome = setupCompleted && Boolean(desktopSession);
 
+  function resetSessionState(nextMessage: string) {
+    window.sessionStorage.removeItem(pendingAuthorizationStorageKey);
+    configurationRun.current = false;
+    authorizationExchangeInProgress.current = false;
+    setBusy(false);
+    setInstallingCodex(false);
+    setCheckingCodexUpdates(false);
+    setDesktopAccessToken("");
+    setDesktopSession(null);
+    setAPIKey("");
+    setAPIKeyCopied(false);
+    setAccountBalance("");
+    setBalanceSyncedAt(null);
+    setSetupCompleted(false);
+    setConfigurationPhase("idle");
+    setConfigurationError("");
+    setAwaitingStoreInstallation(false);
+    setCanRetryCachedInstaller(false);
+    setStoreInstallationMessage("");
+    storeAutoRetryAttempted.current = false;
+    setSelectedStep(1);
+    setHomeActionError("");
+    setMessage(nextMessage);
+    void updateTrayStatus("", tr("trayUnavailable"));
+  }
+
   async function handleSessionExpired() {
     try {
       await clearDesktopSession();
     } catch {
       // The in-memory state must still be cleared when the local session file cannot be removed.
     }
-    setDesktopAccessToken("");
-    setDesktopSession(null);
-    setAPIKey("");
-    setAccountBalance("");
-    setBalanceSyncedAt(null);
-    setSetupCompleted(false);
-    setConfigurationPhase("idle");
-    setConfigurationError("");
-    setSelectedStep(1);
-    setMessage(tr("sessionExpired"));
-    void updateTrayStatus("", tr("trayUnavailable"));
+    resetSessionState(tr("sessionExpired"));
+  }
+
+  async function handleSignOut() {
+    if (busy || installingCodex || restoringSession) return;
+    if (!window.confirm(tr("signOutConfirm"))) return;
+    setBusy(true);
+    try {
+      await signOutDesktop();
+      resetSessionState(tr("signedOut"));
+    } catch (error) {
+      setMessage(tr("signOutFailed", { error: String(error) }));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function refreshStatus(updateMessage = true) {
@@ -603,7 +665,17 @@ function App() {
         setAppStatus(nextAppStatus);
         if (nextAppStatus.installed) {
           setAwaitingStoreInstallation(false);
+          setCanRetryCachedInstaller(false);
+          setStoreInstallationMessage("");
           setMessage(tr("installedReady"));
+        } else if (
+          nextAppStatus.cachedInstallerAvailable &&
+          canRetryCachedInstaller &&
+          !storeAutoRetryAttempted.current &&
+          !installingCodex
+        ) {
+          storeAutoRetryAttempted.current = true;
+          void handleInstallCodex(storeInstallForceUpdate, true);
         }
       } catch {
         // The user can continue checking after the temporary Store installation state changes.
@@ -618,7 +690,14 @@ function App() {
       active = false;
       window.clearInterval(interval);
     };
-  }, [awaitingStoreInstallation, designPreviewState, locale]);
+  }, [
+    awaitingStoreInstallation,
+    designPreviewState,
+    installingCodex,
+    canRetryCachedInstaller,
+    locale,
+    storeInstallForceUpdate,
+  ]);
 
   useEffect(() => {
     if (designPreviewState) {
@@ -658,6 +737,21 @@ function App() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (designPreviewState) return;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void listen("desktop-session-cleared", () => {
+      if (active) resetSessionState(tr("signedOut"));
+    }).then((nextUnlisten) => {
+      unlisten = nextUnlisten;
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [locale]);
 
   useEffect(() => {
     if (!desktopAccessToken) {
@@ -707,6 +801,31 @@ function App() {
       window.clearInterval(interval);
     };
   }, [desktopAccessToken, showHome]);
+
+  useEffect(() => {
+    if (designPreviewState || !showHome || !appInstalled) return;
+    let active = true;
+    async function refreshCodexOpenState() {
+      try {
+        const running = await isCodexRunning();
+        if (!active) return;
+        setCodexOpenPhase((current) =>
+          current === "opening" ? current : running ? "opened" : "closed",
+        );
+      } catch {
+        // Keep the last known state when a process check is temporarily unavailable.
+      }
+    }
+    void refreshCodexOpenState();
+    const interval = window.setInterval(
+      () => void refreshCodexOpenState(),
+      1500,
+    );
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [appInstalled, designPreviewState, showHome]);
 
   useEffect(() => {
     applyTheme(theme);
@@ -820,12 +939,8 @@ function App() {
         pendingAuthorizationStorageKey,
         JSON.stringify({ verifier, state }),
       );
-      const query = new URLSearchParams({
-        desktopCodeChallenge: challenge,
-        desktopState: state,
-      });
-      await openUrl(`https://autogateway.cc/login?${query.toString()}`);
-      setMessage(tr("completeInBrowser"));
+      await openDesktopSignIn(challenge, state);
+      setMessage(tr("completeInApp"));
     } catch (error) {
       setMessage(tr("startSignInFailed", { error: String(error) }));
     } finally {
@@ -923,17 +1038,38 @@ function App() {
     setMessage(tr("workspaceReady"));
   }
 
-  async function handleInstallCodex(forceUpdate = false) {
+  async function handleInstallCodex(
+    forceUpdate = false,
+    automaticRetry = false,
+  ) {
+    setAwaitingStoreInstallation(false);
+    setStoreInstallForceUpdate(forceUpdate);
+    setCanRetryCachedInstaller(false);
+    setStoreInstallationMessage("");
     setInstallingCodex(true);
     setInstallProgress({ stage: "preparing", downloadedBytes: 0 });
-    setMessage(tr(forceUpdate ? "updating" : "installing"));
+    setMessage(
+      tr(
+        automaticRetry
+          ? "reinstallingCodex"
+          : forceUpdate
+            ? "updating"
+            : "installing",
+      ),
+    );
     try {
       const result = await installCodex(forceUpdate);
       if (result.awaitingInstallation) {
+        storeAutoRetryAttempted.current = automaticRetry;
         setAwaitingStoreInstallation(true);
+        setCanRetryCachedInstaller(result.canRetryCachedInstaller);
+        setStoreInstallationMessage(result.message);
         setMessage(result.message);
         return;
       }
+      setAwaitingStoreInstallation(false);
+      setCanRetryCachedInstaller(false);
+      setStoreInstallationMessage("");
       await refreshStatus();
       setMessage(tr(forceUpdate ? "updatedReady" : "installedReady"));
     } catch (error) {
@@ -984,6 +1120,8 @@ function App() {
       setAppStatus(nextAppStatus);
       if (nextAppStatus.installed) {
         setAwaitingStoreInstallation(false);
+        setCanRetryCachedInstaller(false);
+        setStoreInstallationMessage("");
         setMessage(tr("installedReady"));
       } else {
         setMessage(tr("storeInstallationInProgress"));
@@ -1047,9 +1185,21 @@ function App() {
 
   async function handleOpenCodex() {
     setHomeActionError("");
+    setCodexOpenPhase("opening");
     try {
       await openCodex();
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        if (await isCodexRunning()) {
+          setCodexOpenPhase("opened");
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      }
+      setCodexOpenPhase("closed");
+      setHomeActionError(tr("codexOpenTimeout"));
     } catch (error) {
+      setCodexOpenPhase("closed");
       setHomeActionError(tr("openCodexFailed", { error: String(error) }));
     }
   }
@@ -1119,6 +1269,16 @@ function App() {
                 <strong>{accountName}</strong>
                 <small>{accountDetail}</small>
               </span>
+            </button>
+            <button
+              className="headerActionButton headerSignOutButton"
+              aria-label={tr("signOut")}
+              title={tr("signOut")}
+              disabled={busy || installingCodex || restoringSession}
+              onClick={() => void handleSignOut()}
+            >
+              <SignOutIcon weight="bold" />
+              <span>{tr("signOut")}</span>
             </button>
             <div className="headerBalance" aria-label={tr("accountBalance")}>
               <div className="headerBalanceInfo">
@@ -1259,14 +1419,18 @@ function App() {
                 <small>{versionStatus}</small>
                 <button
                   className="versionAction"
-                  disabled={
-                    checkingCodexUpdates || installingCodex || !appInstalled
+                  disabled={checkingCodexUpdates || installingCodex}
+                  onClick={() =>
+                    appInstalled
+                      ? void handleCheckCodexUpdates()
+                      : openSetupFromHome()
                   }
-                  onClick={() => void handleCheckCodexUpdates()}
                 >
-                  {checkingCodexUpdates
-                    ? tr("checkingCodexUpdates")
-                    : tr("checkNow")}
+                  {!appInstalled
+                    ? tr("installNow")
+                    : checkingCodexUpdates
+                      ? tr("checkingCodexUpdates")
+                      : tr("checkNow")}
                 </button>
                 {updateAvailable ? (
                   <button
@@ -1280,10 +1444,14 @@ function App() {
               </div>
               <button
                 className="primaryButton homeOpenButton"
-                disabled={!appInstalled}
+                disabled={!appInstalled || codexOpenPhase === "opening"}
                 onClick={() => void handleOpenCodex()}
               >
-                {tr("openCodex")}
+                {codexOpenPhase === "opening"
+                  ? tr("openingCodex")
+                  : codexOpenPhase === "opened"
+                    ? tr("codexOpened")
+                    : tr("openCodex")}
               </button>
             </section>
             <section className="homeSection">
@@ -1427,9 +1595,7 @@ function App() {
                 {accountConnected ? tr("accountConnected") : tr("noAccount")}
               </strong>
               <span>
-                {accountConnected
-                  ? tr("sessionRestored")
-                  : tr("completeInBrowser")}
+                {accountConnected ? tr("sessionRestored") : tr("completeInApp")}
               </span>
             </div>
           </div>
@@ -1446,8 +1612,8 @@ function App() {
                 : accountConnected
                   ? tr("continueToCodex")
                   : busy
-                    ? tr("openingBrowser")
-                    : tr("continueInBrowser")}
+                    ? tr("openingSignIn")
+                    : tr("continueInApp")}
             </button>
           </div>
         </section>
@@ -1558,13 +1724,46 @@ function App() {
               ) : null}
               {installingCodex &&
               installProgress?.stage === "windows-installing" ? (
-                <div className="installProgress" aria-live="polite">
-                  <small>{tr("windowsInstalling")}</small>
+                <div
+                  className="installProgress indeterminateProgress"
+                  aria-live="polite"
+                  aria-busy="true"
+                >
+                  <div className="progressStatusRow">
+                    <span className="progressSpinner" aria-hidden="true" />
+                    <small>{tr("windowsInstalling")}</small>
+                  </div>
+                  <div
+                    className="indeterminateProgressTrack"
+                    role="progressbar"
+                    aria-label={tr("windowsInstalling")}
+                    aria-valuetext={tr("windowsInstalling")}
+                  >
+                    <span />
+                  </div>
                 </div>
               ) : null}
               {awaitingStoreInstallation ? (
-                <div className="installProgress" aria-live="polite">
-                  <small>{tr("storeInstallationInProgress")}</small>
+                <div
+                  className="installProgress indeterminateProgress"
+                  aria-live="polite"
+                  aria-busy="true"
+                >
+                  <div className="progressStatusRow">
+                    <span className="progressSpinner" aria-hidden="true" />
+                    <small>
+                      {storeInstallationMessage ||
+                        tr("storeInstallationInProgress")}
+                    </small>
+                  </div>
+                  <div
+                    className="indeterminateProgressTrack"
+                    role="progressbar"
+                    aria-label={tr("storeInstallationInProgress")}
+                    aria-valuetext={tr("storeInstallationInProgress")}
+                  >
+                    <span />
+                  </div>
                 </div>
               ) : null}
             </div>
@@ -1813,6 +2012,18 @@ function App() {
                 <strong>{accountName}</strong>
                 <small>{accountDetail}</small>
               </span>
+            </button>
+          ) : null}
+          {desktopSession ? (
+            <button
+              className="headerActionButton headerSignOutButton"
+              aria-label={tr("signOut")}
+              title={tr("signOut")}
+              disabled={busy || installingCodex || restoringSession}
+              onClick={() => void handleSignOut()}
+            >
+              <SignOutIcon weight="bold" />
+              <span>{tr("signOut")}</span>
             </button>
           ) : null}
           <button

@@ -6,8 +6,8 @@ mod desktop_auth;
 mod http_client;
 
 use codex_app::{
-    install as install_codex_app, local_status as local_codex_app_status, open_installed_app,
-    status as codex_app_status, CodexAppStatus, CodexInstallResult,
+    install as install_codex_app, is_installed_app_running, local_status as local_codex_app_status,
+    open_installed_app, status as codex_app_status, CodexAppStatus, CodexInstallResult,
 };
 use codex_config::{
     apply_configuration, default_codex_paths, restore_latest_backups, CodexStatus,
@@ -54,6 +54,11 @@ fn open_codex() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn is_codex_running() -> Result<bool, String> {
+    is_installed_app_running()
+}
+
+#[tauri::command]
 fn configure_codex(api_key: String, endpoint: String) -> Result<ConfigurationResult, String> {
     let paths = default_codex_paths()?;
     apply_configuration(&paths, &api_key, &endpoint)
@@ -80,6 +85,62 @@ async fn exchange_desktop_authorization_command(
     let session = exchange_desktop_authorization(&code, &code_verifier, &state).await?;
     save_desktop_session(&app, &session)?;
     Ok(session)
+}
+
+#[tauri::command]
+fn open_desktop_sign_in_command(
+    app: AppHandle,
+    challenge: String,
+    state: String,
+) -> Result<(), String> {
+    let challenge = challenge.trim();
+    let state = state.trim();
+    if challenge.is_empty() || state.is_empty() {
+        return Err("desktop sign-in challenge is missing".to_string());
+    }
+    let mut sign_in_url = Url::parse("https://autogateway.cc/login")
+        .map_err(|error| format!("build desktop sign-in URL: {error}"))?;
+    sign_in_url
+        .query_pairs_mut()
+        .append_pair("desktopCodeChallenge", challenge)
+        .append_pair("desktopState", state);
+
+    if let Some(window) = app.get_webview_window("auth") {
+        window
+            .navigate(sign_in_url)
+            .map_err(|error| format!("load the sign-in page: {error}"))?;
+        window
+            .show()
+            .map_err(|error| format!("show the sign-in window: {error}"))?;
+        window
+            .set_focus()
+            .map_err(|error| format!("focus the sign-in window: {error}"))?;
+        return Ok(());
+    }
+
+    let app_handle = app.clone();
+    WebviewWindowBuilder::new(&app, "auth", WebviewUrl::External(sign_in_url))
+        .title("Connect AUTO Gateway")
+        .inner_size(520.0, 760.0)
+        .min_inner_size(420.0, 640.0)
+        .center()
+        .resizable(true)
+        .on_navigation(move |url| {
+            let is_callback = url.scheme() == "autogateway"
+                && url.host_str() == Some("auth")
+                && url.path() == "/callback";
+            if is_callback {
+                let _ = app_handle.emit("desktop-open-url", vec![url.as_str().to_string()]);
+                if let Some(window) = app_handle.get_webview_window("auth") {
+                    let _ = window.close();
+                }
+                return false;
+            }
+            true
+        })
+        .build()
+        .map_err(|error| format!("open the in-app sign-in window: {error}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -112,6 +173,13 @@ async fn refresh_desktop_state_command(
 #[tauri::command]
 fn clear_desktop_session_command(app: AppHandle) -> Result<(), String> {
     clear_desktop_session(&app)
+}
+
+#[tauri::command]
+fn sign_out_desktop_command(app: AppHandle) -> Result<(), String> {
+    clear_desktop_session(&app)?;
+    app.emit("desktop-session-cleared", ())
+        .map_err(|error| format!("notify desktop windows about sign-out: {error}"))
 }
 
 #[tauri::command]
@@ -181,7 +249,7 @@ fn show_tray_popup(app: &AppHandle, tray_rect: Rect) {
         _ => return,
     };
     let popup_width = 360.0 * scale_factor;
-    let popup_height = 248.0 * scale_factor;
+    let popup_height = 300.0 * scale_factor;
     let mut x = tray_x - popup_width + tray_width;
     let mut y = if cfg!(target_os = "windows") {
         tray_y - popup_height - (10.0 * scale_factor)
@@ -315,14 +383,17 @@ fn main() {
             get_local_codex_app_status,
             install_codex,
             open_codex,
+            is_codex_running,
             configure_codex,
             restore_latest_codex_backups,
             get_installation_id,
             exchange_desktop_authorization_command,
+            open_desktop_sign_in_command,
             bootstrap_desktop_key_command,
             restore_desktop_state_command,
             refresh_desktop_state_command,
             clear_desktop_session_command,
+            sign_out_desktop_command,
             get_desktop_account_summary_command,
             update_tray_status_command,
             show_main_window,

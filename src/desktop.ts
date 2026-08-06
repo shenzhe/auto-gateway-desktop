@@ -12,6 +12,7 @@ export type CodexStatus = {
 
 export type CodexAppStatus = {
   installed: boolean;
+  cachedInstallerAvailable?: boolean;
   path?: string;
   localVersion?: string;
   latestVersion?: string;
@@ -25,6 +26,7 @@ export type CodexInstallResult = {
   path?: string;
   message: string;
   awaitingInstallation: boolean;
+  canRetryCachedInstaller: boolean;
 };
 
 export type CodexInstallProgress = {
@@ -103,6 +105,10 @@ export function openCodex(): Promise<void> {
   return invoke<void>("open_codex");
 }
 
+export function isCodexRunning(): Promise<boolean> {
+  return invoke<boolean>("is_codex_running");
+}
+
 export function configureCodex(
   apiKey: string,
   endpoint: string,
@@ -164,6 +170,13 @@ export function exchangeDesktopAuthorization(
   });
 }
 
+export function openDesktopSignIn(
+  challenge: string,
+  state: string,
+): Promise<void> {
+  return invoke<void>("open_desktop_sign_in_command", { challenge, state });
+}
+
 export function bootstrapDesktopKey(
   accessToken: string,
   rotateExisting = false,
@@ -188,6 +201,10 @@ export function refreshDesktopState(
 
 export function clearDesktopSession(): Promise<void> {
   return invoke<void>("clear_desktop_session_command");
+}
+
+export function signOutDesktop(): Promise<void> {
+  return invoke<void>("sign_out_desktop_command");
 }
 
 export function clearStoredDesktopAPIKey(): Promise<void> {
