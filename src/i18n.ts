@@ -215,6 +215,19 @@ const dictionaries = {
     desktopUpdateNow: "Install update",
     desktopUpdating: "Installing update… {percent}%",
     desktopUpdateFailed: "Desktop update failed: {error}",
+    desktopUpdateRetrying:
+      "The automatic update failed. Checking for the latest version and retrying…",
+    desktopUpdateManualTitle: "Automatic update failed",
+    desktopUpdateManualDescription:
+      "The update could not be installed automatically. Open the installer and overwrite the current AUTO Gateway Desktop installation.",
+    desktopUpdateManualConfirm:
+      "The automatic update failed twice. Open the latest installer and overwrite the current AUTO Gateway Desktop installation?",
+    desktopUpdateManualOpened:
+      "The installer has been opened. Run it and choose overwrite or install to update AUTO Gateway Desktop.",
+    desktopUpdateManualOpen: "Open installer",
+    desktopUpdateManualUnavailable:
+      "The installer URL is unavailable. Check for updates again and retry.",
+    desktopUpdateManualOpenFailed: "Unable to open the installer: {error}",
     desktopUpdateCheckNow: "Check Desktop updates",
     desktopUpdateCheckDescription:
       "Check the signed AUTO Gateway Desktop release now.",
@@ -450,6 +463,18 @@ const dictionaries = {
     desktopUpdateNow: "安装更新",
     desktopUpdating: "正在安装更新… {percent}%",
     desktopUpdateFailed: "桌面应用更新失败：{error}",
+    desktopUpdateRetrying: "自动更新失败，正在重新获取最新版本并重试安装…",
+    desktopUpdateManualTitle: "自动更新失败",
+    desktopUpdateManualDescription:
+      "自动更新安装失败，请打开安装包并覆盖安装当前 AUTO Gateway Desktop。",
+    desktopUpdateManualConfirm:
+      "自动更新连续失败两次。要打开最新安装包并覆盖安装当前 AUTO Gateway Desktop 吗？",
+    desktopUpdateManualOpened:
+      "安装包已打开，请运行安装程序并选择覆盖或安装，以更新 AUTO Gateway Desktop。",
+    desktopUpdateManualOpen: "打开安装包",
+    desktopUpdateManualUnavailable:
+      "暂时无法获取安装包地址，请重新检查更新后重试。",
+    desktopUpdateManualOpenFailed: "无法打开安装包：{error}",
     desktopUpdateCheckNow: "检查桌面应用更新",
     desktopUpdateCheckDescription:
       "立即检查已签名的 AUTO Gateway Desktop 新版本。",

@@ -82,7 +82,7 @@ type WizardStep = 1 | 2 | 3 | 4;
 type ConfigurationPhase =
   "idle" | "creatingKey" | "configuring" | "complete" | "error";
 type DesktopUpdatePhase =
-  "idle" | "checking" | "ready" | "downloading" | "error";
+  "idle" | "checking" | "ready" | "downloading" | "error" | "manual";
 type CodexOpenPhase = "closed" | "opening" | "opened";
 
 function base64URL(bytes: Uint8Array): string {
@@ -412,6 +412,7 @@ function App() {
     number | null
   >(null);
   const [desktopUpdateError, setDesktopUpdateError] = useState("");
+  const [desktopInstallerUrl, setDesktopInstallerUrl] = useState("");
   const [homeActionError, setHomeActionError] = useState("");
   const [codexOpenPhase, setCodexOpenPhase] =
     useState<CodexOpenPhase>("closed");
@@ -584,6 +585,7 @@ function App() {
       return;
     setDesktopUpdatePhase("checking");
     setDesktopUpdateError("");
+    setDesktopInstallerUrl("");
     try {
       const nextUpdate = await check();
       setDesktopUpdate(nextUpdate);
@@ -1189,37 +1191,91 @@ function App() {
     }
   }
 
-  async function handleInstallDesktopUpdate() {
-    if (!desktopUpdate) return;
-    setDesktopUpdatePhase("downloading");
+  function getManualDesktopInstallerUrl(update: Update): string | null {
+    const rawDownloads = update.rawJson.downloads;
+    if (!rawDownloads || typeof rawDownloads !== "object") return null;
+    const platform = /Windows/i.test(navigator.userAgent) ? "windows" : "macos";
+    const candidate = (rawDownloads as Record<string, unknown>)[platform];
+    if (!candidate || typeof candidate !== "object") return null;
+    const value = (candidate as Record<string, unknown>).url;
+    if (typeof value !== "string") return null;
+    try {
+      const url = new URL(value);
+      return url.protocol === "https:" ? url.toString() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function openManualDesktopInstaller(update: Update | null) {
+    const installerUrl = update ? getManualDesktopInstallerUrl(update) : null;
+    setDesktopInstallerUrl(installerUrl || "");
+    if (!installerUrl) {
+      setMessage(tr("desktopUpdateManualUnavailable"));
+      return;
+    }
+    if (!window.confirm(tr("desktopUpdateManualConfirm"))) return;
+    try {
+      await openUrl(installerUrl);
+      setMessage(tr("desktopUpdateManualOpened"));
+    } catch (error) {
+      setMessage(tr("desktopUpdateManualOpenFailed", { error: String(error) }));
+    }
+  }
+
+  async function downloadAndInstallDesktopUpdate(update: Update) {
     setDesktopUpdateProgress(0);
     let contentLength = 0;
     let downloadedBytes = 0;
+    await update.downloadAndInstall((event) => {
+      if (event.event === "Started") {
+        contentLength = event.data.contentLength ?? 0;
+        downloadedBytes = 0;
+        setDesktopUpdateProgress(contentLength > 0 ? 0 : null);
+      } else if (event.event === "Progress") {
+        downloadedBytes += event.data.chunkLength;
+        setDesktopUpdateProgress(
+          contentLength > 0
+            ? Math.min(
+                100,
+                Math.round((downloadedBytes / contentLength) * 100),
+              )
+            : null,
+        );
+      } else if (event.event === "Finished") {
+        setDesktopUpdateProgress(100);
+      }
+    });
+  }
+
+  async function handleInstallDesktopUpdate() {
+    if (!desktopUpdate) return;
+    const initialUpdate = desktopUpdate;
+    setDesktopUpdatePhase("downloading");
+    setDesktopUpdateError("");
     try {
-      await desktopUpdate.downloadAndInstall((event) => {
-        if (event.event === "Started") {
-          contentLength = event.data.contentLength ?? 0;
-          downloadedBytes = 0;
-          setDesktopUpdateProgress(contentLength > 0 ? 0 : null);
-        } else if (event.event === "Progress") {
-          downloadedBytes += event.data.chunkLength;
-          setDesktopUpdateProgress(
-            contentLength > 0
-              ? Math.min(
-                  100,
-                  Math.round((downloadedBytes / contentLength) * 100),
-                )
-              : null,
-          );
-        } else if (event.event === "Finished") {
-          setDesktopUpdateProgress(100);
-        }
-      });
+      await downloadAndInstallDesktopUpdate(initialUpdate);
       await relaunch();
     } catch (error) {
-      setDesktopUpdatePhase("ready");
+      setMessage(tr("desktopUpdateRetrying"));
       setDesktopUpdateProgress(null);
-      setMessage(tr("desktopUpdateFailed", { error: String(error) }));
+      let latestUpdate: Update | null = null;
+      try {
+        latestUpdate = await check();
+        if (!latestUpdate) {
+          throw new Error("No desktop update was available after retrying.");
+        }
+        setDesktopUpdate(latestUpdate);
+        await downloadAndInstallDesktopUpdate(latestUpdate);
+        await relaunch();
+      } catch (retryError) {
+        const manualUpdate = latestUpdate || initialUpdate;
+        setDesktopUpdatePhase("manual");
+        setDesktopUpdateProgress(null);
+        setDesktopUpdateError(String(retryError));
+        setMessage(tr("desktopUpdateManualDescription"));
+        await openManualDesktopInstaller(manualUpdate);
+      }
     }
   }
 
@@ -1485,7 +1541,7 @@ function App() {
             <p className="sectionKicker">{tr("workspace")}</p>
             <h1>{tr("homeTitle")}</h1>
             <p className="lead homeLead">{tr("homeLead")}</p>
-            {desktopUpdate ? (
+            {desktopUpdate && desktopUpdatePhase !== "manual" ? (
               <section className="notice warning desktopUpdateNotice">
                 <strong>{tr("desktopUpdateAvailable")}</strong>
                 <span>
@@ -1517,6 +1573,19 @@ function App() {
                   onClick={() => void checkDesktopUpdate(true)}
                 >
                   {tr("desktopUpdateCheckNow")}
+                </button>
+              </section>
+            ) : null}
+            {desktopUpdatePhase === "manual" ? (
+              <section className="notice warning desktopUpdateNotice">
+                <strong>{tr("desktopUpdateManualTitle")}</strong>
+                <span>{tr("desktopUpdateManualDescription")}</span>
+                <button
+                  className="secondaryButton"
+                  disabled={!desktopInstallerUrl}
+                  onClick={() => void openManualDesktopInstaller(desktopUpdate)}
+                >
+                  {tr("desktopUpdateManualOpen")}
                 </button>
               </section>
             ) : null}
