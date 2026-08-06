@@ -228,6 +228,10 @@ fn update_tray_status_command(
 
 #[tauri::command]
 fn show_main_window(app: AppHandle) -> Result<(), String> {
+    reveal_main_window(&app)
+}
+
+fn reveal_main_window(app: &AppHandle) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "the AUTO Gateway main window is unavailable".to_string())?;
@@ -395,14 +399,10 @@ fn main() {
                 .into_iter()
                 .filter(|argument| argument.to_ascii_lowercase().starts_with("autogateway://"))
                 .collect::<Vec<_>>();
-            if urls.is_empty() {
-                return;
+            let _ = reveal_main_window(app);
+            if !urls.is_empty() {
+                let _ = app.emit("desktop-open-url", urls);
             }
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.set_focus();
-            }
-            let _ = app.emit("desktop-open-url", urls);
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_opener::init())
@@ -444,6 +444,12 @@ fn main() {
             open_console,
             open_devtools
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run AUTO Gateway Desktop");
+        .build(tauri::generate_context!())
+        .expect("failed to build AUTO Gateway Desktop")
+        .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            if matches!(event, tauri::RunEvent::Reopen { .. }) {
+                let _ = reveal_main_window(app);
+            }
+        });
 }
