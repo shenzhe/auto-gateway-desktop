@@ -56,14 +56,15 @@ the same script uses the installed MSVC toolchain directly. Use
 
 To notarize the macOS applications locally, add `--notarize` and provide
 `APPLE_NOTARY_KEY_BASE64` (or `NOTARY_KEY_PATH`), `APPLE_NOTARY_KEY_ID`, and
-`APPLE_NOTARY_ISSUER_ID`. The default signing identity is
+`APPLE_NOTARY_ISSUER_ID`, or load them from a local file with
+`--notary-env configs/apple-notary.env`. The default signing identity is
 `Developer ID Application: WANG JING (UFC4M35743)` and can be overridden with
 `APPLE_SIGNING_IDENTITY`.
 
 R2 publishing is explicit so a local test build never changes production data:
 
 ```bash
-npm run release:build -- --notarize --publish-r2 --r2-env configs/r2.env
+npm run release:build -- --notarize --notary-env configs/apple-notary.env --publish-r2 --r2-env configs/r2.env
 ```
 
 After the release commit is ready, the same script can create and push the
@@ -71,7 +72,7 @@ version tag. Tagging happens only after the build and optional R2 publication
 complete successfully:
 
 ```bash
-npm run release:build -- --notarize --publish-r2 --r2-env configs/r2.env --tag --push
+npm run release:build -- --notarize --notary-env configs/apple-notary.env --publish-r2 --r2-env configs/r2.env --tag --push
 ```
 
 `--tag` requires a clean working tree and creates `v<package-version>`.

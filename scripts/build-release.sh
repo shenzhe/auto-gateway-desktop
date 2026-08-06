@@ -11,6 +11,7 @@ Windows architectures, and the architecture-selecting Windows installer.
 
 Options:
   --notarize              Submit macOS apps to Apple notarization and staple them.
+  --notary-env PATH       Source Apple notarization settings from PATH.
   --publish-r2            Upload all artifacts and update R2 latest.json.
   --r2-env PATH           Source R2 credentials and publish settings from PATH.
   --release-dir PATH      Write release files to PATH (default: release).
@@ -50,6 +51,7 @@ create_tag=false
 push_changes=false
 release_dir="$root_dir/release"
 r2_env_file=""
+notary_env_file=""
 
 if [[ $# -gt 0 && "${1:-}" != -* ]]; then
   platform="$1"
@@ -60,6 +62,11 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --notarize)
       notarize=true
+      ;;
+    --notary-env)
+      [[ $# -ge 2 ]] || { echo "--notary-env requires a file path." >&2; exit 2; }
+      notary_env_file="$2"
+      shift
       ;;
     --publish-r2)
       publish_r2=true
@@ -120,6 +127,17 @@ if [[ -n "$r2_env_file" ]]; then
   set -a
   # shellcheck disable=SC1090
   source "$r2_env_file"
+  set +a
+fi
+
+if [[ -n "$notary_env_file" ]]; then
+  if [[ ! -f "$notary_env_file" ]]; then
+    echo "Notarization environment file does not exist: $notary_env_file" >&2
+    exit 1
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  source "$notary_env_file"
   set +a
 fi
 
