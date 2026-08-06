@@ -197,6 +197,18 @@ const dictionaries = {
     workspaceCheckingTitle: "Checking your workspace",
     workspaceCheckingDescription:
       "We are verifying the local Codex connection.",
+    officialProviderStatus: "Official provider",
+    officialProviderTitle: "Using the official OpenAI provider",
+    officialProviderDescription:
+      "Use AUTO Gateway for a more affordable and convenient Codex experience.",
+    thirdPartyProviderStatus: "Third-party provider",
+    thirdPartyProviderTitle: "A third-party provider is active",
+    thirdPartyProviderDescription:
+      "We recommend AUTO Gateway for simpler provider setup and management.",
+    invalidProviderStatus: "Invalid configuration",
+    invalidProviderTitle: "Codex provider configuration is invalid",
+    invalidProviderDescription:
+      "The Codex configuration file is missing or cannot be parsed. Reconfigure Codex to continue.",
     desktopUpdateAvailable: "AUTO Gateway Desktop update available",
     desktopUpdateDescription:
       "Version {version} is ready. Download and restart to apply it.",
@@ -421,6 +433,17 @@ const dictionaries = {
     workspaceReadyDescription: "你的 Codex 工作区已准备好使用。",
     workspaceCheckingTitle: "正在检查工作区",
     workspaceCheckingDescription: "正在验证本机 Codex 连接状态。",
+    officialProviderStatus: "官方 Provider",
+    officialProviderTitle: "当前使用官方 OpenAI Provider",
+    officialProviderDescription: "建议使用 AUTO Gateway，更省更方便。",
+    thirdPartyProviderStatus: "第三方 Provider",
+    thirdPartyProviderTitle: "检测到第三方 Provider",
+    thirdPartyProviderDescription:
+      "推荐使用 AUTO Gateway，配置更简单，使用更方便。",
+    invalidProviderStatus: "配置文件无效",
+    invalidProviderTitle: "无法读取 Codex Provider",
+    invalidProviderDescription:
+      "Codex 配置文件缺失或无法解析，请重新配置。",
     desktopUpdateAvailable: "AUTO Gateway Desktop 有可用更新",
     desktopUpdateDescription:
       "版本 {version} 已准备好。下载后重启即可完成更新。",

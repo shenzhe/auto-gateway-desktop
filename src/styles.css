@@ -19,6 +19,8 @@
   --success-soft: oklch(93.5% 0.045 152);
   --warning: oklch(70% 0.14 76);
   --warning-soft: oklch(95% 0.055 78);
+  --danger: oklch(55% 0.17 25);
+  --danger-soft: oklch(94% 0.045 25);
   --info: oklch(54% 0.13 260);
   --control-bg: oklch(99.2% 0.005 68);
   --control-border: var(--line);
@@ -57,6 +59,8 @@
   --success-soft: oklch(28% 0.052 154);
   --warning: oklch(78% 0.13 78);
   --warning-soft: oklch(31% 0.05 78);
+  --danger: oklch(73% 0.16 25);
+  --danger-soft: oklch(31% 0.06 25);
   --info: oklch(73% 0.12 258);
   --control-bg: oklch(21.5% 0.016 56);
   --control-border: oklch(42% 0.024 58);
@@ -1063,10 +1067,21 @@ h1 {
   color: var(--subtle);
   background: var(--panel-soft);
 }
-.healthBadge.ready {
+.healthBadge.ready,
+.healthBadge.official {
   border-color: color-mix(in oklch, var(--success) 38%, var(--line));
   color: var(--success);
   background: var(--success-soft);
+}
+.healthBadge.thirdParty {
+  border-color: color-mix(in oklch, var(--warning) 50%, var(--line));
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+.healthBadge.invalid {
+  border-color: color-mix(in oklch, var(--danger) 46%, var(--line));
+  color: var(--danger);
+  background: color-mix(in oklch, var(--danger-soft) 56%, var(--panel-soft));
 }
 .healthBadge svg {
   width: 36px;
@@ -1104,6 +1119,24 @@ h1 {
 }
 .homeHealth .statusLabel {
   color: var(--success);
+}
+.homeHealth.thirdParty .statusLabel {
+  color: var(--warning);
+}
+.homeHealth.invalid .statusLabel {
+  color: var(--danger);
+}
+.homeHealthAction {
+  margin-top: 5px;
+  padding: 0;
+  border: 0;
+  color: var(--danger);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 730;
+}
+.homeHealthAction:hover {
+  text-decoration: underline;
 }
 .homeMetric button {
   padding: 0;

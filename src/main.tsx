@@ -19,6 +19,7 @@ import {
   HouseIcon,
   SignOutIcon,
   UserCircleIcon,
+  WarningIcon,
 } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -464,6 +465,7 @@ function App() {
         : tr("downloadSourceDetails", { source: installProgress.source })
       : "";
   const configured = Boolean(status?.configured);
+  const providerStatus = status?.providerStatus ?? "checking";
   const codexDetected = accountConnected && appInstalled;
   const gatewayConfigured =
     codexDetected && (configured || configurationPhase === "complete");
@@ -610,6 +612,7 @@ function App() {
       configExists: previewComplete,
       authExists: previewComplete,
       configured: previewComplete,
+      providerStatus: previewComplete ? "autogateway" : "invalid",
       configBackupCount: 1,
       authBackupCount: 1,
     });
@@ -1328,6 +1331,46 @@ function App() {
           ? tr("updateAvailable")
           : tr("upToDate");
     const ready = accountConnected && appInstalled && configured;
+    const providerTone =
+      providerStatus === "autogateway" || ready
+        ? "ready"
+        : providerStatus === "openai"
+        ? "official"
+        : providerStatus === "third-party"
+          ? "thirdParty"
+          : providerStatus === "invalid"
+            ? "invalid"
+            : "checking";
+    const providerStatusLabel =
+      providerStatus === "autogateway" || ready
+        ? tr("configured")
+        : providerStatus === "openai"
+        ? tr("officialProviderStatus")
+        : providerStatus === "third-party"
+          ? tr("thirdPartyProviderStatus")
+          : providerStatus === "invalid"
+            ? tr("invalidProviderStatus")
+            : tr("checking");
+    const providerTitle =
+      providerStatus === "autogateway" || ready
+        ? tr("workspaceReadyTitle")
+        : providerStatus === "openai"
+        ? tr("officialProviderTitle")
+        : providerStatus === "third-party"
+          ? tr("thirdPartyProviderTitle")
+          : providerStatus === "invalid"
+            ? tr("invalidProviderTitle")
+            : tr("workspaceCheckingTitle");
+    const providerDescription =
+      providerStatus === "autogateway" || ready
+        ? tr("workspaceReadyDescription")
+        : providerStatus === "openai"
+        ? tr("officialProviderDescription")
+        : providerStatus === "third-party"
+          ? tr("thirdPartyProviderDescription")
+          : providerStatus === "invalid"
+            ? tr("invalidProviderDescription")
+            : tr("workspaceCheckingDescription");
     return (
       <main className="homeShell">
         <aside className="homeRail">
@@ -1484,26 +1527,28 @@ function App() {
             ) : null}
             <section className="homeStatusPanel">
               <div
-                className="homeHealth"
-                aria-label={ready ? tr("active") : tr("checking")}
+                className={`homeHealth ${providerTone}`}
+                aria-label={providerStatusLabel}
               >
-                <span className={`healthBadge ${ready ? "ready" : ""}`}>
-                  <CheckCircleIcon weight="fill" />
+                <span className={`healthBadge ${providerTone}`}>
+                  {providerStatus === "invalid" ? (
+                    <WarningIcon weight="fill" />
+                  ) : (
+                    <CheckCircleIcon weight="fill" />
+                  )}
                 </span>
                 <div>
-                  <span className="statusLabel">
-                    {ready ? tr("active") : tr("checking")}
-                  </span>
-                  <strong>
-                    {ready
-                      ? tr("workspaceReadyTitle")
-                      : tr("workspaceCheckingTitle")}
-                  </strong>
-                  <small>
-                    {ready
-                      ? tr("workspaceReadyDescription")
-                      : tr("workspaceCheckingDescription")}
-                  </small>
+                  <span className="statusLabel">{providerStatusLabel}</span>
+                  <strong>{providerTitle}</strong>
+                  <small>{providerDescription}</small>
+                  {providerStatus === "invalid" ? (
+                    <button
+                      className="homeHealthAction"
+                      onClick={openSetupFromHome}
+                    >
+                      {tr("reconfigureCodex")}
+                    </button>
+                  ) : null}
                 </div>
               </div>
               <div className="homeMetric">

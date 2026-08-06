@@ -22,8 +22,18 @@ pub struct CodexStatus {
     config_exists: bool,
     auth_exists: bool,
     configured: bool,
+    provider_status: CodexProviderStatus,
     config_backup_count: usize,
     auth_backup_count: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodexProviderStatus {
+    Autogateway,
+    Openai,
+    ThirdParty,
+    Invalid,
 }
 
 #[derive(Serialize)]
@@ -54,19 +64,9 @@ pub fn default_codex_paths() -> Result<CodexPaths, String> {
 
 impl CodexPaths {
     pub fn status(&self) -> Result<CodexStatus, String> {
-        let configured = match read_optional(&self.config)? {
-            Some(content) => content
-                .parse::<DocumentMut>()
-                .map(|document| {
-                    document.get("model_provider").and_then(Item::as_str) == Some("autogateway")
-                        && document
-                            .get("model_providers")
-                            .and_then(Item::as_table)
-                            .and_then(|providers| providers.get("autogateway"))
-                            .is_some_and(Item::is_table)
-                })
-                .unwrap_or(false),
-            None => false,
+        let (configured, provider_status) = match read_optional(&self.config) {
+            Ok(content) => classify_provider(content.as_deref()),
+            Err(_) => (false, CodexProviderStatus::Invalid),
         };
         Ok(CodexStatus {
             config_path: self.config.display().to_string(),
@@ -74,9 +74,44 @@ impl CodexPaths {
             config_exists: self.config.exists(),
             auth_exists: self.auth.exists(),
             configured,
+            provider_status,
             config_backup_count: backup_paths(&self.config)?.len(),
             auth_backup_count: backup_paths(&self.auth)?.len(),
         })
+    }
+}
+
+fn classify_provider(content: Option<&str>) -> (bool, CodexProviderStatus) {
+    let Some(content) = content else {
+        return (false, CodexProviderStatus::Invalid);
+    };
+    let Ok(document) = content.parse::<DocumentMut>() else {
+        return (false, CodexProviderStatus::Invalid);
+    };
+    let Some(provider) = document
+        .get("model_provider")
+        .and_then(Item::as_str)
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+    else {
+        return (false, CodexProviderStatus::Invalid);
+    };
+
+    match provider {
+        "autogateway" => {
+            let configured = document
+                .get("model_providers")
+                .and_then(Item::as_table)
+                .and_then(|providers| providers.get("autogateway"))
+                .is_some_and(Item::is_table);
+            if configured {
+                (true, CodexProviderStatus::Autogateway)
+            } else {
+                (false, CodexProviderStatus::Invalid)
+            }
+        }
+        "openai" => (false, CodexProviderStatus::Openai),
+        _ => (false, CodexProviderStatus::ThirdParty),
     }
 }
 
@@ -435,8 +470,8 @@ fn set_private_permissions(_path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_if_exists, backup_paths, merge_auth, merge_config, normalize_endpoint,
-        restore_from_backup, CodexPaths,
+        backup_if_exists, backup_paths, classify_provider, merge_auth, merge_config,
+        normalize_endpoint, restore_from_backup, CodexPaths, CodexProviderStatus,
     };
     use std::fs;
     use toml_edit::Item;
@@ -551,5 +586,44 @@ base_url = "https://example.com/v1"
         let status = CodexPaths { config, auth }.status().expect("read status");
         assert!(!status.configured);
         fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn classifies_official_openai_provider() {
+        let (configured, provider) = classify_provider(Some("model_provider = \"openai\"\n"));
+        assert!(!configured);
+        assert_eq!(provider, CodexProviderStatus::Openai);
+    }
+
+    #[test]
+    fn classifies_autogateway_provider() {
+        let (configured, provider) = classify_provider(Some(
+            "model_provider = \"autogateway\"\n\n[model_providers.autogateway]\n",
+        ));
+        assert!(configured);
+        assert_eq!(provider, CodexProviderStatus::Autogateway);
+    }
+
+    #[test]
+    fn classifies_third_party_provider() {
+        let (configured, provider) = classify_provider(Some("model_provider = \"third_party\"\n"));
+        assert!(!configured);
+        assert_eq!(provider, CodexProviderStatus::ThirdParty);
+    }
+
+    #[test]
+    fn classifies_missing_or_invalid_provider_configuration() {
+        assert_eq!(
+            classify_provider(None),
+            (false, CodexProviderStatus::Invalid)
+        );
+        assert_eq!(
+            classify_provider(Some("model_provider = [\n")),
+            (false, CodexProviderStatus::Invalid)
+        );
+        assert_eq!(
+            classify_provider(Some("model = \"gpt-5\"\n")),
+            (false, CodexProviderStatus::Invalid)
+        );
     }
 }

@@ -6,6 +6,7 @@ export type CodexStatus = {
   configExists: boolean;
   authExists: boolean;
   configured: boolean;
+  providerStatus: "autogateway" | "openai" | "third-party" | "invalid";
   configBackupCount: number;
   authBackupCount: number;
 };
