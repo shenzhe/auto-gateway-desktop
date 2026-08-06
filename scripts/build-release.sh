@@ -223,7 +223,8 @@ require_command() {
 
 sign_updater_archive() {
   local archive="$1"
-  ./node_modules/.bin/tauri signer sign \
+  env -u TAURI_SIGNING_PRIVATE_KEY -u TAURI_SIGNING_PRIVATE_KEY_PASSWORD \
+    ./node_modules/.bin/tauri signer sign \
     --private-key-path "$signing_key_file" \
     --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" \
     "$archive"
@@ -315,18 +316,35 @@ build_windows_target() {
   local suffix="$2"
   local source
   local output="$release_dir/AUTO Gateway Desktop_${version}_${suffix}-setup.exe"
-  local runner_args=()
+  local target_dir="$root_dir/src-tauri/target/windows-$suffix"
+  local target_env_name="${target//-/_}"
 
   rustup target add "$target"
   if [[ "$host_is_windows" != true ]]; then
     require_command cargo-xwin
     require_command makensis
+    # cargo-xwin derives each target's flags from the existing CFLAGS_* set.
+    # Clear the other architecture before generating a new environment so its
+    # --target and include paths cannot leak into this build.
+    unset CL_FLAGS CFLAGS CXXFLAGS
+    unset CFLAGS_aarch64_pc_windows_msvc CFLAGS_x86_64_pc_windows_msvc
+    unset CXXFLAGS_aarch64_pc_windows_msvc CXXFLAGS_x86_64_pc_windows_msvc
     eval "$(cargo xwin env --target "$target")"
-    runner_args=(--runner cargo-xwin)
+    # cargo-xwin emits MSVC-style /imsvc flags. Rust C build scripts invoke
+    # clang for C sources, so use clang's portable -isystem spelling there.
+    target_cflags_var="CFLAGS_${target_env_name}"
+    target_cflags="${!target_cflags_var:-}"
+    target_cflags="${target_cflags//\/imsvc /-isystem }"
+    export "$target_cflags_var=$target_cflags"
+    export "CC_${target_env_name}=clang"
   fi
 
-  npm run tauri build -- --target "$target" "${runner_args[@]}" --bundles nsis
-  source="$(find "src-tauri/target/$target/release/bundle/nsis" -name '*-setup.exe' -type f -print -quit)"
+  # Keep cross-architecture build-script outputs isolated. Some native crates
+  # (notably ring) emit target-specific object files under the shared Cargo
+  # target directory and cannot safely be reused by another Windows target.
+  export CARGO_TARGET_DIR="$target_dir"
+  npm run tauri build -- --target "$target" --bundles nsis
+  source="$(find "$target_dir/$target/release/bundle/nsis" -name '*-setup.exe' -type f -print -quit)"
   [[ -n "$source" ]] || { echo "Windows installer was not produced for $target." >&2; exit 1; }
   cp "$source" "$output"
   if [[ -f "$source.sig" ]]; then
@@ -357,8 +375,8 @@ build_windows() {
     echo "Windows artifacts require a Windows host or cargo-xwin on macOS/Linux." >&2
     exit 1
   fi
-  build_windows_target x86_64-pc-windows-msvc x64
   build_windows_target aarch64-pc-windows-msvc arm64
+  build_windows_target x86_64-pc-windows-msvc x64
   build_windows_unified
 }
 
