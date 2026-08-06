@@ -66,15 +66,22 @@ pub fn default_codex_paths() -> Result<CodexPaths, String> {
 
 impl CodexPaths {
     pub fn status(&self) -> Result<CodexStatus, String> {
-        let (configured, provider_status) = match read_optional(&self.config) {
-            Ok(content) => classify_provider(content.as_deref()),
-            Err(_) => (false, CodexProviderStatus::Invalid),
-        };
+        let content = read_optional(&self.config)?;
+        let (configured, provider_status) = classify_provider(content.as_deref());
+        let model_provider = content
+            .as_deref()
+            .and_then(|value| value.parse::<DocumentMut>().ok())
+            .and_then(|document| {
+                document
+                    .get("model_provider")
+                    .and_then(Item::as_str)
+                    .map(str::to_string)
+            });
         Ok(CodexStatus {
             config_path: self.config.display().to_string(),
             auth_path: self.auth.display().to_string(),
             model_provider,
-            config_valid,
+            config_valid: provider_status != CodexProviderStatus::Invalid,
             config_exists: self.config.exists(),
             auth_exists: self.auth.exists(),
             configured,

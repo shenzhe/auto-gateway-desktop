@@ -420,7 +420,6 @@ function App() {
   const [canRetryCachedInstaller, setCanRetryCachedInstaller] = useState(false);
   const [externalInstallationMessage, setExternalInstallationMessage] =
     useState("");
-  const [installationTimedOut, setInstallationTimedOut] = useState(false);
   const externalInstallationStartedAt = useRef<number | null>(null);
   const storeAutoRetryAttempted = useRef(false);
   const [setupCompleted, setSetupCompleted] = useState(false);
@@ -644,6 +643,8 @@ function App() {
       configExists: previewComplete,
       authExists: previewComplete,
       configured: previewComplete,
+      modelProvider: previewComplete ? "autogateway" : undefined,
+      configValid: previewComplete,
       providerStatus: previewComplete ? "autogateway" : "invalid",
       configBackupCount: 1,
       authBackupCount: 1,
@@ -762,10 +763,6 @@ function App() {
     let checking = false;
     async function checkExternalInstallation() {
       if (checking) return;
-      if (Date.now() >= deadline) {
-        finishWithTimeout();
-        return;
-      }
       checking = true;
       try {
         const nextAppStatus = await getLocalCodexAppStatus();
@@ -798,11 +795,9 @@ function App() {
       () => void checkExternalInstallation(),
       4000,
     );
-    const timeout = window.setTimeout(finishWithTimeout, windowsInstallationTimeoutMs);
     return () => {
       active = false;
       window.clearInterval(interval);
-      window.clearTimeout(timeout);
     };
   }, [
     awaitingExternalInstallation,
