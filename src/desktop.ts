@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 export type CodexStatus = {
   configPath: string;
   authPath: string;
+  modelProvider?: string;
+  configValid: boolean;
   configExists: boolean;
   authExists: boolean;
   configured: boolean;

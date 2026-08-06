@@ -206,6 +206,7 @@ function useDisableContextMenu(): void {
 }
 
 function TrayPopup() {
+  useDisableContextMenu();
   const [desktopSession, setDesktopSession] = useState<DesktopSession | null>(
     null,
   );
@@ -384,6 +385,20 @@ function TrayPopup() {
 }
 
 function App() {
+  useDisableContextMenu();
+  useEffect(() => {
+    function handleDevtoolsShortcut(event: KeyboardEvent) {
+      const isDevtoolsShortcut =
+        event.key.toLowerCase() === "i" &&
+        ((event.ctrlKey && event.shiftKey) ||
+          (event.metaKey && event.altKey));
+      if (!isDevtoolsShortcut) return;
+      event.preventDefault();
+      void handleOpenDevtools();
+    }
+    window.addEventListener("keydown", handleDevtoolsShortcut);
+    return () => window.removeEventListener("keydown", handleDevtoolsShortcut);
+  }, []);
   const [status, setStatus] = useState<CodexStatus | null>(null);
   const [appStatus, setAppStatus] = useState<CodexAppStatus | null>(null);
   const [apiKey, setAPIKey] = useState("");
@@ -400,6 +415,7 @@ function App() {
   const [checkingCodexUpdates, setCheckingCodexUpdates] = useState(false);
   const [awaitingExternalInstallation, setAwaitingExternalInstallation] =
     useState(false);
+  const [installationTimedOut, setInstallationTimedOut] = useState(false);
   const [storeInstallForceUpdate, setStoreInstallForceUpdate] = useState(false);
   const [canRetryCachedInstaller, setCanRetryCachedInstaller] = useState(false);
   const [externalInstallationMessage, setExternalInstallationMessage] =
@@ -746,6 +762,10 @@ function App() {
     let checking = false;
     async function checkExternalInstallation() {
       if (checking) return;
+      if (Date.now() >= deadline) {
+        finishWithTimeout();
+        return;
+      }
       checking = true;
       try {
         const nextAppStatus = await getLocalCodexAppStatus();
@@ -778,9 +798,11 @@ function App() {
       () => void checkExternalInstallation(),
       4000,
     );
+    const timeout = window.setTimeout(finishWithTimeout, windowsInstallationTimeoutMs);
     return () => {
       active = false;
       window.clearInterval(interval);
+      window.clearTimeout(timeout);
     };
   }, [
     awaitingExternalInstallation,

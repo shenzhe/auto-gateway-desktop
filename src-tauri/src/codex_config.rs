@@ -19,6 +19,8 @@ pub struct CodexPaths {
 pub struct CodexStatus {
     config_path: String,
     auth_path: String,
+    model_provider: Option<String>,
+    config_valid: bool,
     config_exists: bool,
     auth_exists: bool,
     configured: bool,
@@ -71,6 +73,8 @@ impl CodexPaths {
         Ok(CodexStatus {
             config_path: self.config.display().to_string(),
             auth_path: self.auth.display().to_string(),
+            model_provider,
+            config_valid,
             config_exists: self.config.exists(),
             auth_exists: self.auth.exists(),
             configured,
@@ -585,6 +589,38 @@ base_url = "https://example.com/v1"
         fs::write(&config, "model = \"gpt-5\"\n").expect("write config");
         let status = CodexPaths { config, auth }.status().expect("read status");
         assert!(!status.configured);
+        assert!(!status.config_valid);
+        assert_eq!(status.model_provider, None);
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn status_reports_provider_and_rejects_invalid_toml() {
+        let directory = std::env::temp_dir().join(format!(
+            "autogateway-codex-provider-status-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create test directory");
+        let config = directory.join("config.toml");
+        let auth = directory.join("auth.json");
+
+        fs::write(&config, "model_provider = \"openai\"\n").expect("write config");
+        let status = CodexPaths {
+            config: config.clone(),
+            auth: auth.clone(),
+        }
+        .status()
+        .expect("read valid status");
+        assert!(status.config_valid);
+        assert_eq!(status.model_provider.as_deref(), Some("openai"));
+        assert!(!status.configured);
+
+        fs::write(&config, "model_provider = [\n").expect("write invalid config");
+        let status = CodexPaths { config, auth }
+            .status()
+            .expect("read invalid status");
+        assert!(!status.config_valid);
+        assert_eq!(status.model_provider, None);
         fs::remove_dir_all(directory).expect("remove test directory");
     }
 

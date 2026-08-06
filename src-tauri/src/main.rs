@@ -27,6 +27,10 @@ use tauri::{
 };
 use url::Url;
 
+const DISABLE_CONTEXT_MENU_SCRIPT: &str = r#"
+    document.addEventListener('contextmenu', (event) => event.preventDefault());
+"#;
+
 #[tauri::command]
 fn get_codex_status() -> Result<CodexStatus, String> {
     let paths = default_codex_paths()?;
@@ -133,6 +137,7 @@ async fn open_desktop_sign_in_command(
         .min_inner_size(420.0, 640.0)
         .center()
         .resizable(true)
+        .initialization_script(DISABLE_CONTEXT_MENU_SCRIPT)
         .on_navigation(move |url| {
             let is_callback = url.scheme() == "autogateway"
                 && url.host_str() == Some("auth")
@@ -354,6 +359,7 @@ async fn open_console(
     WebviewWindowBuilder::new(&app, "console", WebviewUrl::External(console_url))
         .title("AUTO Gateway Console")
         .inner_size(1280.0, 900.0)
+        .initialization_script(DISABLE_CONTEXT_MENU_SCRIPT)
         .build()
         .map_err(|error| error.to_string())?;
     Ok(())
