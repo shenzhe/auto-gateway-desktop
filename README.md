@@ -34,7 +34,7 @@ export TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(< /secure/path/desktop-updater.key.
 npm run release:build -- --clean
 ```
 
-The script produces these files in `dist/release`:
+The script produces these files in `release`:
 
 - macOS Apple Silicon and Intel updater archives, signatures, and DMGs;
 - one notarized/universal macOS DMG;

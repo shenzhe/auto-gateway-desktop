@@ -13,7 +13,7 @@ Options:
   --notarize              Submit macOS apps to Apple notarization and staple them.
   --publish-r2            Upload all artifacts and update R2 latest.json.
   --r2-env PATH           Source R2 credentials and publish settings from PATH.
-  --release-dir PATH      Write release files to PATH (default: dist/release).
+  --release-dir PATH      Write release files to PATH (default: release).
   --skip-install          Do not run npm ci before building.
   --clean                 Remove the selected release directory before building.
   --tag                   Create an annotated v<version> tag after success.
@@ -48,7 +48,7 @@ skip_install=false
 clean=false
 create_tag=false
 push_changes=false
-release_dir="$root_dir/dist/release"
+release_dir="$root_dir/release"
 r2_env_file=""
 
 if [[ $# -gt 0 && "${1:-}" != -* ]]; then
@@ -175,11 +175,11 @@ fi
 
 if [[ "$clean" == true ]]; then
   case "$release_dir" in
-    "$root_dir/dist/release"|"$root_dir/dist/release/"*)
+    "$root_dir/release"|"$root_dir/release/"*)
       rm -rf -- "$release_dir"
       ;;
     *)
-      echo "--clean is restricted to dist/release to avoid deleting an unexpected directory." >&2
+      echo "--clean is restricted to release to avoid deleting an unexpected directory." >&2
       exit 1
       ;;
   esac
