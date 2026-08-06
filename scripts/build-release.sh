@@ -237,6 +237,7 @@ make_dmg() {
   local app_path="$1"
   local output_path="$2"
   local staging_dir="$temporary_dir/dmg-$(basename "$output_path" .dmg)"
+  mkdir -p "$(dirname "$output_path")"
   mkdir -p "$staging_dir"
   ditto "$app_path" "$staging_dir/AUTO Gateway Desktop.app"
   ln -s /Applications "$staging_dir/Applications"
@@ -347,6 +348,7 @@ build_windows_target() {
   # target directory and cannot safely be reused by another Windows target.
   export CARGO_TARGET_DIR="$target_dir"
   npm run tauri build -- --target "$target" --bundles nsis
+  mkdir -p "$release_dir"
   source="$(find "$target_dir/$target/release/bundle/nsis" -name '*-setup.exe' -type f -print -quit)"
   [[ -n "$source" ]] || { echo "Windows installer was not produced for $target." >&2; exit 1; }
   cp "$source" "$output"
