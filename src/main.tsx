@@ -4,18 +4,67 @@ import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { ArrowRightIcon, ArrowUUpLeftIcon, ArrowsClockwiseIcon, BugIcon, CheckCircleIcon, CheckIcon, CircleNotchIcon, CopyIcon, CubeIcon, CurrencyDollarIcon, GearIcon, HouseIcon, UserCircleIcon } from "@phosphor-icons/react";
+import {
+  ArrowRightIcon,
+  ArrowUUpLeftIcon,
+  ArrowsClockwiseIcon,
+  BugIcon,
+  CheckCircleIcon,
+  CheckIcon,
+  CircleNotchIcon,
+  CopyIcon,
+  CubeIcon,
+  CurrencyDollarIcon,
+  GearIcon,
+  HouseIcon,
+  UserCircleIcon,
+} from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { bootstrapDesktopKey, clearDesktopSession, clearStoredDesktopAPIKey, configureCodex, exchangeDesktopAuthorization, getCodexAppStatus, getCodexStatus, getDesktopAccountSummary, getDesktopAppVersion, getLocalCodexAppStatus, installCodex, isAuthenticationRequired, openCodex, openConsole, openDevtools, refreshDesktopState, restoreDesktopState, restoreLatestCodexBackups, showMainWindow, updateTrayStatus, type CodexAppStatus, type CodexInstallProgress, type CodexStatus, type DesktopAccountSummary, type DesktopSession } from "./desktop";
-import { readLocalePreference, resolveLocale, translate, writeLocalePreference, type LocalePreference } from "./i18n";
+import {
+  bootstrapDesktopKey,
+  clearDesktopSession,
+  clearStoredDesktopAPIKey,
+  configureCodex,
+  exchangeDesktopAuthorization,
+  getCodexAppStatus,
+  getCodexStatus,
+  getDesktopAccountSummary,
+  getDesktopAppVersion,
+  getLocalCodexAppStatus,
+  installCodex,
+  isAuthenticationRequired,
+  openCodex,
+  openConsole,
+  openDevtools,
+  refreshDesktopState,
+  restoreDesktopState,
+  restoreLatestCodexBackups,
+  showMainWindow,
+  updateTrayStatus,
+  type CodexAppStatus,
+  type CodexInstallProgress,
+  type CodexStatus,
+  type DesktopAccountSummary,
+  type DesktopSession,
+} from "./desktop";
+import {
+  readLocalePreference,
+  resolveLocale,
+  translate,
+  writeLocalePreference,
+  type LocalePreference,
+} from "./i18n";
 import { applyTheme, readTheme, writeTheme, type ThemeMode } from "./theme";
 import "./styles.css";
 
 const defaultEndpoint = "https://api.autogateway.cc";
-const pendingAuthorizationStorageKey = "autogateway.desktop.pending-authorization";
+const pendingAuthorizationStorageKey =
+  "autogateway.desktop.pending-authorization";
 const setupCompletedStoragePrefix = "autogateway.desktop.setup-completed";
-const designPreviewState = import.meta.env.DEV ? new URLSearchParams(window.location.search).get("preview") : null;
+const designPreviewState = import.meta.env.DEV
+  ? new URLSearchParams(window.location.search).get("preview")
+  : null;
 
 type PendingAuthorization = {
   verifier: string;
@@ -23,13 +72,19 @@ type PendingAuthorization = {
 };
 
 type WizardStep = 1 | 2 | 3 | 4;
-type ConfigurationPhase = "idle" | "creatingKey" | "configuring" | "complete" | "error";
-type DesktopUpdatePhase = "idle" | "checking" | "ready" | "downloading" | "error";
+type ConfigurationPhase =
+  "idle" | "creatingKey" | "configuring" | "complete" | "error";
+type DesktopUpdatePhase =
+  "idle" | "checking" | "ready" | "downloading" | "error";
 
 function base64URL(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return window.btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  return window
+    .btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
 }
 
 function createVerifier(): string {
@@ -39,7 +94,10 @@ function createVerifier(): string {
 }
 
 async function createChallenge(verifier: string): Promise<string> {
-  const digest = await window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+  const digest = await window.crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(verifier),
+  );
   return base64URL(new Uint8Array(digest));
 }
 
@@ -65,12 +123,60 @@ function setupCompletedStorageKey(userID: number): string {
 }
 
 function hasCompletedSetup(session: DesktopSession): boolean {
-  return window.localStorage.getItem(setupCompletedStorageKey(session.user.id)) === "true";
+  return (
+    window.localStorage.getItem(setupCompletedStorageKey(session.user.id)) ===
+    "true"
+  );
 }
 
-function formatSyncTime(value: Date | null, locale: "en" | "zh", fallback: string): string {
+function formatSyncTime(
+  value: Date | null,
+  locale: "en" | "zh",
+  fallback: string,
+): string {
   if (!value) return fallback;
-  return value.toLocaleTimeString(locale === "zh" ? "zh-CN" : "en-US", { hour: "2-digit", minute: "2-digit" });
+  return value.toLocaleTimeString(locale === "zh" ? "zh-CN" : "en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function formatDownloadSpeed(bytesPerSecond?: number): string {
+  if (
+    !bytesPerSecond ||
+    !Number.isFinite(bytesPerSecond) ||
+    bytesPerSecond <= 0
+  )
+    return "";
+  const units = ["B/s", "KB/s", "MB/s", "GB/s"];
+  let value = bytesPerSecond;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
+function formatDataSize(bytes?: number): string {
+  if (bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return "";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
+}
+
+function formatRemainingDuration(seconds?: number): string {
+  if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0)
+    return "";
+  const rounded = Math.ceil(seconds);
+  if (rounded < 60) return `${rounded}s`;
+  const minutes = Math.floor(rounded / 60);
+  return `${minutes}m ${rounded % 60}s`;
 }
 
 function isTrayPopupWindow(): boolean {
@@ -82,15 +188,25 @@ function isTrayPopupWindow(): boolean {
 }
 
 function TrayPopup() {
-  const [desktopSession, setDesktopSession] = useState<DesktopSession | null>(null);
+  const [desktopSession, setDesktopSession] = useState<DesktopSession | null>(
+    null,
+  );
   const [accountBalance, setAccountBalance] = useState("");
   const [loading, setLoading] = useState(true);
   const theme = readTheme();
   const localePreference = readLocalePreference();
   const locale = resolveLocale(localePreference);
-  const tr = (key: Parameters<typeof translate>[1], values?: Record<string, string | number>) => translate(locale, key, values);
-  const accountName = desktopSession?.user.displayName || desktopSession?.user.name || desktopSession?.user.username || tr("trayLoading");
-  const accountDetail = desktopSession?.user.email || desktopSession?.user.username || "";
+  const tr = (
+    key: Parameters<typeof translate>[1],
+    values?: Record<string, string | number>,
+  ) => translate(locale, key, values);
+  const accountName =
+    desktopSession?.user.displayName ||
+    desktopSession?.user.name ||
+    desktopSession?.user.username ||
+    tr("trayLoading");
+  const accountDetail =
+    desktopSession?.user.email || desktopSession?.user.username || "";
 
   useEffect(() => {
     document.body.classList.add("tray-popup-body");
@@ -149,24 +265,52 @@ function TrayPopup() {
     await exit(0);
   }
 
-  return <main className="trayPopupRoot">
-    <section className="trayCard" role="dialog" aria-label={tr("trayTitle")}>
-      <header className="trayHeader">
-        <img className="trayLogo" src="/site-icon.png" alt="" />
-        <div className="trayBrand"><strong>{tr("trayTitle")}</strong><span>{loading ? tr("trayLoading") : tr("traySignedInAs")}</span></div>
-        <span className={`trayOnlineDot ${desktopSession ? "ready" : ""}`} aria-hidden="true" />
-      </header>
-      <div className="trayAccount">
-        <div className="trayAvatar" aria-hidden="true">{accountName.slice(0, 1).toUpperCase()}</div>
-        <div className="trayAccountInfo"><strong>{accountName}</strong><small>{accountDetail || tr("trayUnavailable")}</small></div>
-        <div className="trayBalance"><span>{tr("trayBalance")}</span><strong>{accountBalance || "—"}</strong></div>
-      </div>
-      <div className="trayActions">
-        <button className="trayPrimaryButton" type="button" onClick={() => void openWorkspace()}>{tr("trayOpenWorkspace")}</button>
-        <button className="traySecondaryButton" type="button" onClick={() => void quitApplication()}>{tr("trayQuit")}</button>
-      </div>
-    </section>
-  </main>;
+  return (
+    <main className="trayPopupRoot">
+      <section className="trayCard" role="dialog" aria-label={tr("trayTitle")}>
+        <header className="trayHeader">
+          <img className="trayLogo" src="/site-icon.png" alt="" />
+          <div className="trayBrand">
+            <strong>{tr("trayTitle")}</strong>
+            <span>{loading ? tr("trayLoading") : tr("traySignedInAs")}</span>
+          </div>
+          <span
+            className={`trayOnlineDot ${desktopSession ? "ready" : ""}`}
+            aria-hidden="true"
+          />
+        </header>
+        <div className="trayAccount">
+          <div className="trayAvatar" aria-hidden="true">
+            {accountName.slice(0, 1).toUpperCase()}
+          </div>
+          <div className="trayAccountInfo">
+            <strong>{accountName}</strong>
+            <small>{accountDetail || tr("trayUnavailable")}</small>
+          </div>
+          <div className="trayBalance">
+            <span>{tr("trayBalance")}</span>
+            <strong>{accountBalance || "—"}</strong>
+          </div>
+        </div>
+        <div className="trayActions">
+          <button
+            className="trayPrimaryButton"
+            type="button"
+            onClick={() => void openWorkspace()}
+          >
+            {tr("trayOpenWorkspace")}
+          </button>
+          <button
+            className="traySecondaryButton"
+            type="button"
+            onClick={() => void quitApplication()}
+          >
+            {tr("trayQuit")}
+          </button>
+        </div>
+      </section>
+    </main>
+  );
 }
 
 function App() {
@@ -174,47 +318,97 @@ function App() {
   const [appStatus, setAppStatus] = useState<CodexAppStatus | null>(null);
   const [apiKey, setAPIKey] = useState("");
   const [desktopAccessToken, setDesktopAccessToken] = useState("");
-  const [desktopSession, setDesktopSession] = useState<DesktopSession | null>(null);
+  const [desktopSession, setDesktopSession] = useState<DesktopSession | null>(
+    null,
+  );
   const [endpoint, setEndpoint] = useState(defaultEndpoint);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [restoringSession, setRestoringSession] = useState(true);
   const [installingCodex, setInstallingCodex] = useState(false);
   const [checkingCodexUpdates, setCheckingCodexUpdates] = useState(false);
-  const [awaitingStoreInstallation, setAwaitingStoreInstallation] = useState(false);
+  const [awaitingStoreInstallation, setAwaitingStoreInstallation] =
+    useState(false);
   const [setupCompleted, setSetupCompleted] = useState(false);
   const [accountBalance, setAccountBalance] = useState("");
   const [balanceSyncedAt, setBalanceSyncedAt] = useState<Date | null>(null);
   const [desktopAppVersion, setDesktopAppVersion] = useState("");
-  const [installProgress, setInstallProgress] = useState<CodexInstallProgress | null>(null);
-  const [configurationPhase, setConfigurationPhase] = useState<ConfigurationPhase>("idle");
+  const [installProgress, setInstallProgress] =
+    useState<CodexInstallProgress | null>(null);
+  const [configurationPhase, setConfigurationPhase] =
+    useState<ConfigurationPhase>("idle");
   const [configurationError, setConfigurationError] = useState("");
   const [apiKeyCopied, setAPIKeyCopied] = useState(false);
   const [desktopUpdate, setDesktopUpdate] = useState<Update | null>(null);
-  const [desktopUpdatePhase, setDesktopUpdatePhase] = useState<DesktopUpdatePhase>("idle");
-  const [desktopUpdateProgress, setDesktopUpdateProgress] = useState<number | null>(null);
+  const [desktopUpdatePhase, setDesktopUpdatePhase] =
+    useState<DesktopUpdatePhase>("idle");
+  const [desktopUpdateProgress, setDesktopUpdateProgress] = useState<
+    number | null
+  >(null);
   const [desktopUpdateError, setDesktopUpdateError] = useState("");
   const [homeActionError, setHomeActionError] = useState("");
   const [selectedStep, setSelectedStep] = useState<WizardStep>(1);
   const [showSettings, setShowSettings] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
-  const [localePreference, setLocalePreference] = useState<LocalePreference>(() => readLocalePreference());
+  const [localePreference, setLocalePreference] = useState<LocalePreference>(
+    () => readLocalePreference(),
+  );
   const configurationRun = useRef(false);
   const authorizationExchangeInProgress = useRef(false);
   const completedAuthorizationCode = useRef("");
   const locale = resolveLocale(localePreference);
-  const tr = (key: Parameters<typeof translate>[1], values?: Record<string, string | number>) => translate(locale, key, values);
+  const tr = (
+    key: Parameters<typeof translate>[1],
+    values?: Record<string, string | number>,
+  ) => translate(locale, key, values);
 
   const accountConnected = Boolean(desktopAccessToken);
   const appInstalled = Boolean(appStatus?.installed);
   const updateAvailable = appStatus?.updateAvailable === true;
-  const installPercent = typeof installProgress?.percent === "number" && Number.isFinite(installProgress.percent) ? installProgress.percent : undefined;
+  const installPercent =
+    typeof installProgress?.percent === "number" &&
+    Number.isFinite(installProgress.percent)
+      ? installProgress.percent
+      : undefined;
+  const downloadSpeed = formatDownloadSpeed(
+    installProgress?.speedBytesPerSecond,
+  );
+  const downloadedSize = formatDataSize(installProgress?.downloadedBytes);
+  const totalDownloadSize = formatDataSize(installProgress?.totalBytes);
+  const downloadRemaining = formatRemainingDuration(
+    installProgress?.estimatedRemainingSeconds,
+  );
+  const downloadAmountDetails = totalDownloadSize
+    ? tr("downloadBytesDetails", {
+        downloaded: downloadedSize,
+        total: totalDownloadSize,
+      })
+    : tr("downloadBytesUnknownTotal", { downloaded: downloadedSize });
+  const downloadSpeedDetails = downloadSpeed
+    ? tr("downloadSpeedDetails", { speed: downloadSpeed })
+    : tr("calculatingDownloadSpeed");
+  const downloadProgressDetails =
+    installProgress?.stage === "downloading" && installProgress.source
+      ? downloadSpeed && downloadRemaining
+        ? tr("downloadStatusDetails", {
+            source: installProgress.source,
+            remaining: downloadRemaining,
+          })
+        : tr("downloadSourceDetails", { source: installProgress.source })
+      : "";
   const configured = Boolean(status?.configured);
   const codexDetected = accountConnected && appInstalled;
-  const gatewayConfigured = codexDetected && (configured || configurationPhase === "complete");
-  const backupCount = (status?.configBackupCount ?? 0) + (status?.authBackupCount ?? 0);
-  const accountName = desktopSession?.user.displayName || desktopSession?.user.name || desktopSession?.user.username || "";
-  const accountDetail = desktopSession?.user.email || desktopSession?.user.username || "";
+  const gatewayConfigured =
+    codexDetected && (configured || configurationPhase === "complete");
+  const backupCount =
+    (status?.configBackupCount ?? 0) + (status?.authBackupCount ?? 0);
+  const accountName =
+    desktopSession?.user.displayName ||
+    desktopSession?.user.name ||
+    desktopSession?.user.username ||
+    "";
+  const accountDetail =
+    desktopSession?.user.email || desktopSession?.user.username || "";
   const showHome = setupCompleted && Boolean(desktopSession);
 
   async function handleSessionExpired() {
@@ -238,10 +432,16 @@ function App() {
 
   async function refreshStatus(updateMessage = true) {
     try {
-      const [nextStatus, nextAppStatus] = await Promise.all([getCodexStatus(), getLocalCodexAppStatus()]);
+      const [nextStatus, nextAppStatus] = await Promise.all([
+        getCodexStatus(),
+        getLocalCodexAppStatus(),
+      ]);
       setStatus(nextStatus);
       setAppStatus(nextAppStatus);
-      if (updateMessage) setMessage(nextStatus.configured ? tr("connected") : tr("notConfigured"));
+      if (updateMessage)
+        setMessage(
+          nextStatus.configured ? tr("connected") : tr("notConfigured"),
+        );
     } catch (error) {
       setMessage(tr("readStatusFailed", { error: String(error) }));
     }
@@ -259,7 +459,11 @@ function App() {
       } else if (nextAppStatus.updateCheckError) {
         setMessage(tr("updateCheckUnavailable"));
       } else if (nextAppStatus.updateAvailable) {
-        setMessage(tr("codexUpdateFound", { version: nextAppStatus.latestVersion || tr("versionUnavailable") }));
+        setMessage(
+          tr("codexUpdateFound", {
+            version: nextAppStatus.latestVersion || tr("versionUnavailable"),
+          }),
+        );
       } else {
         setMessage(tr("codexUpToDate"));
       }
@@ -271,14 +475,23 @@ function App() {
   }
 
   async function checkDesktopUpdate(manual = false) {
-    if (desktopUpdatePhase === "checking" || desktopUpdatePhase === "downloading") return;
+    if (
+      desktopUpdatePhase === "checking" ||
+      desktopUpdatePhase === "downloading"
+    )
+      return;
     setDesktopUpdatePhase("checking");
     setDesktopUpdateError("");
     try {
       const nextUpdate = await check();
       setDesktopUpdate(nextUpdate);
       setDesktopUpdatePhase(nextUpdate ? "ready" : "idle");
-      if (manual) setMessage(nextUpdate ? tr("desktopUpdateFound", { version: nextUpdate.version }) : tr("desktopUpToDate"));
+      if (manual)
+        setMessage(
+          nextUpdate
+            ? tr("desktopUpdateFound", { version: nextUpdate.version })
+            : tr("desktopUpToDate"),
+        );
     } catch (error) {
       const errorMessage = String(error);
       setDesktopUpdatePhase("error");
@@ -311,7 +524,14 @@ function App() {
     setDesktopSession({
       token: "preview-session",
       refreshToken: "preview-refresh",
-      user: { id: 1, username: "demo", email: "demo@autogateway.cc", displayName: "Demo User", name: "Demo User", role: "user" },
+      user: {
+        id: 1,
+        username: "demo",
+        email: "demo@autogateway.cc",
+        displayName: "Demo User",
+        name: "Demo User",
+        role: "user",
+      },
     });
     setAPIKey("agk_preview_7Bf32Pd9M4xQ8wR6kT1nY5cV");
     setSelectedStep(previewCodexUpdate ? 2 : 3);
@@ -337,7 +557,10 @@ function App() {
   useEffect(() => {
     if (designPreviewState || !import.meta.env.PROD) return;
     void checkDesktopUpdate();
-    const interval = window.setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000);
+    const interval = window.setInterval(
+      () => void checkDesktopUpdate(),
+      5 * 60 * 1000,
+    );
     return () => {
       window.clearInterval(interval);
     };
@@ -346,14 +569,25 @@ function App() {
   useEffect(() => {
     if (designPreviewState) return;
     let unlisten: (() => void) | undefined;
-    void listen<CodexInstallProgress>("codex-install-progress", ({ payload }) => {
-      setInstallProgress(payload);
-      if (payload.stage === "preparing") setMessage(tr("preparingDownload"));
-      if (payload.stage === "downloading") setMessage(payload.percent === undefined ? tr("downloadingCodex") : tr("downloadingCodexProgress", { percent: payload.percent }));
-      if (payload.stage === "installing") setMessage(tr("replacingCodex"));
-      if (payload.stage === "windows-installing") setMessage(tr("windowsInstalling"));
-      if (payload.stage === "verifying") setMessage(tr("verifyingCodex"));
-    }).then((nextUnlisten) => {
+    void listen<CodexInstallProgress>(
+      "codex-install-progress",
+      ({ payload }) => {
+        setInstallProgress(payload);
+        if (payload.stage === "preparing") setMessage(tr("preparingDownload"));
+        if (payload.stage === "selecting-source")
+          setMessage(tr("selectingDownloadSource"));
+        if (payload.stage === "downloading")
+          setMessage(
+            payload.percent === undefined
+              ? tr("downloadingCodex")
+              : tr("downloadingCodexProgress", { percent: payload.percent }),
+          );
+        if (payload.stage === "installing") setMessage(tr("replacingCodex"));
+        if (payload.stage === "windows-installing")
+          setMessage(tr("windowsInstalling"));
+        if (payload.stage === "verifying") setMessage(tr("verifyingCodex"));
+      },
+    ).then((nextUnlisten) => {
       unlisten = nextUnlisten;
     });
     return () => unlisten?.();
@@ -376,7 +610,10 @@ function App() {
       }
     }
     void checkStoreInstallation();
-    const interval = window.setInterval(() => void checkStoreInstallation(), 4000);
+    const interval = window.setInterval(
+      () => void checkStoreInstallation(),
+      4000,
+    );
     return () => {
       active = false;
       window.clearInterval(interval);
@@ -406,10 +643,13 @@ function App() {
         const setupWasCompleted = hasCompletedSetup(stored.session);
         setSetupCompleted(setupWasCompleted);
         setSelectedStep(setupWasCompleted ? 4 : 2);
-        setMessage(setupWasCompleted ? tr("workspaceRestored") : tr("sessionRestored"));
+        setMessage(
+          setupWasCompleted ? tr("workspaceRestored") : tr("sessionRestored"),
+        );
       })
       .catch((error) => {
-        if (active) setMessage(tr("sessionRestoreFailed", { error: String(error) }));
+        if (active)
+          setMessage(tr("sessionRestoreFailed", { error: String(error) }));
       })
       .finally(() => {
         if (active) setRestoringSession(false);
@@ -458,7 +698,10 @@ function App() {
       }
     }
     void syncAccountBalance();
-    const interval = window.setInterval(() => void syncAccountBalance(), 60_000);
+    const interval = window.setInterval(
+      () => void syncAccountBalance(),
+      60_000,
+    );
     return () => {
       active = false;
       window.clearInterval(interval);
@@ -488,7 +731,9 @@ function App() {
   }
 
   function cycleTheme() {
-    changeTheme(theme === "system" ? "light" : theme === "light" ? "dark" : "system");
+    changeTheme(
+      theme === "system" ? "light" : theme === "light" ? "dark" : "system",
+    );
   }
 
   useEffect(() => {
@@ -504,7 +749,12 @@ function App() {
             return null;
           }
         })
-        .find((url): url is URL => url?.protocol === "autogateway:" && url.hostname === "auth" && url.pathname === "/callback");
+        .find(
+          (url): url is URL =>
+            url?.protocol === "autogateway:" &&
+            url.hostname === "auth" &&
+            url.pathname === "/callback",
+        );
       if (!callback) return;
       const code = callback.searchParams.get("code") ?? "";
       const state = callback.searchParams.get("state") ?? "";
@@ -513,11 +763,19 @@ function App() {
         setMessage(tr("callbackInvalid"));
         return;
       }
-      if (authorizationExchangeInProgress.current || completedAuthorizationCode.current === code) return;
+      if (
+        authorizationExchangeInProgress.current ||
+        completedAuthorizationCode.current === code
+      )
+        return;
       authorizationExchangeInProgress.current = true;
       setBusy(true);
       try {
-        const session = await exchangeDesktopAuthorization(code, pending.verifier, pending.state);
+        const session = await exchangeDesktopAuthorization(
+          code,
+          pending.verifier,
+          pending.state,
+        );
         setDesktopAccessToken(session.token);
         setDesktopSession(session);
         const setupWasCompleted = hasCompletedSetup(session);
@@ -541,9 +799,11 @@ function App() {
     }).then((nextUnlisten) => {
       unlistenSingleInstance = nextUnlisten;
     });
-    void getCurrent().then((urls) => {
-      if (urls) void receiveDesktopAuthorization(urls);
-    }).catch(() => undefined);
+    void getCurrent()
+      .then((urls) => {
+        if (urls) void receiveDesktopAuthorization(urls);
+      })
+      .catch(() => undefined);
     return () => {
       unlistenDeepLink?.();
       unlistenSingleInstance?.();
@@ -556,8 +816,14 @@ function App() {
       const verifier = createVerifier();
       const challenge = await createChallenge(verifier);
       const state = createState();
-      window.sessionStorage.setItem(pendingAuthorizationStorageKey, JSON.stringify({ verifier, state }));
-      const query = new URLSearchParams({ desktopCodeChallenge: challenge, desktopState: state });
+      window.sessionStorage.setItem(
+        pendingAuthorizationStorageKey,
+        JSON.stringify({ verifier, state }),
+      );
+      const query = new URLSearchParams({
+        desktopCodeChallenge: challenge,
+        desktopState: state,
+      });
       await openUrl(`https://autogateway.cc/login?${query.toString()}`);
       setMessage(tr("completeInBrowser"));
     } catch (error) {
@@ -591,9 +857,13 @@ function App() {
       } catch {
         cleanupWarning = ` ${tr("credentialCleanupFailed")}`;
       }
-      setStatus((current) => current ? { ...current, configured: true } : current);
+      setStatus((current) =>
+        current ? { ...current, configured: true } : current,
+      );
       setConfigurationPhase("complete");
-      setMessage(`${tr("configurationWritten", { backup: result.configBackupPath ? tr("backupCreated") : "" })}${cleanupWarning}`);
+      setMessage(
+        `${tr("configurationWritten", { backup: result.configBackupPath ? tr("backupCreated") : "" })}${cleanupWarning}`,
+      );
       await refreshStatus(false);
     } catch (error) {
       const errorMessage = String(error);
@@ -645,7 +915,10 @@ function App() {
 
   function enterWorkspace() {
     if (!desktopSession) return;
-    window.localStorage.setItem(setupCompletedStorageKey(desktopSession.user.id), "true");
+    window.localStorage.setItem(
+      setupCompletedStorageKey(desktopSession.user.id),
+      "true",
+    );
     setSetupCompleted(true);
     setMessage(tr("workspaceReady"));
   }
@@ -685,7 +958,14 @@ function App() {
           setDesktopUpdateProgress(contentLength > 0 ? 0 : null);
         } else if (event.event === "Progress") {
           downloadedBytes += event.data.chunkLength;
-          setDesktopUpdateProgress(contentLength > 0 ? Math.min(100, Math.round(downloadedBytes / contentLength * 100)) : null);
+          setDesktopUpdateProgress(
+            contentLength > 0
+              ? Math.min(
+                  100,
+                  Math.round((downloadedBytes / contentLength) * 100),
+                )
+              : null,
+          );
         } else if (event.event === "Finished") {
           setDesktopUpdateProgress(100);
         }
@@ -781,51 +1061,347 @@ function App() {
 
   function renderHomeContent() {
     const version = appStatus?.localVersion || tr("versionUnavailable");
-    const versionStatus = !appInstalled ? tr("notInstalled") : appStatus?.updateCheckError ? tr("updateCheckUnavailable") : updateAvailable ? tr("updateAvailable") : tr("upToDate");
+    const versionStatus = !appInstalled
+      ? tr("notInstalled")
+      : appStatus?.updateCheckError
+        ? tr("updateCheckUnavailable")
+        : updateAvailable
+          ? tr("updateAvailable")
+          : tr("upToDate");
     const ready = accountConnected && appInstalled && configured;
-    return <main className="homeShell">
-      <aside className="homeRail">
-        <div className="homeBrand"><img className="homeBrandLogo" src="/site-icon.png" alt="" /><div><strong>AUTO Gateway</strong><small>{tr("desktopAppVersion", { version: desktopAppVersion || "—" })}</small></div></div>
-        <nav className="homeNav" aria-label={tr("homeNavigation")}>
-          <button className="selected"><HouseIcon weight="bold" />{tr("home")}</button>
-          <button onClick={openSetupFromHome}><CubeIcon />{tr("codexSetup")}</button>
-          <button onClick={() => void handleOpenConsole()}><UserCircleIcon />{tr("userConsole")}</button>
-        </nav>
-        <button className="homeHelp" onClick={() => void openUrl("https://autogateway.cc/docs#codex")}>{tr("needHelp")}</button>
-      </aside>
-      <section className="homeWorkspace">
-        <header className="topBar homeTopBar"><span className="topStatus" aria-live="polite">{message}</span><button className="userIdentity userIdentityButton" aria-label={`${tr("signedInAs")}: ${accountDetail || accountName}`} onClick={() => void handleOpenConsole()}><span className="userAvatar" aria-hidden="true"><UserCircleIcon weight="fill" /></span><span className="userIdentityText"><strong>{accountName}</strong><small>{accountDetail}</small></span></button><div className="headerBalance" aria-label={tr("accountBalance")}><div className="headerBalanceInfo"><span>{tr("accountBalance")}</span><strong>{accountBalance || tr("balanceUnavailable")}</strong><small>{tr("lastSyncedAt", { time: formatSyncTime(balanceSyncedAt, locale, tr("notSynced")) })}</small></div><button className="headerTopUpButton" onClick={() => void handleOpenConsole("billing")}><CurrencyDollarIcon weight="bold" />{tr("topUpBalance")}</button></div><button className="headerActionButton headerDevtoolsButton" aria-label={tr("openDevtools")} title={tr("openDevtools")} onClick={() => void handleOpenDevtools()}><BugIcon weight="bold" /></button><button className="headerActionButton" aria-label={tr("language")} onClick={toggleLocale}>{locale === "zh" ? "EN" : "中文"}</button><button className="headerActionButton" aria-label={tr("theme")} onClick={cycleTheme}>{theme === "system" ? tr("system") : theme === "light" ? tr("light") : tr("dark")}</button></header>
-        <section className="homeContent">
-          <p className="sectionKicker">{tr("workspace")}</p><h1>{tr("homeTitle")}</h1><p className="lead homeLead">{tr("homeLead")}</p>
-          {desktopUpdate ? <section className="notice warning desktopUpdateNotice"><strong>{tr("desktopUpdateAvailable")}</strong><span>{tr("desktopUpdateDescription", { version: desktopUpdate.version })}</span><button className="secondaryButton" disabled={desktopUpdatePhase === "downloading"} onClick={() => void handleInstallDesktopUpdate()}>{desktopUpdatePhase === "downloading" ? tr("desktopUpdating", { percent: desktopUpdateProgress ?? "…" }) : tr("desktopUpdateNow")}</button></section> : null}
-          {desktopUpdatePhase === "error" ? <section className="notice warning desktopUpdateNotice"><strong>{tr("desktopUpdateCheckUnavailable")}</strong><span>{desktopUpdateError || tr("desktopUpdateCheckUnavailable")}</span><button className="secondaryButton" onClick={() => void checkDesktopUpdate(true)}>{tr("desktopUpdateCheckNow")}</button></section> : null}
-          {homeActionError ? <p className="homeActionMessage" role="alert">{homeActionError}</p> : null}
-          <section className="homeStatusPanel">
-            <div className="homeHealth" aria-label={ready ? tr("active") : tr("checking")}><span className={`healthBadge ${ready ? "ready" : ""}`}><CheckCircleIcon weight="fill" /></span><div><span className="statusLabel">{ready ? tr("active") : tr("checking")}</span><strong>{ready ? tr("workspaceReadyTitle") : tr("workspaceCheckingTitle")}</strong><small>{ready ? tr("workspaceReadyDescription") : tr("workspaceCheckingDescription")}</small></div></div>
-            <div className="homeMetric"><span>{tr("accountBalance")}</span><strong>{accountBalance || tr("balanceUnavailable")}</strong><small>{tr("lastSyncedAt", { time: formatSyncTime(balanceSyncedAt, locale, tr("notSynced")) })}</small><button onClick={() => void handleOpenConsole("billing")}>{tr("topUpBalance")}</button></div>
-            <div className="homeMetric"><span>{tr("localVersion")}</span><strong>{version}</strong><small>{versionStatus}</small><button className="versionAction" disabled={checkingCodexUpdates || installingCodex || !appInstalled} onClick={() => void handleCheckCodexUpdates()}>{checkingCodexUpdates ? tr("checkingCodexUpdates") : tr("checkNow")}</button>{updateAvailable ? <button className="versionAction versionUpdateAction" disabled={installingCodex} onClick={() => void handleInstallCodex(true)}>{installingCodex ? tr("updatingCodex") : tr("updateNow")}</button> : null}</div>
-            <button className="primaryButton homeOpenButton" disabled={!appInstalled} onClick={() => void handleOpenCodex()}>{tr("openCodex")}</button>
+    return (
+      <main className="homeShell">
+        <aside className="homeRail">
+          <div className="homeBrand">
+            <img className="homeBrandLogo" src="/site-icon.png" alt="" />
+            <div>
+              <strong>AUTO Gateway</strong>
+              <small>
+                {tr("desktopAppVersion", { version: desktopAppVersion || "—" })}
+              </small>
+            </div>
+          </div>
+          <nav className="homeNav" aria-label={tr("homeNavigation")}>
+            <button className="selected">
+              <HouseIcon weight="bold" />
+              {tr("home")}
+            </button>
+            <button onClick={openSetupFromHome}>
+              <CubeIcon />
+              {tr("codexSetup")}
+            </button>
+            <button onClick={() => void handleOpenConsole()}>
+              <UserCircleIcon />
+              {tr("userConsole")}
+            </button>
+          </nav>
+          <button
+            className="homeHelp"
+            onClick={() => void openUrl("https://autogateway.cc/docs#codex")}
+          >
+            {tr("needHelp")}
+          </button>
+        </aside>
+        <section className="homeWorkspace">
+          <header className="topBar homeTopBar">
+            <span className="topStatus" aria-live="polite">
+              {message}
+            </span>
+            <button
+              className="userIdentity userIdentityButton"
+              aria-label={`${tr("signedInAs")}: ${accountDetail || accountName}`}
+              onClick={() => void handleOpenConsole()}
+            >
+              <span className="userAvatar" aria-hidden="true">
+                <UserCircleIcon weight="fill" />
+              </span>
+              <span className="userIdentityText">
+                <strong>{accountName}</strong>
+                <small>{accountDetail}</small>
+              </span>
+            </button>
+            <div className="headerBalance" aria-label={tr("accountBalance")}>
+              <div className="headerBalanceInfo">
+                <span>{tr("accountBalance")}</span>
+                <strong>{accountBalance || tr("balanceUnavailable")}</strong>
+                <small>
+                  {tr("lastSyncedAt", {
+                    time: formatSyncTime(
+                      balanceSyncedAt,
+                      locale,
+                      tr("notSynced"),
+                    ),
+                  })}
+                </small>
+              </div>
+              <button
+                className="headerTopUpButton"
+                onClick={() => void handleOpenConsole("billing")}
+              >
+                <CurrencyDollarIcon weight="bold" />
+                {tr("topUpBalance")}
+              </button>
+            </div>
+            <button
+              className="headerActionButton headerDevtoolsButton"
+              aria-label={tr("openDevtools")}
+              title={tr("openDevtools")}
+              onClick={() => void handleOpenDevtools()}
+            >
+              <BugIcon weight="bold" />
+            </button>
+            <button
+              className="headerActionButton"
+              aria-label={tr("language")}
+              onClick={toggleLocale}
+            >
+              {locale === "zh" ? "EN" : "中文"}
+            </button>
+            <button
+              className="headerActionButton"
+              aria-label={tr("theme")}
+              onClick={cycleTheme}
+            >
+              {theme === "system"
+                ? tr("system")
+                : theme === "light"
+                  ? tr("light")
+                  : tr("dark")}
+            </button>
+          </header>
+          <section className="homeContent">
+            <p className="sectionKicker">{tr("workspace")}</p>
+            <h1>{tr("homeTitle")}</h1>
+            <p className="lead homeLead">{tr("homeLead")}</p>
+            {desktopUpdate ? (
+              <section className="notice warning desktopUpdateNotice">
+                <strong>{tr("desktopUpdateAvailable")}</strong>
+                <span>
+                  {tr("desktopUpdateDescription", {
+                    version: desktopUpdate.version,
+                  })}
+                </span>
+                <button
+                  className="secondaryButton"
+                  disabled={desktopUpdatePhase === "downloading"}
+                  onClick={() => void handleInstallDesktopUpdate()}
+                >
+                  {desktopUpdatePhase === "downloading"
+                    ? tr("desktopUpdating", {
+                        percent: desktopUpdateProgress ?? "…",
+                      })
+                    : tr("desktopUpdateNow")}
+                </button>
+              </section>
+            ) : null}
+            {desktopUpdatePhase === "error" ? (
+              <section className="notice warning desktopUpdateNotice">
+                <strong>{tr("desktopUpdateCheckUnavailable")}</strong>
+                <span>
+                  {desktopUpdateError || tr("desktopUpdateCheckUnavailable")}
+                </span>
+                <button
+                  className="secondaryButton"
+                  onClick={() => void checkDesktopUpdate(true)}
+                >
+                  {tr("desktopUpdateCheckNow")}
+                </button>
+              </section>
+            ) : null}
+            {homeActionError ? (
+              <p className="homeActionMessage" role="alert">
+                {homeActionError}
+              </p>
+            ) : null}
+            <section className="homeStatusPanel">
+              <div
+                className="homeHealth"
+                aria-label={ready ? tr("active") : tr("checking")}
+              >
+                <span className={`healthBadge ${ready ? "ready" : ""}`}>
+                  <CheckCircleIcon weight="fill" />
+                </span>
+                <div>
+                  <span className="statusLabel">
+                    {ready ? tr("active") : tr("checking")}
+                  </span>
+                  <strong>
+                    {ready
+                      ? tr("workspaceReadyTitle")
+                      : tr("workspaceCheckingTitle")}
+                  </strong>
+                  <small>
+                    {ready
+                      ? tr("workspaceReadyDescription")
+                      : tr("workspaceCheckingDescription")}
+                  </small>
+                </div>
+              </div>
+              <div className="homeMetric">
+                <span>{tr("accountBalance")}</span>
+                <strong>{accountBalance || tr("balanceUnavailable")}</strong>
+                <small>
+                  {tr("lastSyncedAt", {
+                    time: formatSyncTime(
+                      balanceSyncedAt,
+                      locale,
+                      tr("notSynced"),
+                    ),
+                  })}
+                </small>
+                <button onClick={() => void handleOpenConsole("billing")}>
+                  {tr("topUpBalance")}
+                </button>
+              </div>
+              <div className="homeMetric">
+                <span>{tr("localVersion")}</span>
+                <strong>{version}</strong>
+                <small>{versionStatus}</small>
+                <button
+                  className="versionAction"
+                  disabled={
+                    checkingCodexUpdates || installingCodex || !appInstalled
+                  }
+                  onClick={() => void handleCheckCodexUpdates()}
+                >
+                  {checkingCodexUpdates
+                    ? tr("checkingCodexUpdates")
+                    : tr("checkNow")}
+                </button>
+                {updateAvailable ? (
+                  <button
+                    className="versionAction versionUpdateAction"
+                    disabled={installingCodex}
+                    onClick={() => void handleInstallCodex(true)}
+                  >
+                    {installingCodex ? tr("updatingCodex") : tr("updateNow")}
+                  </button>
+                ) : null}
+              </div>
+              <button
+                className="primaryButton homeOpenButton"
+                disabled={!appInstalled}
+                onClick={() => void handleOpenCodex()}
+              >
+                {tr("openCodex")}
+              </button>
+            </section>
+            <section className="homeSection">
+              <h2>{tr("quickActions")}</h2>
+              <div className="quickActions">
+                <button onClick={() => void handleOpenConsole()}>
+                  <UserCircleIcon />
+                  <span>
+                    <strong>{tr("openConsole")}</strong>
+                    <small>{tr("openConsoleDescription")}</small>
+                  </span>
+                  <ArrowRightIcon />
+                </button>
+                <button
+                  onClick={() => void handleCheckCodexUpdates()}
+                  disabled={
+                    checkingCodexUpdates || installingCodex || !appInstalled
+                  }
+                >
+                  <ArrowsClockwiseIcon />
+                  <span>
+                    <strong>{tr("checkUpdates")}</strong>
+                    <small>{tr("checkUpdatesDescription")}</small>
+                  </span>
+                  <ArrowRightIcon />
+                </button>
+                <button
+                  onClick={() => void checkDesktopUpdate(true)}
+                  disabled={
+                    desktopUpdatePhase === "checking" ||
+                    desktopUpdatePhase === "downloading"
+                  }
+                >
+                  <ArrowsClockwiseIcon />
+                  <span>
+                    <strong>
+                      {desktopUpdatePhase === "checking"
+                        ? tr("desktopCheckingUpdates")
+                        : tr("desktopUpdateCheckNow")}
+                    </strong>
+                    <small>{tr("desktopUpdateCheckDescription")}</small>
+                  </span>
+                  <ArrowRightIcon />
+                </button>
+                {updateAvailable ? (
+                  <button
+                    onClick={() => void handleInstallCodex(true)}
+                    disabled={installingCodex}
+                  >
+                    <ArrowsClockwiseIcon />
+                    <span>
+                      <strong>
+                        {installingCodex
+                          ? tr("updatingCodex")
+                          : tr("updateNow")}
+                      </strong>
+                      <small>{tr("updateAvailableDescription")}</small>
+                    </span>
+                    <ArrowRightIcon />
+                  </button>
+                ) : null}
+                <button onClick={openSetupFromHome}>
+                  <GearIcon />
+                  <span>
+                    <strong>{tr("reconfigureCodex")}</strong>
+                    <small>{tr("reconfigureCodexDescription")}</small>
+                  </span>
+                  <ArrowRightIcon />
+                </button>
+                <button
+                  disabled={busy || backupCount === 0}
+                  onClick={() => void handleSwitchBackConfiguration()}
+                >
+                  <ArrowUUpLeftIcon />
+                  <span>
+                    <strong>{tr("switchBackConfiguration")}</strong>
+                    <small>{tr("switchBackConfigurationDescription")}</small>
+                  </span>
+                  <ArrowRightIcon />
+                </button>
+              </div>
+            </section>
+            <section className="homeSection">
+              <h2>{tr("recentSetup")}</h2>
+              <div className="recentSetup">
+                <div>
+                  <CheckIcon weight="bold" />
+                  <strong>{tr("connectedAccount")}</strong>
+                  <span>{accountDetail}</span>
+                </div>
+                <div>
+                  <CheckIcon weight="bold" />
+                  <strong>{tr("codexConfigured")}</strong>
+                  <span>
+                    {configured ? tr("configured") : tr("notConfigured")}
+                  </span>
+                </div>
+                <div>
+                  <CheckIcon weight="bold" />
+                  <strong>{tr("versionUpToDate")}</strong>
+                  <span>{versionStatus}</span>
+                </div>
+              </div>
+            </section>
           </section>
-          <section className="homeSection"><h2>{tr("quickActions")}</h2><div className="quickActions">
-            <button onClick={() => void handleOpenConsole()}><UserCircleIcon /><span><strong>{tr("openConsole")}</strong><small>{tr("openConsoleDescription")}</small></span><ArrowRightIcon /></button>
-            <button onClick={() => void handleCheckCodexUpdates()} disabled={checkingCodexUpdates || installingCodex || !appInstalled}><ArrowsClockwiseIcon /><span><strong>{tr("checkUpdates")}</strong><small>{tr("checkUpdatesDescription")}</small></span><ArrowRightIcon /></button>
-            <button onClick={() => void checkDesktopUpdate(true)} disabled={desktopUpdatePhase === "checking" || desktopUpdatePhase === "downloading"}><ArrowsClockwiseIcon /><span><strong>{desktopUpdatePhase === "checking" ? tr("desktopCheckingUpdates") : tr("desktopUpdateCheckNow")}</strong><small>{tr("desktopUpdateCheckDescription")}</small></span><ArrowRightIcon /></button>
-            {updateAvailable ? <button onClick={() => void handleInstallCodex(true)} disabled={installingCodex}><ArrowsClockwiseIcon /><span><strong>{installingCodex ? tr("updatingCodex") : tr("updateNow")}</strong><small>{tr("updateAvailableDescription")}</small></span><ArrowRightIcon /></button> : null}
-            <button onClick={openSetupFromHome}><GearIcon /><span><strong>{tr("reconfigureCodex")}</strong><small>{tr("reconfigureCodexDescription")}</small></span><ArrowRightIcon /></button>
-            <button disabled={busy || backupCount === 0} onClick={() => void handleSwitchBackConfiguration()}><ArrowUUpLeftIcon /><span><strong>{tr("switchBackConfiguration")}</strong><small>{tr("switchBackConfigurationDescription")}</small></span><ArrowRightIcon /></button>
-          </div></section>
-          <section className="homeSection"><h2>{tr("recentSetup")}</h2><div className="recentSetup">
-            <div><CheckIcon weight="bold" /><strong>{tr("connectedAccount")}</strong><span>{accountDetail}</span></div>
-            <div><CheckIcon weight="bold" /><strong>{tr("codexConfigured")}</strong><span>{configured ? tr("configured") : tr("notConfigured")}</span></div>
-            <div><CheckIcon weight="bold" /><strong>{tr("versionUpToDate")}</strong><span>{versionStatus}</span></div>
-          </div></section>
         </section>
-      </section>
-    </main>;
+      </main>
+    );
   }
 
   function selectStep(step: WizardStep) {
-    const maximumReachableStep: WizardStep = !accountConnected ? 1 : !appInstalled ? 2 : !gatewayConfigured ? 3 : 4;
+    const maximumReachableStep: WizardStep = !accountConnected
+      ? 1
+      : !appInstalled
+        ? 2
+        : !gatewayConfigured
+          ? 3
+          : 4;
     if (step > selectedStep + 1 || step > maximumReachableStep) return;
     setShowSettings(false);
     setSelectedStep(step);
@@ -838,84 +1414,510 @@ function App() {
 
   function renderSetupContent() {
     if (selectedStep === 1) {
-      return <section className="setupContent">
-        <div className="setupBody">
-          <p className="sectionKicker">{tr("secureSignIn")}</p>
-          <h1>{tr("connectTitle")}</h1>
-          <p className="lead">{tr("connectLead")}</p>
-          <div className={`notice setupNotice ${accountConnected ? "success" : ""}`}><strong>{accountConnected ? tr("accountConnected") : tr("noAccount")}</strong><span>{accountConnected ? tr("sessionRestored") : tr("completeInBrowser")}</span></div>
-        </div>
-        <div className="buttonRow setupActions"><button className="primaryButton" disabled={busy || restoringSession} onClick={() => accountConnected ? selectStep(2) : void handleStartSignIn()}>{restoringSession ? tr("restoringSession") : accountConnected ? tr("continueToCodex") : busy ? tr("openingBrowser") : tr("continueInBrowser")}</button></div>
-      </section>;
+      return (
+        <section className="setupContent">
+          <div className="setupBody">
+            <p className="sectionKicker">{tr("secureSignIn")}</p>
+            <h1>{tr("connectTitle")}</h1>
+            <p className="lead">{tr("connectLead")}</p>
+            <div
+              className={`notice setupNotice ${accountConnected ? "success" : ""}`}
+            >
+              <strong>
+                {accountConnected ? tr("accountConnected") : tr("noAccount")}
+              </strong>
+              <span>
+                {accountConnected
+                  ? tr("sessionRestored")
+                  : tr("completeInBrowser")}
+              </span>
+            </div>
+          </div>
+          <div className="buttonRow setupActions">
+            <button
+              className="primaryButton"
+              disabled={busy || restoringSession}
+              onClick={() =>
+                accountConnected ? selectStep(2) : void handleStartSignIn()
+              }
+            >
+              {restoringSession
+                ? tr("restoringSession")
+                : accountConnected
+                  ? tr("continueToCodex")
+                  : busy
+                    ? tr("openingBrowser")
+                    : tr("continueInBrowser")}
+            </button>
+          </div>
+        </section>
+      );
     }
     if (selectedStep === 2) {
-      return <section className="setupContent">
-        <div className="setupBody">
-          <p className="sectionKicker">{tr("officialDesktopApp")}</p>
-          <h1>{tr("installTitle")}</h1>
-          <p className="lead">{tr("installLead")}</p>
-          <div className={appInstalled && !updateAvailable ? "notice success installNotice setupNotice" : "notice warning installNotice setupNotice"}>
-            <strong>{updateAvailable ? tr("updateAvailable") : appInstalled ? appStatus?.updateAvailable === false ? tr("upToDate") : tr("installed") : tr("notInstalled")}</strong>
-            <span>{updateAvailable ? tr("updateAvailableDescription") : appInstalled ? appStatus?.updateCheckError ? tr("updateCheckUnavailable") : tr("installedDescription") : appStatus ? tr("notInstalledDescription") : tr("checkingInstallation")}</span>
-            {appInstalled ? <div className="versionGrid" aria-label={tr("installed")}>
-              <div className="versionItem"><span>{tr("localVersion")}</span><strong>{appStatus?.localVersion || tr("versionUnavailable")}</strong></div>
-              <div className="versionItem"><span>{tr("latestVersion")}</span><strong>{appStatus?.latestVersion || tr("versionUnavailable")}</strong></div>
-              <button className="secondaryButton updateButton versionUpdateButton" disabled={checkingCodexUpdates || installingCodex} onClick={() => void handleCheckCodexUpdates()}>{checkingCodexUpdates ? tr("checkingCodexUpdates") : tr("checkNow")}</button>
-              {updateAvailable ? <button className="secondaryButton primaryUpdateButton versionUpdateButton" disabled={installingCodex} onClick={() => void handleInstallCodex(true)}>{installingCodex ? installPercent === undefined ? tr("updatingCodex") : `${tr("updatingCodex")} ${installPercent}%` : tr("updateNow")}</button> : null}
-            </div> : null}
-            {installingCodex && installProgress?.stage === "downloading" ? <div className="installProgress" aria-live="polite"><progress max="100" value={installPercent} /><small>{installPercent === undefined ? tr("downloadingCodex") : tr("downloadPercent", { percent: installPercent })}</small></div> : null}
-            {installingCodex && installProgress?.stage === "windows-installing" ? <div className="installProgress" aria-live="polite"><small>{tr("windowsInstalling")}</small></div> : null}
-            {awaitingStoreInstallation ? <div className="installProgress" aria-live="polite"><small>{tr("storeInstallationInProgress")}</small></div> : null}
+      return (
+        <section className="setupContent">
+          <div className="setupBody">
+            <p className="sectionKicker">{tr("officialDesktopApp")}</p>
+            <h1>{tr("installTitle")}</h1>
+            <p className="lead">{tr("installLead")}</p>
+            <div
+              className={
+                appInstalled && !updateAvailable
+                  ? "notice success installNotice setupNotice"
+                  : "notice warning installNotice setupNotice"
+              }
+            >
+              <strong>
+                {updateAvailable
+                  ? tr("updateAvailable")
+                  : appInstalled
+                    ? appStatus?.updateAvailable === false
+                      ? tr("upToDate")
+                      : tr("installed")
+                    : tr("notInstalled")}
+              </strong>
+              <span>
+                {updateAvailable
+                  ? tr("updateAvailableDescription")
+                  : appInstalled
+                    ? appStatus?.updateCheckError
+                      ? tr("updateCheckUnavailable")
+                      : tr("installedDescription")
+                    : appStatus
+                      ? tr("notInstalledDescription")
+                      : tr("checkingInstallation")}
+              </span>
+              {appInstalled ? (
+                <div className="versionGrid" aria-label={tr("installed")}>
+                  <div className="versionItem">
+                    <span>{tr("localVersion")}</span>
+                    <strong>
+                      {appStatus?.localVersion || tr("versionUnavailable")}
+                    </strong>
+                  </div>
+                  <div className="versionItem">
+                    <span>{tr("latestVersion")}</span>
+                    <strong>
+                      {appStatus?.latestVersion || tr("versionUnavailable")}
+                    </strong>
+                  </div>
+                  <button
+                    className="secondaryButton updateButton versionUpdateButton"
+                    disabled={checkingCodexUpdates || installingCodex}
+                    onClick={() => void handleCheckCodexUpdates()}
+                  >
+                    {checkingCodexUpdates
+                      ? tr("checkingCodexUpdates")
+                      : tr("checkNow")}
+                  </button>
+                  {updateAvailable ? (
+                    <button
+                      className="secondaryButton primaryUpdateButton versionUpdateButton"
+                      disabled={installingCodex}
+                      onClick={() => void handleInstallCodex(true)}
+                    >
+                      {installingCodex
+                        ? installPercent === undefined
+                          ? tr("updatingCodex")
+                          : `${tr("updatingCodex")} ${installPercent}%`
+                        : tr("updateNow")}
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+              {installingCodex &&
+              installProgress?.stage === "selecting-source" ? (
+                <div className="installProgress" aria-live="polite">
+                  <small>{tr("selectingDownloadSource")}</small>
+                </div>
+              ) : null}
+              {installingCodex && installProgress?.stage === "downloading" ? (
+                <div
+                  className="installProgress downloadProgress"
+                  aria-live="polite"
+                >
+                  <div className="downloadProgressHeader">
+                    <strong>{tr("downloadingCodex")}</strong>
+                    <span>
+                      {installPercent === undefined
+                        ? "—"
+                        : `${installPercent}%`}
+                    </span>
+                  </div>
+                  <progress max="100" value={installPercent} />
+                  <div className="downloadProgressMetrics">
+                    <span>{downloadAmountDetails}</span>
+                    <span>{downloadSpeedDetails}</span>
+                  </div>
+                  {downloadProgressDetails ? (
+                    <small className="downloadProgressSource">
+                      {downloadProgressDetails}
+                    </small>
+                  ) : null}
+                </div>
+              ) : null}
+              {installingCodex &&
+              installProgress?.stage === "windows-installing" ? (
+                <div className="installProgress" aria-live="polite">
+                  <small>{tr("windowsInstalling")}</small>
+                </div>
+              ) : null}
+              {awaitingStoreInstallation ? (
+                <div className="installProgress" aria-live="polite">
+                  <small>{tr("storeInstallationInProgress")}</small>
+                </div>
+              ) : null}
+            </div>
           </div>
-        </div>
-        <div className="buttonRow setupActions"><button className="secondaryButton" onClick={() => selectStep(1)}>{tr("previous")}</button>{appInstalled ? <button className="primaryButton" disabled={installingCodex} onClick={() => selectStep(3)}>{tr("next")}</button> : awaitingStoreInstallation ? <button className="primaryButton" onClick={() => void checkStoreInstallation()}>{tr("checkInstallation")}</button> : <button className="primaryButton" disabled={installingCodex} onClick={() => void handleInstallCodex()}>{installingCodex ? installPercent === undefined ? tr("installingCodex") : `${tr("installingCodex")} ${installPercent}%` : tr("installAutomatically")}</button>}</div>
-      </section>;
+          <div className="buttonRow setupActions">
+            <button className="secondaryButton" onClick={() => selectStep(1)}>
+              {tr("previous")}
+            </button>
+            {appInstalled ? (
+              <button
+                className="primaryButton"
+                disabled={installingCodex}
+                onClick={() => selectStep(3)}
+              >
+                {tr("next")}
+              </button>
+            ) : awaitingStoreInstallation ? (
+              <button
+                className="primaryButton"
+                onClick={() => void checkStoreInstallation()}
+              >
+                {tr("checkInstallation")}
+              </button>
+            ) : (
+              <button
+                className="primaryButton"
+                disabled={installingCodex}
+                onClick={() => void handleInstallCodex()}
+              >
+                {installingCodex
+                  ? installPercent === undefined
+                    ? tr("installingCodex")
+                    : `${tr("installingCodex")} ${installPercent}%`
+                  : tr("installAutomatically")}
+              </button>
+            )}
+          </div>
+        </section>
+      );
     }
     if (selectedStep === 3) {
-      const configurationRunning = configurationPhase === "creatingKey" || configurationPhase === "configuring";
-      const noticeTitle = configurationPhase === "creatingKey" ? tr("creatingAPIKey") : configurationPhase === "configuring" ? tr("automaticConfiguring") : configurationPhase === "complete" ? tr("automaticConfigurationComplete") : configurationPhase === "error" ? tr("automaticConfigurationFailed") : tr("preparingConfiguration");
-      const noticeDescription = configurationPhase === "creatingKey" ? tr("creatingAPIKeyDescription") : configurationPhase === "configuring" ? tr("automaticConfiguringDescription") : configurationPhase === "complete" ? tr("automaticConfigurationCompleteDescription") : configurationPhase === "error" ? tr("automaticConfigurationFailedDescription", { error: configurationError }) : tr("preparingConfigurationDescription");
-      return <section className="setupContent">
+      const configurationRunning =
+        configurationPhase === "creatingKey" ||
+        configurationPhase === "configuring";
+      const noticeTitle =
+        configurationPhase === "creatingKey"
+          ? tr("creatingAPIKey")
+          : configurationPhase === "configuring"
+            ? tr("automaticConfiguring")
+            : configurationPhase === "complete"
+              ? tr("automaticConfigurationComplete")
+              : configurationPhase === "error"
+                ? tr("automaticConfigurationFailed")
+                : tr("preparingConfiguration");
+      const noticeDescription =
+        configurationPhase === "creatingKey"
+          ? tr("creatingAPIKeyDescription")
+          : configurationPhase === "configuring"
+            ? tr("automaticConfiguringDescription")
+            : configurationPhase === "complete"
+              ? tr("automaticConfigurationCompleteDescription")
+              : configurationPhase === "error"
+                ? tr("automaticConfigurationFailedDescription", {
+                    error: configurationError,
+                  })
+                : tr("preparingConfigurationDescription");
+      return (
+        <section className="setupContent">
+          <div className="setupBody">
+            <p className="sectionKicker">{tr("safeConfiguration")}</p>
+            <h1>{tr("configureTitle")}</h1>
+            <p className="lead">{tr("configureLead")}</p>
+            <div
+              className={`notice setupNotice configurationNotice ${configurationPhase === "error" ? "warning" : "success"}`}
+            >
+              <strong>{noticeTitle}</strong>
+              <span>{noticeDescription}</span>
+              {apiKey ? (
+                <div className="apiKeyReveal">
+                  <label>{tr("generatedAPIKey")}</label>
+                  <div>
+                    <code>{apiKey}</code>
+                    <button
+                      type="button"
+                      onClick={() => void handleCopyAPIKey()}
+                      aria-label={tr("copyAPIKey")}
+                    >
+                      {apiKeyCopied ? (
+                        <CheckIcon aria-hidden="true" weight="bold" />
+                      ) : (
+                        <CopyIcon aria-hidden="true" weight="bold" />
+                      )}
+                      <span>
+                        {apiKeyCopied ? tr("copiedAPIKey") : tr("copyAPIKey")}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+          <div className="buttonRow setupActions">
+            <button
+              className="secondaryButton"
+              disabled={configurationRunning}
+              onClick={() => selectStep(2)}
+            >
+              {tr("previous")}
+            </button>
+            {configurationPhase === "complete" ? (
+              <button
+                className="primaryButton"
+                onClick={handleConfigurationNext}
+              >
+                {tr("next")}
+              </button>
+            ) : configurationPhase === "error" ? (
+              <button
+                className="primaryButton"
+                onClick={() => void runAutomaticConfiguration()}
+              >
+                {tr("retryConfiguration")}
+              </button>
+            ) : (
+              <button
+                className="primaryButton configurationLoadingButton"
+                disabled
+              >
+                <CircleNotchIcon aria-hidden="true" weight="bold" />
+                {tr("configuring")}
+              </button>
+            )}
+          </div>
+        </section>
+      );
+    }
+    return (
+      <section className="setupContent">
         <div className="setupBody">
-          <p className="sectionKicker">{tr("safeConfiguration")}</p>
-          <h1>{tr("configureTitle")}</h1>
-          <p className="lead">{tr("configureLead")}</p>
-          <div className={`notice setupNotice configurationNotice ${configurationPhase === "error" ? "warning" : "success"}`}>
-            <strong>{noticeTitle}</strong>
-            <span>{noticeDescription}</span>
-            {apiKey ? <div className="apiKeyReveal"><label>{tr("generatedAPIKey")}</label><div><code>{apiKey}</code><button type="button" onClick={() => void handleCopyAPIKey()} aria-label={tr("copyAPIKey")}>{apiKeyCopied ? <CheckIcon aria-hidden="true" weight="bold" /> : <CopyIcon aria-hidden="true" weight="bold" />}<span>{apiKeyCopied ? tr("copiedAPIKey") : tr("copyAPIKey")}</span></button></div></div> : null}
+          <p className="sectionKicker">{tr("setupComplete")}</p>
+          <h1>{tr("completeTitle")}</h1>
+          <p className="lead">{tr("completeLead")}</p>
+          <div className="notice success setupNotice">
+            <strong>
+              {configured ? tr("configured") : tr("readyToVerify")}
+            </strong>
+            <span>{message}</span>
           </div>
         </div>
-        <div className="buttonRow setupActions"><button className="secondaryButton" disabled={configurationRunning} onClick={() => selectStep(2)}>{tr("previous")}</button>{configurationPhase === "complete" ? <button className="primaryButton" onClick={handleConfigurationNext}>{tr("next")}</button> : configurationPhase === "error" ? <button className="primaryButton" onClick={() => void runAutomaticConfiguration()}>{tr("retryConfiguration")}</button> : <button className="primaryButton configurationLoadingButton" disabled><CircleNotchIcon aria-hidden="true" weight="bold" />{tr("configuring")}</button>}</div>
-      </section>;
-    }
-    return <section className="setupContent">
-      <div className="setupBody">
-        <p className="sectionKicker">{tr("setupComplete")}</p>
-        <h1>{tr("completeTitle")}</h1>
-        <p className="lead">{tr("completeLead")}</p>
-        <div className="notice success setupNotice"><strong>{configured ? tr("configured") : tr("readyToVerify")}</strong><span>{message}</span></div>
-      </div>
-      <div className="buttonRow setupActions"><button className="secondaryButton" onClick={() => selectStep(3)}>{tr("previous")}</button><button className="primaryButton" disabled={!appInstalled || !configured} onClick={enterWorkspace}>{tr("enterWorkspace")}</button></div>
-    </section>;
+        <div className="buttonRow setupActions">
+          <button className="secondaryButton" onClick={() => selectStep(3)}>
+            {tr("previous")}
+          </button>
+          <button
+            className="primaryButton"
+            disabled={!appInstalled || !configured}
+            onClick={enterWorkspace}
+          >
+            {tr("enterWorkspace")}
+          </button>
+        </div>
+      </section>
+    );
   }
 
   if (showHome) return renderHomeContent();
 
-  return <main className="appShell">
-    <aside className="wizardRail">
-      <nav className="stepNav" aria-label={tr("setupSteps")}>
-        <button className={stepClass(1, accountConnected)} onClick={() => selectStep(1)}><span>{accountConnected ? <CheckIcon aria-hidden="true" weight="bold" /> : "1"}</span><b>{tr("stepConnect")}</b></button>
-        <button className={stepClass(2, codexDetected)} disabled={selectedStep < 2} onClick={() => selectStep(2)}><span>{codexDetected ? <CheckIcon aria-hidden="true" weight="bold" /> : "2"}</span><b>{tr("stepInstall")}</b></button>
-        <button className={stepClass(3, gatewayConfigured)} disabled={selectedStep < 3} onClick={() => selectStep(3)}><span>{gatewayConfigured ? <CheckIcon aria-hidden="true" weight="bold" /> : "3"}</span><b>{tr("stepConfigure")}</b></button>
-        <button className={stepClass(4, gatewayConfigured)} disabled={selectedStep < 4} onClick={() => selectStep(4)}><span>{gatewayConfigured ? <CheckIcon aria-hidden="true" weight="bold" /> : "4"}</span><b>{tr("stepFinish")}</b></button>
-      </nav>
-    </aside>
-    <section className="workspace">
-      <header className="topBar"><span className="topStatus" aria-live="polite">{busy || installingCodex || checkingCodexUpdates || restoringSession ? tr("working") : message}</span>{desktopSession ? <button className="userIdentity userIdentityButton" aria-label={`${tr("signedInAs")}: ${accountDetail || accountName}`} onClick={() => void handleOpenConsole()}><span className="userAvatar" aria-hidden="true"><UserCircleIcon weight="fill" /></span><span className="userIdentityText"><strong>{accountName}</strong><small>{accountDetail}</small></span></button> : null}<button className="headerActionButton headerDevtoolsButton" aria-label={tr("openDevtools")} title={tr("openDevtools")} onClick={() => void handleOpenDevtools()}><BugIcon weight="bold" /></button><button className="headerActionButton" aria-label={tr("language")} onClick={toggleLocale}>{locale === "zh" ? "EN" : "中文"}</button><button className="headerActionButton" aria-label={tr("theme")} onClick={cycleTheme}>{theme === "system" ? tr("system") : theme === "light" ? tr("light") : tr("dark")}</button></header>
-      {showSettings ? <section className="settingsContent"><p className="sectionKicker">{tr("settings")}</p><h1>{tr("connectionRecovery")}</h1><p className="lead">{tr("connectionRecoveryLead")}</p><div className="preferencesPanel"><strong>{tr("appearance")}</strong><label className="fieldLabel">{tr("theme")}<select value={theme} onChange={(event) => changeTheme(event.target.value as ThemeMode)}><option value="system">{tr("system")}</option><option value="light">{tr("light")}</option><option value="dark">{tr("dark")}</option></select></label><label className="fieldLabel">{tr("language")}<select value={localePreference} onChange={(event) => changeLocale(event.target.value as LocalePreference)}><option value="system">{tr("automatic")}</option><option value="zh">{tr("chinese")}</option><option value="en">{tr("english")}</option></select></label></div><label className="fieldLabel">{tr("endpoint")}<input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} autoComplete="url" /></label><div className="settingsDivider" /><div className="recoveryRow"><div><strong>{tr("backups")}</strong><span>{tr("backupsAvailable", { count: backupCount, suffix: backupCount === 1 ? "" : "s" })}</span></div><button className="secondaryButton" disabled={busy || backupCount === 0} onClick={() => void handleRestoreBackups()}>{tr("restoreLatest")}</button></div><button className="secondaryButton backButton" onClick={() => setShowSettings(false)}>{tr("backToSetup")}</button></section> : renderSetupContent()}
-    </section>
-  </main>;
+  return (
+    <main className="appShell">
+      <aside className="wizardRail">
+        <nav className="stepNav" aria-label={tr("setupSteps")}>
+          <button
+            className={stepClass(1, accountConnected)}
+            onClick={() => selectStep(1)}
+          >
+            <span>
+              {accountConnected ? (
+                <CheckIcon aria-hidden="true" weight="bold" />
+              ) : (
+                "1"
+              )}
+            </span>
+            <b>{tr("stepConnect")}</b>
+          </button>
+          <button
+            className={stepClass(2, codexDetected)}
+            disabled={selectedStep < 2}
+            onClick={() => selectStep(2)}
+          >
+            <span>
+              {codexDetected ? (
+                <CheckIcon aria-hidden="true" weight="bold" />
+              ) : (
+                "2"
+              )}
+            </span>
+            <b>{tr("stepInstall")}</b>
+          </button>
+          <button
+            className={stepClass(3, gatewayConfigured)}
+            disabled={selectedStep < 3}
+            onClick={() => selectStep(3)}
+          >
+            <span>
+              {gatewayConfigured ? (
+                <CheckIcon aria-hidden="true" weight="bold" />
+              ) : (
+                "3"
+              )}
+            </span>
+            <b>{tr("stepConfigure")}</b>
+          </button>
+          <button
+            className={stepClass(4, gatewayConfigured)}
+            disabled={selectedStep < 4}
+            onClick={() => selectStep(4)}
+          >
+            <span>
+              {gatewayConfigured ? (
+                <CheckIcon aria-hidden="true" weight="bold" />
+              ) : (
+                "4"
+              )}
+            </span>
+            <b>{tr("stepFinish")}</b>
+          </button>
+        </nav>
+      </aside>
+      <section className="workspace">
+        <header className="topBar">
+          <span className="topStatus" aria-live="polite">
+            {busy || installingCodex || checkingCodexUpdates || restoringSession
+              ? tr("working")
+              : message}
+          </span>
+          {desktopSession ? (
+            <button
+              className="userIdentity userIdentityButton"
+              aria-label={`${tr("signedInAs")}: ${accountDetail || accountName}`}
+              onClick={() => void handleOpenConsole()}
+            >
+              <span className="userAvatar" aria-hidden="true">
+                <UserCircleIcon weight="fill" />
+              </span>
+              <span className="userIdentityText">
+                <strong>{accountName}</strong>
+                <small>{accountDetail}</small>
+              </span>
+            </button>
+          ) : null}
+          <button
+            className="headerActionButton headerDevtoolsButton"
+            aria-label={tr("openDevtools")}
+            title={tr("openDevtools")}
+            onClick={() => void handleOpenDevtools()}
+          >
+            <BugIcon weight="bold" />
+          </button>
+          <button
+            className="headerActionButton"
+            aria-label={tr("language")}
+            onClick={toggleLocale}
+          >
+            {locale === "zh" ? "EN" : "中文"}
+          </button>
+          <button
+            className="headerActionButton"
+            aria-label={tr("theme")}
+            onClick={cycleTheme}
+          >
+            {theme === "system"
+              ? tr("system")
+              : theme === "light"
+                ? tr("light")
+                : tr("dark")}
+          </button>
+        </header>
+        {showSettings ? (
+          <section className="settingsContent">
+            <p className="sectionKicker">{tr("settings")}</p>
+            <h1>{tr("connectionRecovery")}</h1>
+            <p className="lead">{tr("connectionRecoveryLead")}</p>
+            <div className="preferencesPanel">
+              <strong>{tr("appearance")}</strong>
+              <label className="fieldLabel">
+                {tr("theme")}
+                <select
+                  value={theme}
+                  onChange={(event) =>
+                    changeTheme(event.target.value as ThemeMode)
+                  }
+                >
+                  <option value="system">{tr("system")}</option>
+                  <option value="light">{tr("light")}</option>
+                  <option value="dark">{tr("dark")}</option>
+                </select>
+              </label>
+              <label className="fieldLabel">
+                {tr("language")}
+                <select
+                  value={localePreference}
+                  onChange={(event) =>
+                    changeLocale(event.target.value as LocalePreference)
+                  }
+                >
+                  <option value="system">{tr("automatic")}</option>
+                  <option value="zh">{tr("chinese")}</option>
+                  <option value="en">{tr("english")}</option>
+                </select>
+              </label>
+            </div>
+            <label className="fieldLabel">
+              {tr("endpoint")}
+              <input
+                value={endpoint}
+                onChange={(event) => setEndpoint(event.target.value)}
+                autoComplete="url"
+              />
+            </label>
+            <div className="settingsDivider" />
+            <div className="recoveryRow">
+              <div>
+                <strong>{tr("backups")}</strong>
+                <span>
+                  {tr("backupsAvailable", {
+                    count: backupCount,
+                    suffix: backupCount === 1 ? "" : "s",
+                  })}
+                </span>
+              </div>
+              <button
+                className="secondaryButton"
+                disabled={busy || backupCount === 0}
+                onClick={() => void handleRestoreBackups()}
+              >
+                {tr("restoreLatest")}
+              </button>
+            </div>
+            <button
+              className="secondaryButton backButton"
+              onClick={() => setShowSettings(false)}
+            >
+              {tr("backToSetup")}
+            </button>
+          </section>
+        ) : (
+          renderSetupContent()
+        )}
+      </section>
+    </main>
+  );
 }
 
-createRoot(document.getElementById("root")!).render(isTrayPopupWindow() ? <TrayPopup /> : <App />);
+createRoot(document.getElementById("root")!).render(
+  isTrayPopupWindow() ? <TrayPopup /> : <App />,
+);

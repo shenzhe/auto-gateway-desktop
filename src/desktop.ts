@@ -28,10 +28,20 @@ export type CodexInstallResult = {
 };
 
 export type CodexInstallProgress = {
-  stage: "preparing" | "downloading" | "installing" | "windows-installing" | "verifying" | "complete";
+  stage:
+    | "preparing"
+    | "selecting-source"
+    | "downloading"
+    | "installing"
+    | "windows-installing"
+    | "verifying"
+    | "complete";
   downloadedBytes: number;
   totalBytes?: number;
   percent?: number;
+  source?: string;
+  speedBytesPerSecond?: number;
+  estimatedRemainingSeconds?: number;
 };
 
 export type ConfigurationResult = {
@@ -93,7 +103,10 @@ export function openCodex(): Promise<void> {
   return invoke<void>("open_codex");
 }
 
-export function configureCodex(apiKey: string, endpoint: string): Promise<ConfigurationResult> {
+export function configureCodex(
+  apiKey: string,
+  endpoint: string,
+): Promise<ConfigurationResult> {
   return invoke<ConfigurationResult>("configure_codex", { apiKey, endpoint });
 }
 
@@ -101,7 +114,10 @@ export function restoreLatestCodexBackups(): Promise<RestoreResult> {
   return invoke<RestoreResult>("restore_latest_codex_backups");
 }
 
-export function openConsole(accessToken: string, section?: "billing"): Promise<void> {
+export function openConsole(
+  accessToken: string,
+  section?: "billing",
+): Promise<void> {
   return invoke<void>("open_console", { accessToken, section });
 }
 
@@ -109,11 +125,18 @@ export function openDevtools(): Promise<void> {
   return invoke<void>("open_devtools");
 }
 
-export function getDesktopAccountSummary(accessToken: string): Promise<DesktopAccountSummary> {
-  return invoke<DesktopAccountSummary>("get_desktop_account_summary_command", { accessToken });
+export function getDesktopAccountSummary(
+  accessToken: string,
+): Promise<DesktopAccountSummary> {
+  return invoke<DesktopAccountSummary>("get_desktop_account_summary_command", {
+    accessToken,
+  });
 }
 
-export function updateTrayStatus(username: string, balance: string): Promise<void> {
+export function updateTrayStatus(
+  username: string,
+  balance: string,
+): Promise<void> {
   return invoke<void>("update_tray_status_command", { username, balance });
 }
 
@@ -129,20 +152,38 @@ export function getInstallationID(): Promise<string> {
   return invoke<string>("get_installation_id");
 }
 
-export function exchangeDesktopAuthorization(code: string, codeVerifier: string, state: string): Promise<DesktopSession> {
-  return invoke<DesktopSession>("exchange_desktop_authorization_command", { code, codeVerifier, state });
+export function exchangeDesktopAuthorization(
+  code: string,
+  codeVerifier: string,
+  state: string,
+): Promise<DesktopSession> {
+  return invoke<DesktopSession>("exchange_desktop_authorization_command", {
+    code,
+    codeVerifier,
+    state,
+  });
 }
 
-export function bootstrapDesktopKey(accessToken: string, rotateExisting = false): Promise<DesktopBootstrapKey> {
-  return invoke<DesktopBootstrapKey>("bootstrap_desktop_key_command", { accessToken, rotateExisting });
+export function bootstrapDesktopKey(
+  accessToken: string,
+  rotateExisting = false,
+): Promise<DesktopBootstrapKey> {
+  return invoke<DesktopBootstrapKey>("bootstrap_desktop_key_command", {
+    accessToken,
+    rotateExisting,
+  });
 }
 
 export function restoreDesktopState(): Promise<StoredDesktopState | null> {
   return invoke<StoredDesktopState | null>("restore_desktop_state_command");
 }
 
-export function refreshDesktopState(failedAccessToken: string): Promise<StoredDesktopState | null> {
-  return invoke<StoredDesktopState | null>("refresh_desktop_state_command", { failedAccessToken });
+export function refreshDesktopState(
+  failedAccessToken: string,
+): Promise<StoredDesktopState | null> {
+  return invoke<StoredDesktopState | null>("refresh_desktop_state_command", {
+    failedAccessToken,
+  });
 }
 
 export function clearDesktopSession(): Promise<void> {
@@ -155,5 +196,11 @@ export function clearStoredDesktopAPIKey(): Promise<void> {
 
 export function isAuthenticationRequired(error: unknown): boolean {
   const message = String(error).toLowerCase();
-  return message.includes("authentication_required") || message.includes("http 401") || message.includes("http 403") || message.includes("unauthorized") || message.includes("forbidden");
+  return (
+    message.includes("authentication_required") ||
+    message.includes("http 401") ||
+    message.includes("http 403") ||
+    message.includes("unauthorized") ||
+    message.includes("forbidden")
+  );
 }

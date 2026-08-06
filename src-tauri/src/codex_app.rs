@@ -1,11 +1,15 @@
-use crate::http_client::client_with_timeout as desktop_http_client;
-use futures_util::StreamExt;
+use crate::http_client::{
+    client_with_timeout as desktop_http_client, client_with_timeouts,
+    client_with_timeouts_and_read_timeout,
+};
+use futures_util::{stream, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -15,9 +19,7 @@ use std::process::Command;
 use std::process::Output;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::thread;
-use std::time::Duration;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 #[cfg(target_os = "macos")]
@@ -39,6 +41,10 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const WINDOWS_MSIX_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 #[cfg(target_os = "windows")]
 const WINDOWS_STORE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
+const DOWNLOAD_SOURCE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+const DOWNLOAD_SOURCE_PROBE_BYTES: usize = 512 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -68,6 +74,15 @@ struct CodexInstallProgress {
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
     percent: Option<u8>,
+    source: Option<String>,
+    speed_bytes_per_second: Option<u64>,
+    estimated_remaining_seconds: Option<u64>,
+}
+
+struct DownloadProbe {
+    index: usize,
+    url: String,
+    elapsed: Duration,
 }
 
 struct LocalInstallation {
@@ -188,14 +203,14 @@ pub async fn install(app: &AppHandle, force_update: bool) -> Result<CodexInstall
         }
     };
     let extension = download_extension(&download_urls);
-    let download_path = env::temp_dir().join(format!(
-        "autogateway-chatgpt-{}.{}",
-        uuid::Uuid::new_v4(),
-        extension
-    ));
+    let download_path = resumable_download_path(
+        latest_release
+            .as_ref()
+            .map(|release| release.version.as_str()),
+        extension,
+    );
     emit_install_progress(app, "preparing", 0, None);
     if let Err(error) = download_installer(app, &download_urls, &download_path).await {
-        let _ = fs::remove_file(&download_path);
         #[cfg(target_os = "windows")]
         {
             return install_with_microsoft_store_fallback(app, force_update, &error).await;
@@ -276,11 +291,12 @@ async fn download_installer(
     download_path: &Path,
 ) -> Result<(), String> {
     let mut errors = Vec::new();
-    for download_url in download_urls {
+    emit_install_progress(app, "selecting-source", 0, None);
+    let ranked_urls = rank_download_sources(download_urls).await;
+    for download_url in &ranked_urls {
         match download_installer_from_url(app, download_url, download_path).await {
             Ok(()) => return Ok(()),
             Err(error) => {
-                let _ = fs::remove_file(download_path);
                 errors.push(format!("{download_url}: {error}"));
             }
         }
@@ -296,22 +312,51 @@ async fn download_installer_from_url(
     download_url: &str,
     download_path: &Path,
 ) -> Result<(), String> {
-    let response = desktop_http_client(Some(Duration::from_secs(30 * 60)))
-        .map_err(|error| format!("prepare the ChatGPT download: {error}"))?
-        .get(download_url)
+    let source = download_source_label(download_url);
+    let existing_bytes = fs::metadata(download_path)
+        .map(|metadata| metadata.len())
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(0)
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| format!("inspect the partial ChatGPT installer: {error}"))?;
+    let client = client_with_timeouts_and_read_timeout(
+        None,
+        Some(DOWNLOAD_CONNECT_TIMEOUT),
+        Some(DOWNLOAD_READ_TIMEOUT),
+    )
+    .map_err(|error| format!("prepare the ChatGPT download: {error}"))?;
+    let mut request = client.get(download_url);
+    if existing_bytes > 0 {
+        request = request.header("Range", format!("bytes={existing_bytes}-"));
+    }
+    let response = request
         .send()
         .await
         .map_err(|error| format!("download the ChatGPT installer: {error}"))?
         .error_for_status()
         .map_err(|error| format!("download the ChatGPT installer: {error}"))?;
-    let total_bytes = response.content_length();
+    let append = existing_bytes > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    let starting_bytes = append.then_some(existing_bytes).unwrap_or(0);
+    let total_bytes = response
+        .content_length()
+        .map(|content_length| content_length.saturating_add(starting_bytes));
     let mut stream = response.bytes_stream();
-    let mut file = fs::File::create(download_path)
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(download_path)
         .map_err(|error| format!("create the ChatGPT installer file: {error}"))?;
-    let mut downloaded_bytes = 0_u64;
+    let mut downloaded_bytes = starting_bytes;
     let mut last_reported_percent = None;
     let mut last_reported_bytes = 0_u64;
-    emit_install_progress(app, "downloading", 0, total_bytes);
+    let started = Instant::now();
+    emit_download_progress(app, "downloading", 0, total_bytes, &source, None, None);
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| format!("read the ChatGPT installer: {error}"))?;
@@ -324,7 +369,23 @@ async fn download_installer_from_url(
         if percent != last_reported_percent
             || downloaded_bytes.saturating_sub(last_reported_bytes) >= 4 * 1024 * 1024
         {
-            emit_install_progress(app, "downloading", downloaded_bytes, total_bytes);
+            let elapsed_seconds = started.elapsed().as_secs_f64();
+            let transferred_bytes = downloaded_bytes.saturating_sub(starting_bytes);
+            let speed_bytes_per_second = (elapsed_seconds > 0.1)
+                .then(|| (transferred_bytes as f64 / elapsed_seconds) as u64)
+                .filter(|speed| *speed > 0);
+            let estimated_remaining_seconds = speed_bytes_per_second.and_then(|speed| {
+                total_bytes.map(|total| total.saturating_sub(downloaded_bytes).div_ceil(speed))
+            });
+            emit_download_progress(
+                app,
+                "downloading",
+                downloaded_bytes,
+                total_bytes,
+                &source,
+                speed_bytes_per_second,
+                estimated_remaining_seconds,
+            );
             last_reported_percent = percent;
             last_reported_bytes = downloaded_bytes;
         }
@@ -332,6 +393,96 @@ async fn download_installer_from_url(
     file.sync_all()
         .map_err(|error| format!("finish saving the ChatGPT installer: {error}"))?;
     Ok(())
+}
+
+fn resumable_download_path(version: Option<&str>, extension: &str) -> PathBuf {
+    let normalized_version = version
+        .unwrap_or("latest")
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || *character == '.' || *character == '-'
+        })
+        .collect::<String>();
+    let version = if normalized_version.is_empty() {
+        "latest"
+    } else {
+        normalized_version.as_str()
+    };
+    env::temp_dir().join(format!(
+        "autogateway-chatgpt-{}-{}-{version}.{extension}",
+        std::env::consts::OS,
+        native_architecture(),
+    ))
+}
+
+async fn rank_download_sources(download_urls: &[String]) -> Vec<String> {
+    let probe_count = download_urls.len().max(1);
+    let mut responsive = stream::iter(
+        download_urls
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, url)| async move { probe_download_source(index, url).await.ok() }),
+    )
+    .buffer_unordered(probe_count)
+    .filter_map(|result| async move { result })
+    .collect::<Vec<_>>()
+    .await;
+    responsive.sort_by_key(|probe| (probe.elapsed, probe.index));
+
+    let mut ranked = responsive
+        .iter()
+        .map(|probe| probe.url.clone())
+        .collect::<Vec<_>>();
+    for download_url in download_urls {
+        if !ranked.iter().any(|url| url == download_url) {
+            ranked.push(download_url.clone());
+        }
+    }
+    ranked
+}
+
+async fn probe_download_source(index: usize, url: String) -> Result<DownloadProbe, String> {
+    let client = client_with_timeouts(
+        Some(DOWNLOAD_SOURCE_PROBE_TIMEOUT),
+        Some(DOWNLOAD_CONNECT_TIMEOUT),
+    )?;
+    let started = Instant::now();
+    let response = client
+        .get(&url)
+        .header(
+            "Range",
+            format!("bytes=0-{}", DOWNLOAD_SOURCE_PROBE_BYTES - 1),
+        )
+        .send()
+        .await
+        .map_err(|error| format!("connect to {url}: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("connect to {url}: {error}"))?;
+    let mut stream = response.bytes_stream();
+    let mut sampled_bytes = 0_usize;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("read from {url}: {error}"))?;
+        sampled_bytes = sampled_bytes.saturating_add(chunk.len());
+        if sampled_bytes >= DOWNLOAD_SOURCE_PROBE_BYTES {
+            break;
+        }
+    }
+    if sampled_bytes == 0 {
+        return Err(format!("read from {url}: the source returned no bytes"));
+    }
+    Ok(DownloadProbe {
+        index,
+        url,
+        elapsed: started.elapsed(),
+    })
+}
+
+fn download_source_label(download_url: &str) -> String {
+    reqwest::Url::parse(download_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| "download source".to_string())
 }
 
 fn emit_install_progress(
@@ -350,6 +501,35 @@ fn emit_install_progress(
             downloaded_bytes,
             total_bytes,
             percent,
+            source: None,
+            speed_bytes_per_second: None,
+            estimated_remaining_seconds: None,
+        },
+    );
+}
+
+fn emit_download_progress(
+    app: &AppHandle,
+    stage: &str,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    source: &str,
+    speed_bytes_per_second: Option<u64>,
+    estimated_remaining_seconds: Option<u64>,
+) {
+    let percent = total_bytes
+        .filter(|total| *total > 0)
+        .map(|total| ((downloaded_bytes.saturating_mul(100) / total).min(100)) as u8);
+    let _ = app.emit(
+        "codex-install-progress",
+        CodexInstallProgress {
+            stage: stage.to_string(),
+            downloaded_bytes,
+            total_bytes,
+            percent,
+            source: Some(source.to_string()),
+            speed_bytes_per_second,
+            estimated_remaining_seconds,
         },
     );
 }

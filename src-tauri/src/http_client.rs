@@ -14,9 +14,30 @@ pub fn client() -> Result<reqwest::Client, String> {
 }
 
 pub fn client_with_timeout(timeout: Option<Duration>) -> Result<reqwest::Client, String> {
+    client_with_timeouts(timeout, None)
+}
+
+pub fn client_with_timeouts(
+    timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+) -> Result<reqwest::Client, String> {
+    client_with_timeouts_and_read_timeout(timeout, connect_timeout, None)
+}
+
+pub fn client_with_timeouts_and_read_timeout(
+    timeout: Option<Duration>,
+    connect_timeout: Option<Duration>,
+    read_timeout: Option<Duration>,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder().user_agent(desktop_user_agent());
     if let Some(timeout) = timeout {
         builder = builder.timeout(timeout);
+    }
+    if let Some(connect_timeout) = connect_timeout {
+        builder = builder.connect_timeout(connect_timeout);
+    }
+    if let Some(read_timeout) = read_timeout {
+        builder = builder.read_timeout(read_timeout);
     }
     builder
         .build()
