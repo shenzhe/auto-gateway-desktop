@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
+#[cfg(target_os = "windows")]
+use std::io::Read;
 use std::io::Write;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -17,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::process::Output;
+use std::sync::OnceLock;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,6 +48,8 @@ const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const DOWNLOAD_SOURCE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_SOURCE_PROBE_BYTES: usize = 512 * 1024;
+const CODEX_VERSION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const DOWNLOAD_SOURCE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -107,7 +112,7 @@ struct CodexVersionSnapshot {
     windows: PlatformVersion,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PlatformVersion {
     version: String,
@@ -119,7 +124,7 @@ struct PlatformVersion {
     artifacts: HashMap<String, PlatformArtifact>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PlatformArtifact {
     #[serde(default)]
@@ -129,6 +134,22 @@ struct PlatformArtifact {
     #[serde(default)]
     fallback_url: Option<String>,
 }
+
+struct CachedCodexRelease {
+    fetched_at: Instant,
+    release: PlatformVersion,
+}
+
+struct CachedDownloadSources {
+    measured_at: Instant,
+    key: String,
+    ranked_urls: Vec<String>,
+}
+
+static CODEX_RELEASE_CACHE: OnceLock<tokio::sync::Mutex<Option<CachedCodexRelease>>> =
+    OnceLock::new();
+static DOWNLOAD_SOURCE_CACHE: OnceLock<tokio::sync::Mutex<Option<CachedDownloadSources>>> =
+    OnceLock::new();
 
 pub fn local_status() -> CodexAppStatus {
     let Some(installation) = local_installation() else {
@@ -158,7 +179,9 @@ pub fn local_status() -> CodexAppStatus {
 }
 
 pub async fn status() -> CodexAppStatus {
-    let mut local = local_status();
+    let mut local = tauri::async_runtime::spawn_blocking(local_status)
+        .await
+        .unwrap_or_else(|_| local_status());
     if !local.installed {
         return local;
     }
@@ -504,6 +527,18 @@ fn completed_installer_available() -> bool {
 }
 
 async fn rank_download_sources(download_urls: &[String]) -> Vec<String> {
+    let cache = DOWNLOAD_SOURCE_CACHE
+        .get_or_init(|| tokio::sync::Mutex::new(None))
+        .lock()
+        .await;
+    let mut cache = cache;
+    let cache_key = download_urls.join("\n");
+    if let Some(cached) = cache.as_ref().filter(|cached| {
+        cached.key == cache_key && cached.measured_at.elapsed() < DOWNLOAD_SOURCE_CACHE_TTL
+    }) {
+        return cached.ranked_urls.clone();
+    }
+
     let probe_count = download_urls.len().max(1);
     let mut responsive = stream::iter(
         download_urls
@@ -527,6 +562,11 @@ async fn rank_download_sources(download_urls: &[String]) -> Vec<String> {
             ranked.push(download_url.clone());
         }
     }
+    *cache = Some(CachedDownloadSources {
+        measured_at: Instant::now(),
+        key: cache_key,
+        ranked_urls: ranked.clone(),
+    });
     ranked
 }
 
@@ -717,6 +757,18 @@ fn windows_app_user_model_id() -> Result<String, String> {
 }
 
 async fn latest_release() -> Result<PlatformVersion, String> {
+    let cache = CODEX_RELEASE_CACHE
+        .get_or_init(|| tokio::sync::Mutex::new(None))
+        .lock()
+        .await;
+    let mut cache = cache;
+    if let Some(cached) = cache
+        .as_ref()
+        .filter(|cached| cached.fetched_at.elapsed() < CODEX_VERSION_CACHE_TTL)
+    {
+        return Ok(cached.release.clone());
+    }
+
     let client = desktop_http_client(Some(Duration::from_secs(10)))
         .map_err(|error| format!("prepare the Codex update check: {error}"))?;
 
@@ -732,13 +784,22 @@ async fn latest_release() -> Result<PlatformVersion, String> {
         .map_err(|error| format!("read the AUTO Gateway Codex version response: {error}"))?;
 
     #[cfg(target_os = "macos")]
-    return Ok(snapshot.macos);
+    let release = snapshot.macos;
 
     #[cfg(target_os = "windows")]
-    return Ok(snapshot.windows);
+    let release = snapshot.windows;
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    Err("Codex update checks are available on macOS and Windows only.".to_string())
+    return Err("Codex update checks are available on macOS and Windows only.".to_string());
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        *cache = Some(CachedCodexRelease {
+            fetched_at: Instant::now(),
+            release: release.clone(),
+        });
+        Ok(release)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1334,9 +1395,10 @@ fn run_windows_command_with_timeout(
 
 #[cfg(target_os = "windows")]
 fn validate_windows_installer(download_path: &Path) -> Result<(), String> {
-    let contents = fs::read(download_path)
+    let mut file = fs::File::open(download_path)
         .map_err(|error| format!("inspect the official ChatGPT installer: {error}"))?;
-    if contents.starts_with(b"MZ") {
+    let mut header = [0_u8; 2];
+    if file.read_exact(&mut header).is_ok() && header == *b"MZ" {
         return Ok(());
     }
     let _ = fs::remove_file(download_path);

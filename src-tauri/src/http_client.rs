@@ -10,11 +10,15 @@ pub fn desktop_user_agent() -> String {
 }
 
 pub fn client() -> Result<reqwest::Client, String> {
-    client_with_timeout(None)
+    client_with_timeouts_and_read_timeout(
+        Some(Duration::from_secs(30)),
+        Some(Duration::from_secs(10)),
+        Some(Duration::from_secs(30)),
+    )
 }
 
 pub fn client_with_timeout(timeout: Option<Duration>) -> Result<reqwest::Client, String> {
-    client_with_timeouts(timeout, None)
+    client_with_timeouts_and_read_timeout(timeout, timeout, timeout)
 }
 
 pub fn client_with_timeouts(

@@ -39,8 +39,10 @@ async fn get_codex_app_status() -> CodexAppStatus {
 }
 
 #[tauri::command]
-fn get_local_codex_app_status() -> CodexAppStatus {
-    local_codex_app_status()
+async fn get_local_codex_app_status() -> CodexAppStatus {
+    tauri::async_runtime::spawn_blocking(local_codex_app_status)
+        .await
+        .unwrap_or_else(|_| local_codex_app_status())
 }
 
 #[tauri::command]
@@ -54,8 +56,10 @@ fn open_codex() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn is_codex_running() -> Result<bool, String> {
-    is_installed_app_running()
+async fn is_codex_running() -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(is_installed_app_running)
+        .await
+        .map_err(|error| format!("wait for the Codex process check: {error}"))?
 }
 
 #[tauri::command]

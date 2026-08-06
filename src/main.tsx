@@ -199,6 +199,7 @@ function TrayPopup() {
   );
   const [accountBalance, setAccountBalance] = useState("");
   const [loading, setLoading] = useState(true);
+  const [windowFocused, setWindowFocused] = useState(false);
   const theme = readTheme();
   const localePreference = readLocalePreference();
   const locale = resolveLocale(localePreference);
@@ -221,8 +222,35 @@ function TrayPopup() {
   }, [theme]);
 
   useEffect(() => {
+    const window = getCurrentWebviewWindow();
     let active = true;
+    let unlisten: (() => void) | undefined;
+    void window
+      .isFocused()
+      .then((focused) => {
+        if (active) setWindowFocused(focused);
+      })
+      .catch(() => undefined);
+    void window
+      .onFocusChanged(({ payload }) => {
+        if (active) setWindowFocused(payload);
+      })
+      .then((nextUnlisten) => {
+        unlisten = nextUnlisten;
+      });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!windowFocused) return;
+    let active = true;
+    let syncing = false;
     async function syncAccount() {
+      if (syncing) return;
+      syncing = true;
       try {
         const stored = await restoreDesktopState();
         if (!active) return;
@@ -251,6 +279,7 @@ function TrayPopup() {
           if (active) setAccountBalance(tr("trayUnavailable"));
         }
       } finally {
+        syncing = false;
         if (active) setLoading(false);
       }
     }
@@ -260,7 +289,7 @@ function TrayPopup() {
       active = false;
       window.clearInterval(interval);
     };
-  }, [locale]);
+  }, [locale, windowFocused]);
 
   async function openWorkspace() {
     await showMainWindow();
@@ -661,9 +690,12 @@ function App() {
   useEffect(() => {
     if (!awaitingStoreInstallation || designPreviewState) return;
     let active = true;
+    let checking = false;
     async function checkStoreInstallation() {
+      if (checking) return;
+      checking = true;
       try {
-        const nextAppStatus = await getCodexAppStatus();
+        const nextAppStatus = await getLocalCodexAppStatus();
         if (!active) return;
         setAppStatus(nextAppStatus);
         if (nextAppStatus.installed) {
@@ -682,6 +714,8 @@ function App() {
         }
       } catch {
         // The user can continue checking after the temporary Store installation state changes.
+      } finally {
+        checking = false;
       }
     }
     void checkStoreInstallation();
@@ -762,7 +796,10 @@ function App() {
       return;
     }
     let active = true;
+    let syncing = false;
     async function syncAccountBalance() {
+      if (syncing) return;
+      syncing = true;
       try {
         let summary: DesktopAccountSummary;
         try {
@@ -792,6 +829,8 @@ function App() {
         }
         // Keep the last confirmed balance for transient network or server failures.
         // Authentication failures are handled above and clear the session explicitly.
+      } finally {
+        syncing = false;
       }
     }
     void syncAccountBalance();
@@ -820,13 +859,8 @@ function App() {
       }
     }
     void refreshCodexOpenState();
-    const interval = window.setInterval(
-      () => void refreshCodexOpenState(),
-      1500,
-    );
     return () => {
       active = false;
-      window.clearInterval(interval);
     };
   }, [appInstalled, designPreviewState, showHome]);
 
@@ -1140,7 +1174,7 @@ function App() {
 
   async function checkStoreInstallation() {
     try {
-      const nextAppStatus = await getCodexAppStatus();
+      const nextAppStatus = await getLocalCodexAppStatus();
       setAppStatus(nextAppStatus);
       if (nextAppStatus.installed) {
         setAwaitingStoreInstallation(false);
