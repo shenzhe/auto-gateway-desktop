@@ -8,7 +8,6 @@ import {
   ArrowRightIcon,
   ArrowUUpLeftIcon,
   ArrowsClockwiseIcon,
-  BugIcon,
   CheckCircleIcon,
   CheckIcon,
   CircleNotchIcon,
@@ -197,6 +196,15 @@ function isTrayPopupWindow(): boolean {
   }
 }
 
+function useDisableContextMenu(): void {
+  useEffect(() => {
+    const preventContextMenu = (event: MouseEvent) => event.preventDefault();
+    document.addEventListener("contextmenu", preventContextMenu, true);
+    return () =>
+      document.removeEventListener("contextmenu", preventContextMenu, true);
+  }, []);
+}
+
 function TrayPopup() {
   const [desktopSession, setDesktopSession] = useState<DesktopSession | null>(
     null,
@@ -218,6 +226,8 @@ function TrayPopup() {
     tr("trayLoading");
   const accountDetail =
     desktopSession?.user.email || desktopSession?.user.username || "";
+
+  useDisableContextMenu();
 
   useEffect(() => {
     document.body.classList.add("tray-popup-body");
@@ -432,6 +442,8 @@ function App() {
     key: Parameters<typeof translate>[1],
     values?: Record<string, string | number>,
   ) => translate(locale, key, values);
+
+  useDisableContextMenu();
 
   const accountConnected = Boolean(desktopAccessToken);
   const appInstalled = Boolean(appStatus?.installed);
@@ -1436,9 +1448,26 @@ function App() {
             <img className="homeBrandLogo" src="/site-icon.png" alt="" />
             <div>
               <strong>AUTO Gateway</strong>
-              <small>
-                {tr("desktopAppVersion", { version: desktopAppVersion || "—" })}
-              </small>
+              <div className="homeBrandVersion">
+                <small>
+                  {tr("desktopAppVersion", {
+                    version: desktopAppVersion || "—",
+                  })}
+                </small>
+                <button
+                  className="desktopVersionRefresh"
+                  type="button"
+                  aria-label={tr("desktopUpdateCheckNow")}
+                  title={tr("desktopUpdateCheckNow")}
+                  disabled={
+                    desktopUpdatePhase === "checking" ||
+                    desktopUpdatePhase === "downloading"
+                  }
+                  onClick={() => void checkDesktopUpdate(true)}
+                >
+                  <ArrowsClockwiseIcon weight="bold" />
+                </button>
+              </div>
             </div>
           </div>
           <nav className="homeNav" aria-label={tr("homeNavigation")}>
@@ -1512,14 +1541,6 @@ function App() {
                 {tr("topUpBalance")}
               </button>
             </div>
-            <button
-              className="headerActionButton headerDevtoolsButton"
-              aria-label={tr("openDevtools")}
-              title={tr("openDevtools")}
-              onClick={() => void handleOpenDevtools()}
-            >
-              <BugIcon weight="bold" />
-            </button>
             <button
               className="headerActionButton"
               aria-label={tr("language")}
@@ -2261,14 +2282,6 @@ function App() {
               </span>
             </button>
           ) : null}
-          <button
-            className="headerActionButton headerDevtoolsButton"
-            aria-label={tr("openDevtools")}
-            title={tr("openDevtools")}
-            onClick={() => void handleOpenDevtools()}
-          >
-            <BugIcon weight="bold" />
-          </button>
           <button
             className="headerActionButton"
             aria-label={tr("language")}

@@ -333,18 +333,6 @@ select:focus-visible {
   width: 16px;
   height: 16px;
 }
-.headerDevtoolsButton {
-  display: inline-grid;
-  width: 38px;
-  min-width: 38px;
-  height: 38px;
-  place-items: center;
-  padding: 0;
-}
-.headerDevtoolsButton svg {
-  width: 18px;
-  height: 18px;
-}
 .headerActionButton:hover,
 .secondaryButton:hover {
   border-color: var(--primary);
@@ -940,11 +928,41 @@ h1 {
   display: grid;
   gap: 3px;
 }
+.homeBrandVersion {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .homeBrand small {
   color: var(--subtle);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
+}
+.desktopVersionRefresh {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  color: var(--subtle);
+  background: transparent;
+}
+.desktopVersionRefresh svg {
+  width: 14px;
+  height: 14px;
+}
+.desktopVersionRefresh:hover {
+  color: var(--primary);
+}
+.desktopVersionRefresh:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+.desktopVersionRefresh:disabled svg {
+  animation: configuration-spin 0.9s linear infinite;
 }
 .homeBrandLogo {
   width: 40px;
