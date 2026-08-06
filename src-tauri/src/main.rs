@@ -22,7 +22,7 @@ use desktop_auth::{
 };
 use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Emitter, Manager, PhysicalPosition, Position, Rect, Size, WebviewUrl,
+    AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Rect, Size, WebviewUrl,
     WebviewWindowBuilder, WindowEvent,
 };
 use url::Url;
@@ -88,7 +88,7 @@ async fn exchange_desktop_authorization_command(
 }
 
 #[tauri::command]
-fn open_desktop_sign_in_command(
+async fn open_desktop_sign_in_command(
     app: AppHandle,
     challenge: String,
     state: String,
@@ -183,6 +183,16 @@ fn sign_out_desktop_command(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn close_desktop_sign_in_command(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("auth") {
+        window
+            .close()
+            .map_err(|error| format!("close the sign-in window: {error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn get_desktop_account_summary_command(
     access_token: String,
 ) -> Result<DesktopAccountSummary, String> {
@@ -225,6 +235,28 @@ fn show_main_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn get_desktop_app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
+}
+
+fn fit_main_window_to_work_area(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let work_area = monitor.work_area();
+    let margin = 16_u32;
+    let max_width = work_area.size.width.saturating_sub(margin * 2);
+    let max_height = work_area.size.height.saturating_sub(margin * 2);
+    let Ok(current_size) = window.inner_size() else {
+        return;
+    };
+    let width = current_size.width.min(max_width);
+    let height = current_size.height.min(max_height);
+    if width != current_size.width || height != current_size.height {
+        let _ = window.set_size(PhysicalSize::new(width, height));
+    }
+    let _ = window.center();
 }
 
 fn show_tray_popup(app: &AppHandle, tray_rect: Rect) {
@@ -330,6 +362,7 @@ fn open_devtools(app: AppHandle) -> Result<(), String> {
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
+            fit_main_window_to_work_area(app.handle());
             let mut tray = TrayIconBuilder::with_id("main-tray")
                 .tooltip("AUTO Gateway")
                 .show_menu_on_left_click(false)
@@ -394,6 +427,7 @@ fn main() {
             refresh_desktop_state_command,
             clear_desktop_session_command,
             sign_out_desktop_command,
+            close_desktop_sign_in_command,
             get_desktop_account_summary_command,
             update_tray_status_command,
             show_main_window,

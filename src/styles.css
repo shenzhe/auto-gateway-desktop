@@ -548,6 +548,30 @@ h1 {
   min-height: 132px;
   align-content: center;
 }
+.signInActionPanel {
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  margin-top: 42px;
+}
+.signInHeroButton {
+  width: min(100%, 380px);
+  min-height: 58px;
+  font-size: 17px;
+}
+.textButton {
+  padding: 2px 4px;
+  border: 0;
+  color: var(--primary);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.textButton:hover {
+  color: var(--primary-dark);
+}
 .notice strong,
 .preferencesPanel > strong {
   color: var(--text);

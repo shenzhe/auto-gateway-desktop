@@ -25,6 +25,9 @@ const dictionaries = {
     openingSignIn: "Opening secure sign-in…",
     completeInApp:
       "Sign in or register in the secure window opened inside AUTO Gateway Desktop. It will close automatically after success.",
+    signInFallback:
+      "If the in-app sign-in window is blank, use the system browser instead.",
+    signInFallbackOpened: "Opened the sign-in page in your system browser.",
     startSignInFailed: "Unable to start desktop sign-in: {error}",
     configurationWritten:
       "Configuration written.{backup} Fully quit and reopen ChatGPT/Codex.",
@@ -261,6 +264,8 @@ const dictionaries = {
     openingSignIn: "正在打开安全登录页…",
     completeInApp:
       "请在 AUTO Gateway Desktop 内打开的安全窗口中完成登录或注册，成功后窗口会自动关闭。",
+    signInFallback: "如果应用内登录窗口空白，可改用系统浏览器登录。",
+    signInFallbackOpened: "已在系统浏览器中打开登录页面。",
     startSignInFailed: "无法开始桌面端登录：{error}",
     configurationWritten:
       "配置已写入。{backup}请完全退出并重新打开 ChatGPT/Codex。",

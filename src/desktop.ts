@@ -177,6 +177,10 @@ export function openDesktopSignIn(
   return invoke<void>("open_desktop_sign_in_command", { challenge, state });
 }
 
+export function closeDesktopSignIn(): Promise<void> {
+  return invoke<void>("close_desktop_sign_in_command");
+}
+
 export function bootstrapDesktopKey(
   accessToken: string,
   rotateExisting = false,

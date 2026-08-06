@@ -24,6 +24,7 @@ import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   bootstrapDesktopKey,
+  closeDesktopSignIn,
   clearDesktopSession,
   clearStoredDesktopAPIKey,
   configureCodex,
@@ -344,6 +345,7 @@ function App() {
   const [appStatus, setAppStatus] = useState<CodexAppStatus | null>(null);
   const [apiKey, setAPIKey] = useState("");
   const [desktopAccessToken, setDesktopAccessToken] = useState("");
+  const [desktopSignInUrl, setDesktopSignInUrl] = useState("");
   const [desktopSession, setDesktopSession] = useState<DesktopSession | null>(
     null,
   );
@@ -451,6 +453,7 @@ function App() {
     setInstallingCodex(false);
     setCheckingCodexUpdates(false);
     setDesktopAccessToken("");
+    setDesktopSignInUrl("");
     setDesktopSession(null);
     setAPIKey("");
     setAPIKeyCopied(false);
@@ -897,6 +900,7 @@ function App() {
         );
         setDesktopAccessToken(session.token);
         setDesktopSession(session);
+        setDesktopSignInUrl("");
         const setupWasCompleted = hasCompletedSetup(session);
         setSetupCompleted(setupWasCompleted);
         setSelectedStep(setupWasCompleted ? 4 : 2);
@@ -939,12 +943,32 @@ function App() {
         pendingAuthorizationStorageKey,
         JSON.stringify({ verifier, state }),
       );
+      const query = new URLSearchParams({
+        desktopCodeChallenge: challenge,
+        desktopState: state,
+      });
+      setDesktopSignInUrl(`https://autogateway.cc/login?${query.toString()}`);
       await openDesktopSignIn(challenge, state);
       setMessage(tr("completeInApp"));
     } catch (error) {
       setMessage(tr("startSignInFailed", { error: String(error) }));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function handleOpenSignInFallback() {
+    if (!desktopSignInUrl) return;
+    try {
+      await closeDesktopSignIn();
+    } catch {
+      // The browser fallback can still be opened if the in-app window is unavailable.
+    }
+    try {
+      await openUrl(desktopSignInUrl);
+      setMessage(tr("signInFallbackOpened"));
+    } catch (error) {
+      setMessage(tr("startSignInFailed", { error: String(error) }));
     }
   }
 
@@ -1270,16 +1294,6 @@ function App() {
                 <small>{accountDetail}</small>
               </span>
             </button>
-            <button
-              className="headerActionButton headerSignOutButton"
-              aria-label={tr("signOut")}
-              title={tr("signOut")}
-              disabled={busy || installingCodex || restoringSession}
-              onClick={() => void handleSignOut()}
-            >
-              <SignOutIcon weight="bold" />
-              <span>{tr("signOut")}</span>
-            </button>
             <div className="headerBalance" aria-label={tr("accountBalance")}>
               <div className="headerBalanceInfo">
                 <span>{tr("accountBalance")}</span>
@@ -1327,6 +1341,16 @@ function App() {
                 : theme === "light"
                   ? tr("light")
                   : tr("dark")}
+            </button>
+            <button
+              className="headerActionButton headerSignOutButton"
+              aria-label={tr("signOut")}
+              title={tr("signOut")}
+              disabled={busy || installingCodex || restoringSession}
+              onClick={() => void handleSignOut()}
+            >
+              <SignOutIcon weight="bold" />
+              <span>{tr("signOut")}</span>
             </button>
           </header>
           <section className="homeContent">
@@ -1598,24 +1622,37 @@ function App() {
                 {accountConnected ? tr("sessionRestored") : tr("completeInApp")}
               </span>
             </div>
+            {!accountConnected ? (
+              <div className="signInActionPanel">
+                <button
+                  className="primaryButton signInHeroButton"
+                  disabled={busy || restoringSession}
+                  onClick={() => void handleStartSignIn()}
+                >
+                  {restoringSession
+                    ? tr("restoringSession")
+                    : busy
+                      ? tr("openingSignIn")
+                      : tr("continueInApp")}
+                </button>
+                {desktopSignInUrl ? (
+                  <button
+                    className="textButton signInFallbackButton"
+                    onClick={() => void handleOpenSignInFallback()}
+                  >
+                    {tr("signInFallback")}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
           </div>
-          <div className="buttonRow setupActions">
-            <button
-              className="primaryButton"
-              disabled={busy || restoringSession}
-              onClick={() =>
-                accountConnected ? selectStep(2) : void handleStartSignIn()
-              }
-            >
-              {restoringSession
-                ? tr("restoringSession")
-                : accountConnected
-                  ? tr("continueToCodex")
-                  : busy
-                    ? tr("openingSignIn")
-                    : tr("continueInApp")}
-            </button>
-          </div>
+          {accountConnected ? (
+            <div className="buttonRow setupActions">
+              <button className="primaryButton" onClick={() => selectStep(2)}>
+                {tr("continueToCodex")}
+              </button>
+            </div>
+          ) : null}
         </section>
       );
     }
@@ -2014,18 +2051,6 @@ function App() {
               </span>
             </button>
           ) : null}
-          {desktopSession ? (
-            <button
-              className="headerActionButton headerSignOutButton"
-              aria-label={tr("signOut")}
-              title={tr("signOut")}
-              disabled={busy || installingCodex || restoringSession}
-              onClick={() => void handleSignOut()}
-            >
-              <SignOutIcon weight="bold" />
-              <span>{tr("signOut")}</span>
-            </button>
-          ) : null}
           <button
             className="headerActionButton headerDevtoolsButton"
             aria-label={tr("openDevtools")}
@@ -2052,6 +2077,18 @@ function App() {
                 ? tr("light")
                 : tr("dark")}
           </button>
+          {desktopSession ? (
+            <button
+              className="headerActionButton headerSignOutButton"
+              aria-label={tr("signOut")}
+              title={tr("signOut")}
+              disabled={busy || installingCodex || restoringSession}
+              onClick={() => void handleSignOut()}
+            >
+              <SignOutIcon weight="bold" />
+              <span>{tr("signOut")}</span>
+            </button>
+          ) : null}
         </header>
         {showSettings ? (
           <section className="settingsContent">
