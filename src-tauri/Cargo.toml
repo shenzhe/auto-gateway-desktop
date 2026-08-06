@@ -1,6 +1,6 @@
 [package]
 name = "autogateway-desktop"
-version = "0.1.36"
+version = "0.1.37"
 description = "AUTO Gateway desktop setup assistant"
 authors = ["AUTO Gateway"]
 edition = "2021"
