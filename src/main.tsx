@@ -8,7 +8,7 @@ import {
   ArrowRightIcon,
   ArrowUUpLeftIcon,
   ArrowsClockwiseIcon,
-  BugIcon,
+  ChatCircleTextIcon,
   CheckCircleIcon,
   CheckIcon,
   CircleNotchIcon,
@@ -17,6 +17,7 @@ import {
   CurrencyDollarIcon,
   GearIcon,
   HouseIcon,
+  QuestionIcon,
   SignOutIcon,
   UserCircleIcon,
 } from "@phosphor-icons/react";
@@ -67,6 +68,8 @@ const defaultEndpoint = "https://api.autogateway.cc";
 const pendingAuthorizationStorageKey =
   "autogateway.desktop.pending-authorization";
 const setupCompletedStoragePrefix = "autogateway.desktop.setup-completed";
+const windowsInstallationTimeoutMs = 5 * 60 * 1000;
+const windowsInstallationPollIntervalMs = 4 * 1000;
 const designPreviewState = import.meta.env.DEV
   ? new URLSearchParams(window.location.search).get("preview")
   : null;
@@ -193,7 +196,18 @@ function isTrayPopupWindow(): boolean {
   }
 }
 
+function useDisableContextMenu() {
+  useEffect(() => {
+    function preventContextMenu(event: MouseEvent) {
+      event.preventDefault();
+    }
+    document.addEventListener("contextmenu", preventContextMenu);
+    return () => document.removeEventListener("contextmenu", preventContextMenu);
+  }, []);
+}
+
 function TrayPopup() {
+  useDisableContextMenu();
   const [desktopSession, setDesktopSession] = useState<DesktopSession | null>(
     null,
   );
@@ -370,6 +384,20 @@ function TrayPopup() {
 }
 
 function App() {
+  useDisableContextMenu();
+  useEffect(() => {
+    function handleDevtoolsShortcut(event: KeyboardEvent) {
+      const isDevtoolsShortcut =
+        event.key.toLowerCase() === "i" &&
+        ((event.ctrlKey && event.shiftKey) ||
+          (event.metaKey && event.altKey));
+      if (!isDevtoolsShortcut) return;
+      event.preventDefault();
+      void handleOpenDevtools();
+    }
+    window.addEventListener("keydown", handleDevtoolsShortcut);
+    return () => window.removeEventListener("keydown", handleDevtoolsShortcut);
+  }, []);
   const [status, setStatus] = useState<CodexStatus | null>(null);
   const [appStatus, setAppStatus] = useState<CodexAppStatus | null>(null);
   const [apiKey, setAPIKey] = useState("");
@@ -386,6 +414,7 @@ function App() {
   const [checkingCodexUpdates, setCheckingCodexUpdates] = useState(false);
   const [awaitingStoreInstallation, setAwaitingStoreInstallation] =
     useState(false);
+  const [installationTimedOut, setInstallationTimedOut] = useState(false);
   const [storeInstallForceUpdate, setStoreInstallForceUpdate] = useState(false);
   const [canRetryCachedInstaller, setCanRetryCachedInstaller] = useState(false);
   const [storeInstallationMessage, setStoreInstallationMessage] = useState("");
@@ -460,6 +489,15 @@ function App() {
         : tr("downloadSourceDetails", { source: installProgress.source })
       : "";
   const configured = Boolean(status?.configured);
+  const modelProvider = status?.modelProvider?.trim().toLowerCase();
+  const invalidCodexConfig = status !== null && !status.configValid;
+  const usingOfficialOpenAI =
+    !invalidCodexConfig && modelProvider === "openai";
+  const usingThirdPartyProvider =
+    !invalidCodexConfig &&
+    Boolean(modelProvider) &&
+    modelProvider !== "openai" &&
+    modelProvider !== "autogateway";
   const codexDetected = accountConnected && appInstalled;
   const gatewayConfigured =
     codexDetected && (configured || configurationPhase === "complete");
@@ -492,6 +530,7 @@ function App() {
     setConfigurationPhase("idle");
     setConfigurationError("");
     setAwaitingStoreInstallation(false);
+    setInstallationTimedOut(false);
     setCanRetryCachedInstaller(false);
     setStoreInstallationMessage("");
     storeAutoRetryAttempted.current = false;
@@ -604,6 +643,8 @@ function App() {
       configExists: previewComplete,
       authExists: previewComplete,
       configured: previewComplete,
+      modelProvider: previewComplete ? "autogateway" : undefined,
+      configValid: previewComplete,
       configBackupCount: 1,
       authBackupCount: 1,
     });
@@ -691,8 +732,23 @@ function App() {
     if (!awaitingStoreInstallation || designPreviewState) return;
     let active = true;
     let checking = false;
+    const deadline = Date.now() + windowsInstallationTimeoutMs;
+    function finishWithTimeout() {
+      if (!active) return;
+      setAwaitingStoreInstallation(false);
+      setInstallingCodex(false);
+      setInstallProgress(null);
+      setCanRetryCachedInstaller(false);
+      setStoreInstallationMessage("");
+      setInstallationTimedOut(true);
+      setMessage(tr("storeInstallationTimedOut"));
+    }
     async function checkStoreInstallation() {
       if (checking) return;
+      if (Date.now() >= deadline) {
+        finishWithTimeout();
+        return;
+      }
       checking = true;
       try {
         const nextAppStatus = await getLocalCodexAppStatus();
@@ -700,6 +756,7 @@ function App() {
         setAppStatus(nextAppStatus);
         if (nextAppStatus.installed) {
           setAwaitingStoreInstallation(false);
+          setInstallationTimedOut(false);
           setCanRetryCachedInstaller(false);
           setStoreInstallationMessage("");
           setMessage(tr("installedReady"));
@@ -721,11 +778,13 @@ function App() {
     void checkStoreInstallation();
     const interval = window.setInterval(
       () => void checkStoreInstallation(),
-      4000,
+      windowsInstallationPollIntervalMs,
     );
+    const timeout = window.setTimeout(finishWithTimeout, windowsInstallationTimeoutMs);
     return () => {
       active = false;
       window.clearInterval(interval);
+      window.clearTimeout(timeout);
     };
   }, [
     awaitingStoreInstallation,
@@ -1101,6 +1160,7 @@ function App() {
     automaticRetry = false,
   ) {
     setAwaitingStoreInstallation(false);
+    setInstallationTimedOut(false);
     setStoreInstallForceUpdate(forceUpdate);
     setCanRetryCachedInstaller(false);
     setStoreInstallationMessage("");
@@ -1126,6 +1186,7 @@ function App() {
         return;
       }
       setAwaitingStoreInstallation(false);
+      setInstallationTimedOut(false);
       setCanRetryCachedInstaller(false);
       setStoreInstallationMessage("");
       await refreshStatus();
@@ -1166,9 +1227,25 @@ function App() {
       });
       await relaunch();
     } catch (error) {
-      setDesktopUpdatePhase("ready");
       setDesktopUpdateProgress(null);
-      setMessage(tr("desktopUpdateFailed", { error: String(error) }));
+      setDesktopUpdatePhase("checking");
+      setDesktopUpdateError("");
+      try {
+        const latestUpdate = await check();
+        setDesktopUpdate(latestUpdate);
+        setDesktopUpdatePhase(latestUpdate ? "ready" : "idle");
+        setMessage(
+          latestUpdate
+            ? tr("desktopUpdateFailedRefreshed")
+            : tr("desktopUpdateNoLongerAvailable"),
+        );
+      } catch (refreshError) {
+        setDesktopUpdatePhase("error");
+        setDesktopUpdateError(String(refreshError));
+        setMessage(
+          tr("desktopUpdateRefreshFailed", { error: String(refreshError) }),
+        );
+      }
     }
   }
 
@@ -1178,6 +1255,7 @@ function App() {
       setAppStatus(nextAppStatus);
       if (nextAppStatus.installed) {
         setAwaitingStoreInstallation(false);
+        setInstallationTimedOut(false);
         setCanRetryCachedInstaller(false);
         setStoreInstallationMessage("");
         setMessage(tr("installedReady"));
@@ -1217,7 +1295,7 @@ function App() {
     }
   }
 
-  async function handleOpenConsole(section?: "billing") {
+  async function handleOpenConsole(section?: "billing" | "support") {
     if (!desktopAccessToken) {
       setMessage(tr("signInRequired"));
       return;
@@ -1277,6 +1355,42 @@ function App() {
           ? tr("updateAvailable")
           : tr("upToDate");
     const ready = accountConnected && appInstalled && configured;
+    const healthTone = invalidCodexConfig
+      ? "invalid"
+      : ready
+        ? "ready"
+        : usingOfficialOpenAI
+          ? "official"
+          : usingThirdPartyProvider
+            ? "thirdParty"
+            : "checking";
+    const healthLabel = invalidCodexConfig
+      ? tr("invalidCodexConfigStatus")
+      : ready
+        ? tr("active")
+        : usingOfficialOpenAI
+          ? tr("officialOpenAIStatus")
+          : usingThirdPartyProvider
+            ? tr("thirdPartyProviderStatus")
+            : tr("checking");
+    const healthTitle = invalidCodexConfig
+      ? tr("invalidCodexConfigTitle")
+      : ready
+        ? tr("workspaceReadyTitle")
+        : usingOfficialOpenAI
+          ? tr("officialOpenAITitle")
+          : usingThirdPartyProvider
+            ? tr("thirdPartyProviderTitle")
+            : tr("workspaceCheckingTitle");
+    const healthDescription = invalidCodexConfig
+      ? tr("invalidCodexConfigDescription")
+      : ready
+        ? tr("workspaceReadyDescription")
+        : usingOfficialOpenAI
+          ? tr("officialOpenAIDescription")
+          : usingThirdPartyProvider
+            ? tr("thirdPartyProviderDescription")
+            : tr("workspaceCheckingDescription");
     return (
       <main className="homeShell">
         <aside className="homeRail">
@@ -1284,9 +1398,26 @@ function App() {
             <img className="homeBrandLogo" src="/site-icon.png" alt="" />
             <div>
               <strong>AUTO Gateway</strong>
-              <small>
-                {tr("desktopAppVersion", { version: desktopAppVersion || "—" })}
-              </small>
+              <div className="homeBrandVersion">
+                <small>
+                  {tr("desktopAppVersion", {
+                    version: desktopAppVersion || "—",
+                  })}
+                </small>
+                <button
+                  className="desktopVersionRefresh"
+                  type="button"
+                  aria-label={tr("desktopUpdateCheckNow")}
+                  title={tr("desktopUpdateCheckNow")}
+                  disabled={
+                    desktopUpdatePhase === "checking" ||
+                    desktopUpdatePhase === "downloading"
+                  }
+                  onClick={() => void checkDesktopUpdate(true)}
+                >
+                  <ArrowsClockwiseIcon weight="bold" />
+                </button>
+              </div>
             </div>
           </div>
           <nav className="homeNav" aria-label={tr("homeNavigation")}>
@@ -1303,12 +1434,22 @@ function App() {
               {tr("userConsole")}
             </button>
           </nav>
-          <button
-            className="homeHelp"
-            onClick={() => void openUrl("https://autogateway.cc/docs#codex")}
-          >
-            {tr("needHelp")}
-          </button>
+          <div className="homeSupportLinks">
+            <button
+              className="homeSupportLink"
+              onClick={() => void openUrl("https://autogateway.cc/docs#codex")}
+            >
+              <QuestionIcon weight="bold" />
+              {tr("needHelp")}
+            </button>
+            <button
+              className="homeSupportLink"
+              onClick={() => void handleOpenConsole("support")}
+            >
+              <ChatCircleTextIcon weight="bold" />
+              {tr("reportIssue")}
+            </button>
+          </div>
         </aside>
         <section className="homeWorkspace">
           <header className="topBar homeTopBar">
@@ -1350,14 +1491,6 @@ function App() {
                 {tr("topUpBalance")}
               </button>
             </div>
-            <button
-              className="headerActionButton headerDevtoolsButton"
-              aria-label={tr("openDevtools")}
-              title={tr("openDevtools")}
-              onClick={() => void handleOpenDevtools()}
-            >
-              <BugIcon weight="bold" />
-            </button>
             <button
               className="headerActionButton"
               aria-label={tr("language")}
@@ -1432,27 +1565,24 @@ function App() {
               </p>
             ) : null}
             <section className="homeStatusPanel">
-              <div
-                className="homeHealth"
-                aria-label={ready ? tr("active") : tr("checking")}
-              >
-                <span className={`healthBadge ${ready ? "ready" : ""}`}>
+              <div className={`homeHealth ${healthTone}`} aria-label={healthLabel}>
+                <span className={`healthBadge ${healthTone}`}>
                   <CheckCircleIcon weight="fill" />
                 </span>
                 <div>
-                  <span className="statusLabel">
-                    {ready ? tr("active") : tr("checking")}
+                  <span className={`statusLabel ${healthTone}`}>
+                    {healthLabel}
                   </span>
-                  <strong>
-                    {ready
-                      ? tr("workspaceReadyTitle")
-                      : tr("workspaceCheckingTitle")}
-                  </strong>
-                  <small>
-                    {ready
-                      ? tr("workspaceReadyDescription")
-                      : tr("workspaceCheckingDescription")}
-                  </small>
+                  <strong>{healthTitle}</strong>
+                  <small>{healthDescription}</small>
+                  {invalidCodexConfig ? (
+                    <button
+                      className="homeHealthAction"
+                      onClick={openSetupFromHome}
+                    >
+                      {tr("reconfigureCodex")}
+                    </button>
+                  ) : null}
                 </div>
               </div>
               <div className="homeMetric">
@@ -1724,6 +1854,18 @@ function App() {
                       ? tr("notInstalledDescription")
                       : tr("checkingInstallation")}
               </span>
+              {installationTimedOut ? (
+                <section className="notice warning setupNotice">
+                  <strong>{tr("storeInstallationTimedOutTitle")}</strong>
+                  <span>{tr("storeInstallationTimedOutDescription")}</span>
+                  <button
+                    className="secondaryButton"
+                    onClick={() => void handleInstallCodex(storeInstallForceUpdate)}
+                  >
+                    {tr("retryInstallation")}
+                  </button>
+                </section>
+              ) : null}
               {appInstalled ? (
                 <div className="versionGrid" aria-label={tr("installed")}>
                   <div className="versionItem">
@@ -2085,14 +2227,6 @@ function App() {
               </span>
             </button>
           ) : null}
-          <button
-            className="headerActionButton headerDevtoolsButton"
-            aria-label={tr("openDevtools")}
-            title={tr("openDevtools")}
-            onClick={() => void handleOpenDevtools()}
-          >
-            <BugIcon weight="bold" />
-          </button>
           <button
             className="headerActionButton"
             aria-label={tr("language")}

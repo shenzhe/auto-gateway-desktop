@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 export type CodexStatus = {
   configPath: string;
   authPath: string;
+  modelProvider?: string;
+  configValid: boolean;
   configExists: boolean;
   authExists: boolean;
   configured: boolean;
@@ -122,7 +124,7 @@ export function restoreLatestCodexBackups(): Promise<RestoreResult> {
 
 export function openConsole(
   accessToken: string,
-  section?: "billing",
+  section?: "billing" | "support",
 ): Promise<void> {
   return invoke<void>("open_console", { accessToken, section });
 }

@@ -80,6 +80,13 @@ const dictionaries = {
     installationFailed: "Codex installation failed: {error}",
     storeInstallationInProgress:
       "Finish the ChatGPT installation in Microsoft Store. This page is checking automatically.",
+    storeInstallationTitle: "Finishing Windows registration…",
+    storeInstallationTimedOutTitle: "Windows registration is taking too long",
+    storeInstallationTimedOutDescription:
+      "The app was not detected after 5 minutes. Download the installer again and retry.",
+    storeInstallationTimedOut:
+      "Windows registration timed out. Download the installer again and retry.",
+    retryInstallation: "Download and install again",
     reinstallingCodex:
       "A completed installer was found. Retrying the Codex installation…",
     checkInstallation: "Check installation",
@@ -199,6 +206,12 @@ const dictionaries = {
     desktopUpdateNow: "Install update",
     desktopUpdating: "Installing update… {percent}%",
     desktopUpdateFailed: "Desktop update failed: {error}",
+    desktopUpdateFailedRefreshed:
+      "The update failed. The latest update information has been refreshed; try installing again.",
+    desktopUpdateNoLongerAvailable:
+      "The update failed, and no newer desktop version is currently available.",
+    desktopUpdateRefreshFailed:
+      "The update failed, and the latest version could not be fetched: {error}",
     desktopUpdateCheckNow: "Check Desktop updates",
     desktopUpdateCheckDescription:
       "Check the signed AUTO Gateway Desktop release now.",
@@ -220,11 +233,24 @@ const dictionaries = {
     checkUpdatesDescription: "Refresh local and official Codex version status.",
     reconfigureCodex: "Reconfigure Codex",
     reconfigureCodexDescription: "Review the local Codex setup workflow.",
+    officialOpenAIStatus: "Official OpenAI",
+    officialOpenAITitle: "Using the official OpenAI setup",
+    officialOpenAIDescription:
+      "AUTO Gateway can make Codex more affordable and easier to use.",
+    thirdPartyProviderStatus: "Third-party provider",
+    thirdPartyProviderTitle: "Using a third-party provider",
+    thirdPartyProviderDescription:
+      "We recommend AUTO Gateway for a simpler and more cost-effective Codex setup.",
+    invalidCodexConfigStatus: "Invalid Codex configuration",
+    invalidCodexConfigTitle: "Codex configuration needs attention",
+    invalidCodexConfigDescription:
+      "The Codex config.toml is missing or invalid. Reconfigure Codex to continue.",
     recentSetup: "Recent setup",
     connectedAccount: "Connected account",
     codexConfigured: "Codex configured",
     versionUpToDate: "Version status",
     needHelp: "Need help?",
+    reportIssue: "Report an issue",
     settings: "Settings",
     appearance: "Appearance",
     theme: "Theme",
@@ -311,6 +337,12 @@ const dictionaries = {
     installationFailed: "Codex 安装失败：{error}",
     storeInstallationInProgress:
       "请在 Microsoft Store 完成 ChatGPT 安装；此页面会自动检查。",
+    storeInstallationTitle: "正在完成 Windows 注册…",
+    storeInstallationTimedOutTitle: "Windows 注册超时",
+    storeInstallationTimedOutDescription:
+      "等待 5 分钟后仍未检测到应用，请重新下载安装包并重试。",
+    storeInstallationTimedOut: "Windows 注册超时，请重新下载安装包并重试。",
+    retryInstallation: "重新下载并安装",
     reinstallingCodex: "发现已下载完成的安装包，正在自动重试安装 Codex…",
     checkInstallation: "检查安装状态",
     restoreConfirm: "要恢复最新的 Codex 配置备份吗？这会替换当前本地配置文件。",
@@ -419,6 +451,10 @@ const dictionaries = {
     desktopUpdateNow: "安装更新",
     desktopUpdating: "正在安装更新… {percent}%",
     desktopUpdateFailed: "桌面应用更新失败：{error}",
+    desktopUpdateFailedRefreshed: "更新安装失败，已重新获取最新版本信息，请重试。",
+    desktopUpdateNoLongerAvailable:
+      "更新安装失败，目前没有可用的新版桌面应用。",
+    desktopUpdateRefreshFailed: "更新安装失败，且无法重新获取最新版本：{error}",
     desktopUpdateCheckNow: "检查桌面应用更新",
     desktopUpdateCheckDescription:
       "立即检查已签名的 AUTO Gateway Desktop 新版本。",
@@ -439,11 +475,23 @@ const dictionaries = {
     checkUpdatesDescription: "刷新本机与官方 Codex 版本状态。",
     reconfigureCodex: "重新配置 Codex",
     reconfigureCodexDescription: "查看本机 Codex 设置流程。",
+    officialOpenAIStatus: "官方 OpenAI",
+    officialOpenAITitle: "正在使用官方 OpenAI 配置",
+    officialOpenAIDescription: "使用 AUTO Gateway 更省、更方便。",
+    thirdPartyProviderStatus: "第三方 Provider",
+    thirdPartyProviderTitle: "正在使用第三方 Provider",
+    thirdPartyProviderDescription:
+      "推荐使用 AUTO Gateway，配置更简单，价格更省。",
+    invalidCodexConfigStatus: "Codex 配置文件无效",
+    invalidCodexConfigTitle: "Codex 配置需要修复",
+    invalidCodexConfigDescription:
+      "config.toml 缺失或无法解析，请重新配置 Codex。",
     recentSetup: "最近设置",
     connectedAccount: "已连接账户",
     codexConfigured: "Codex 已配置",
     versionUpToDate: "版本状态",
     needHelp: "需要帮助？",
+    reportIssue: "问题反馈",
     settings: "设置",
     appearance: "外观",
     theme: "主题",

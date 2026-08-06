@@ -329,18 +329,6 @@ select:focus-visible {
   width: 16px;
   height: 16px;
 }
-.headerDevtoolsButton {
-  display: inline-grid;
-  width: 38px;
-  min-width: 38px;
-  height: 38px;
-  place-items: center;
-  padding: 0;
-}
-.headerDevtoolsButton svg {
-  width: 18px;
-  height: 18px;
-}
 .headerActionButton:hover,
 .secondaryButton:hover {
   border-color: var(--primary);
@@ -937,6 +925,37 @@ h1 {
   font-weight: 700;
   letter-spacing: 0.04em;
 }
+.homeBrandVersion {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.desktopVersionRefresh {
+  display: inline-grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--subtle);
+  background: transparent;
+}
+.desktopVersionRefresh:hover {
+  color: var(--primary);
+  background: var(--primary-soft);
+}
+.desktopVersionRefresh:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+.desktopVersionRefresh svg {
+  width: 15px;
+  height: 15px;
+}
+.desktopVersionRefresh:disabled svg {
+  animation: configuration-spin 0.9s linear infinite;
+}
 .homeBrandLogo {
   width: 40px;
   height: 40px;
@@ -950,7 +969,7 @@ h1 {
   margin-top: 76px;
 }
 .homeNav button,
-.homeHelp {
+.homeSupportLink {
   display: flex;
   align-items: center;
   gap: 15px;
@@ -965,7 +984,7 @@ h1 {
   text-align: left;
 }
 .homeNav button svg,
-.homeHelp svg {
+.homeSupportLink svg {
   width: 22px;
   height: 22px;
 }
@@ -978,14 +997,19 @@ h1 {
 .homeNav button.selected {
   box-shadow: inset 3px 0 var(--primary);
 }
-.homeHelp {
+.homeSupportLinks {
+  display: grid;
+  gap: 4px;
   margin-top: auto;
+  padding-top: 16px;
   border-top: 1px solid var(--line);
-  border-radius: 0;
+}
+.homeSupportLink {
   color: var(--muted);
 }
-.homeHelp:hover {
+.homeSupportLink:hover {
   color: var(--primary);
+  background: color-mix(in oklch, var(--primary-soft) 54%, transparent);
 }
 .homeWorkspace {
   min-width: 0;
@@ -1063,6 +1087,17 @@ h1 {
   color: var(--success);
   background: var(--success-soft);
 }
+.healthBadge.official {
+  border-color: color-mix(in oklch, var(--success) 38%, var(--line));
+  color: var(--success);
+  background: var(--success-soft);
+}
+.healthBadge.thirdParty,
+.healthBadge.invalid {
+  border-color: color-mix(in oklch, var(--warning) 52%, var(--line));
+  color: var(--warning);
+  background: var(--warning-soft);
+}
 .healthBadge svg {
   width: 36px;
   height: 36px;
@@ -1099,6 +1134,24 @@ h1 {
 }
 .homeHealth .statusLabel {
   color: var(--success);
+}
+.homeHealth .statusLabel.official {
+  color: var(--success);
+}
+.homeHealth .statusLabel.thirdParty,
+.homeHealth .statusLabel.invalid {
+  color: var(--warning);
+}
+.homeHealthAction {
+  align-self: flex-start;
+  margin-top: 5px;
+  padding: 0;
+  border: 0;
+  color: var(--primary);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 730;
+  text-decoration: underline;
 }
 .homeMetric button {
   padding: 0;
@@ -1562,7 +1615,7 @@ h1 {
   .homeNav button svg {
     display: none;
   }
-  .homeHelp {
+  .homeSupportLinks {
     display: none;
   }
   .homeTopBar {
