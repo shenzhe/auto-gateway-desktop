@@ -7,6 +7,14 @@ on:
         description: Release version matching package.json
         required: true
         type: string
+      release_scope:
+        description: Build scope
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - windows-x64-test
       release_notes:
         description: Release notes shown by the in-app updater
         required: false
@@ -63,6 +71,7 @@ jobs:
   macos:
     name: Build, sign, and notarize macOS (${{ matrix.label }})
     needs: prepare
+    if: github.event_name != 'workflow_dispatch' || inputs.release_scope == 'full'
     runs-on: macos-14
     strategy:
       fail-fast: false
@@ -169,6 +178,7 @@ jobs:
   macos-universal:
     name: Build, sign, and notarize Universal macOS installer
     needs: prepare
+    if: github.event_name != 'workflow_dispatch' || inputs.release_scope == 'full'
     runs-on: macos-14
     env:
       APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
@@ -705,13 +715,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            suffix: x64
-            label: x64
-          - target: aarch64-pc-windows-msvc
-            suffix: arm64
-            label: ARM64
+        include: ${{ fromJSON(github.event_name == 'workflow_dispatch' && inputs.release_scope == 'windows-x64-test' && '[{"target":"x86_64-pc-windows-msvc","suffix":"x64","label":"x64"}]' || '[{"target":"x86_64-pc-windows-msvc","suffix":"x64","label":"x64"},{"target":"aarch64-pc-windows-msvc","suffix":"arm64","label":"ARM64"}]') }}
     env:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -739,13 +743,6 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Sign in to Azure with OIDC
-        uses: azure/login@v3
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
       - name: Build unsigned Windows application
         shell: pwsh
         run: |
@@ -758,6 +755,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Tauri failed to build the Windows application."
           }
+
+      # GitHub OIDC assertions are short-lived. Authenticate immediately before
+      # Artifact Signing so a lengthy native build cannot expire the assertion.
+      - name: Sign in to Azure with OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Sign Windows application with Artifact Signing
         uses: azure/artifact-signing-action@v2
@@ -868,6 +874,7 @@ jobs:
   windows-unified-native:
     name: Build and sign Windows unified installer
     needs: [prepare, windows-native]
+    if: github.event_name != 'workflow_dispatch' || inputs.release_scope == 'full'
     runs-on: windows-2022
     environment: release
     permissions:
@@ -890,13 +897,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
-
-      - name: Sign in to Azure with OIDC
-        uses: azure/login@v3
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Build architecture-selecting installer
         shell: pwsh
@@ -939,6 +939,13 @@ jobs:
             throw "The unified Windows installer was not produced."
           }
 
+      - name: Sign in to Azure with OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
       - name: Sign unified installer with Artifact Signing
         uses: azure/artifact-signing-action@v2
         with:
@@ -978,6 +985,7 @@ jobs:
   publish-r2:
     name: Publish artifacts to R2
     needs: [prepare, macos, macos-universal, windows-native, windows-unified-native]
+    if: github.event_name != 'workflow_dispatch' || inputs.release_scope == 'full'
     runs-on: ubuntu-24.04
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
