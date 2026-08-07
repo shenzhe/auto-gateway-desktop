@@ -12,6 +12,10 @@ on:
         required: false
         default: Bug fixes and improvements.
         type: string
+  push:
+    tags:
+      - "v*"
+      - "desktop-v*"
 permissions:
   contents: read
 
@@ -25,6 +29,7 @@ env:
 jobs:
   prepare:
     name: Validate release version
+    if: github.event_name == 'workflow_dispatch' || vars.DESKTOP_RELEASE_TRIGGER_MODE == 'automatic'
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.release.outputs.version }}

@@ -183,6 +183,20 @@ The release job publishes four native updater artifacts and two unified download
 2. The Windows matrix signs the x64 and ARM64 NSIS installers with Azure Artifact Signing. A separate Windows job signs the unified installer after it embeds both payloads and selects the native installer on the user's machine.
 3. The publish job requires all native and unified artifacts, uploads them to R2, and only then writes `downloads/desktop/latest.json`. The unified NSIS bootstrapper is packaged and signed on Windows so every public Windows installer has an Authenticode signature.
 
+### Release trigger mode
+
+The release workflow always supports manual runs from the GitHub Actions page.
+To control tag-triggered builds, set the repository variable
+`DESKTOP_RELEASE_TRIGGER_MODE` to one of the following values:
+
+| Value | Behavior |
+| --- | --- |
+| `manual` (default) | A pushed release tag creates a skipped workflow run; use **Run workflow** to build and publish. |
+| `automatic` | Pushing a `v*` or `desktop-v*` tag builds, signs, notarizes, and publishes that version automatically. |
+
+The tag version must match `package.json`, `src-tauri/Cargo.toml`, and
+`src-tauri/tauri.conf.json`.
+
 Create the following repository secrets before dispatching the workflow. Secrets must be set in GitHub; never commit certificates, private keys, or R2 credentials.
 
 | Secret                               | Value                                                                               |
