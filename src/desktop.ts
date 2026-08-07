@@ -203,6 +203,28 @@ export type RecoverableSkill = {
   removedAt?: string;
 };
 
+export type SkillRiskFinding = {
+  code: string;
+  severity: string;
+  path?: string;
+  message: string;
+};
+
+export type SkillInstallSourceKind = "dir" | "zip";
+
+export type SkillInstallPreview = {
+  name: string;
+  description: string;
+  version?: string;
+  targetName: string;
+  targetPath: string;
+  fileCount: number;
+  totalSizeBytes: number;
+  scripts: string[];
+  conflict: boolean;
+  warnings: SkillRiskFinding[];
+};
+
 export function getCodexStatus(): Promise<CodexStatus> {
   return invoke<CodexStatus>("get_codex_status");
 }
@@ -274,6 +296,24 @@ export function restoreSkill(id: string): Promise<void> {
 
 export function listRecoverableSkills(): Promise<RecoverableSkill[]> {
   return invoke<RecoverableSkill[]>("list_recoverable_skills");
+}
+
+export function validateSkillSource(
+  kind: SkillInstallSourceKind,
+  location: string,
+): Promise<SkillInstallPreview> {
+  return invoke<SkillInstallPreview>("validate_skill_source", {
+    kind,
+    location,
+  });
+}
+
+export function installSkill(
+  kind: SkillInstallSourceKind,
+  location: string,
+  replace: boolean,
+): Promise<void> {
+  return invoke<void>("install_skill", { kind, location, replace });
 }
 
 export function getCodexAppStatus(): Promise<CodexAppStatus> {

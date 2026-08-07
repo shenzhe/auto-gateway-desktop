@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Manager;
@@ -1418,10 +1419,275 @@ pub fn list_recoverable_skills(app: tauri::AppHandle) -> Result<Vec<RecoverableS
     Ok(items)
 }
 
+// ---------------------------------------------------------------------------
+// Install from a local directory or ZIP: stage into a temp area, validate the
+// package, then place it atomically into the skills dir. An installed skill is
+// picked up (and indexed) by the next scan, so install itself never writes the
+// index.
+// ---------------------------------------------------------------------------
+
+const MAX_ARCHIVE_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_UNPACKED_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_INSTALL_FILES: usize = 2000;
+const MAX_INSTALL_PATH_DEPTH: usize = 16;
+const MAX_INSTALL_FILE_BYTES: u64 = 25 * 1024 * 1024;
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskFinding {
+    pub code: String,
+    pub severity: String,
+    pub path: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallPreview {
+    pub name: String,
+    pub description: String,
+    pub version: Option<String>,
+    pub target_name: String,
+    pub target_path: String,
+    pub file_count: usize,
+    pub total_size_bytes: u64,
+    pub scripts: Vec<String>,
+    pub conflict: bool,
+    pub warnings: Vec<RiskFinding>,
+}
+
+fn skills_backup_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(skills_data_dir(app)?.join("skills-backup"))
+}
+
+fn is_valid_skill_name(name: &str) -> bool {
+    if name.is_empty() || name.len() > 64 || name.starts_with('.') {
+        return false;
+    }
+    if name.contains('/') || name.contains('\\') {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
+
+/// Safe ZIP extraction: rejects path traversal, absolute paths, and symlinks,
+/// and enforces file-count / depth / per-file / total-size limits with a
+/// bounded copy so a lying size header cannot cause a zip bomb.
+fn extract_zip_safe(zip_path: &Path, dest: &Path) -> Result<(), String> {
+    let file = fs::File::open(zip_path).map_err(|error| format!("open the archive: {error}"))?;
+    let archive_size = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    if archive_size > MAX_ARCHIVE_BYTES {
+        return Err("the archive is larger than the supported limit".to_string());
+    }
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|error| format!("read the archive: {error}"))?;
+    if archive.len() > MAX_INSTALL_FILES {
+        return Err("the archive contains too many files".to_string());
+    }
+    fs::create_dir_all(dest).map_err(|error| format!("create the staging directory: {error}"))?;
+
+    let mut total_unpacked: u64 = 0;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| format!("read an archive entry: {error}"))?;
+        if let Some(mode) = entry.unix_mode() {
+            if mode & 0o170000 == 0o120000 {
+                return Err("the archive contains a symbolic link".to_string());
+            }
+        }
+        let relative = entry
+            .enclosed_name()
+            .ok_or_else(|| "the archive contains an unsafe path".to_string())?;
+        if relative.components().count() > MAX_INSTALL_PATH_DEPTH {
+            return Err("the archive contains a path that is too deep".to_string());
+        }
+        let outpath = dest.join(&relative);
+        if entry.is_dir() {
+            fs::create_dir_all(&outpath)
+                .map_err(|error| format!("create a directory: {error}"))?;
+            continue;
+        }
+        if entry.size() > MAX_INSTALL_FILE_BYTES {
+            return Err("the archive contains a file that is too large".to_string());
+        }
+        if let Some(parent) = outpath.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("create a directory: {error}"))?;
+        }
+        let mut output =
+            fs::File::create(&outpath).map_err(|error| format!("write a file: {error}"))?;
+        let mut limited = entry.by_ref().take(MAX_INSTALL_FILE_BYTES + 1);
+        let written = io::copy(&mut limited, &mut output)
+            .map_err(|error| format!("extract a file: {error}"))?;
+        if written > MAX_INSTALL_FILE_BYTES {
+            return Err("a file in the archive exceeds the size limit".to_string());
+        }
+        total_unpacked = total_unpacked.saturating_add(written);
+        if total_unpacked > MAX_UNPACKED_BYTES {
+            return Err("the archive expands beyond the supported size".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Find the skill root: a directory that directly contains SKILL.md, either the
+/// base itself or its single top-level subdirectory.
+fn locate_skill_root(base: &Path) -> Result<PathBuf, String> {
+    if base.join(SKILL_MANIFEST_FILE).is_file() {
+        return Ok(base.to_path_buf());
+    }
+    let mut subdirs: Vec<PathBuf> = Vec::new();
+    for entry in
+        fs::read_dir(base).map_err(|error| format!("read the skill package: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("read a package entry: {error}"))?;
+        if entry.path().is_dir() {
+            subdirs.push(entry.path());
+        }
+    }
+    if subdirs.len() == 1 && subdirs[0].join(SKILL_MANIFEST_FILE).is_file() {
+        return Ok(subdirs[0].clone());
+    }
+    Err(format!("could not find {SKILL_MANIFEST_FILE} in the skill package"))
+}
+
+/// Stage a source (local dir copy or safe ZIP extract) into `staging` and
+/// return the located skill root within it.
+fn stage_source(kind: &str, location: &str, staging: &Path) -> Result<PathBuf, String> {
+    fs::create_dir_all(staging)
+        .map_err(|error| format!("create the staging directory: {error}"))?;
+    let staged = staging.join("payload");
+    match kind {
+        "dir" => {
+            let source = Path::new(location);
+            reject_symlink(source)?;
+            if !source.is_dir() {
+                return Err("the source directory was not found".to_string());
+            }
+            copy_dir_all(source, &staged)?;
+        }
+        "zip" => {
+            let source = Path::new(location);
+            if !source.is_file() {
+                return Err("the archive file was not found".to_string());
+            }
+            extract_zip_safe(source, &staged)?;
+        }
+        _ => return Err("unsupported install source".to_string()),
+    }
+    locate_skill_root(&staged)
+}
+
+fn build_install_preview(skill_root: &Path, skills_dir: &Path) -> Result<InstallPreview, String> {
+    let manifest = fs::read_to_string(skill_root.join(SKILL_MANIFEST_FILE))
+        .map_err(|error| format!("read {SKILL_MANIFEST_FILE}: {error}"))?;
+    let frontmatter = parse_frontmatter(&manifest)?;
+    if !is_valid_skill_name(&frontmatter.name) {
+        return Err("the skill name in SKILL.md is not a valid folder name".to_string());
+    }
+    let (files, total_size, truncated) = walk_skill_files(skill_root);
+    if truncated || files.len() > MAX_INSTALL_FILES {
+        return Err("the skill contains too many files".to_string());
+    }
+    if total_size > MAX_UNPACKED_BYTES {
+        return Err("the skill is larger than the supported limit".to_string());
+    }
+    let scripts: Vec<String> = files
+        .iter()
+        .filter(|file| file.kind == SkillFileKind::Script)
+        .map(|file| file.relative_path.clone())
+        .collect();
+    let mut warnings = Vec::new();
+    if !scripts.is_empty() {
+        warnings.push(RiskFinding {
+            code: "SCRIPTS_PRESENT".to_string(),
+            severity: "warning".to_string(),
+            path: None,
+            message: format!("{} script file(s) will be installed", scripts.len()),
+        });
+    }
+    for file in &files {
+        if file.is_executable {
+            warnings.push(RiskFinding {
+                code: "EXECUTABLE_FILE".to_string(),
+                severity: "warning".to_string(),
+                path: Some(file.relative_path.clone()),
+                message: "an executable file is included".to_string(),
+            });
+        }
+    }
+    let target = skills_dir.join(&frontmatter.name);
+    Ok(InstallPreview {
+        name: frontmatter.name.clone(),
+        description: frontmatter.description,
+        version: frontmatter.version,
+        target_name: frontmatter.name,
+        target_path: target.to_string_lossy().to_string(),
+        file_count: files.len(),
+        total_size_bytes: total_size,
+        scripts,
+        conflict: target.exists(),
+        warnings,
+    })
+}
+
+#[tauri::command]
+pub fn validate_skill_source(
+    _app: tauri::AppHandle,
+    kind: String,
+    location: String,
+) -> Result<InstallPreview, String> {
+    let skills_dir = default_skills_dir()?;
+    let staging = std::env::temp_dir().join(format!("autogateway-skill-stage-{}", Uuid::new_v4()));
+    let result = (|| {
+        let root = stage_source(&kind, &location, &staging)?;
+        build_install_preview(&root, &skills_dir)
+    })();
+    let _ = fs::remove_dir_all(&staging);
+    result
+}
+
+#[tauri::command]
+pub fn install_skill(
+    app: tauri::AppHandle,
+    kind: String,
+    location: String,
+    replace: bool,
+) -> Result<(), String> {
+    let skills_dir = default_skills_dir()?;
+    let staging = std::env::temp_dir().join(format!("autogateway-skill-stage-{}", Uuid::new_v4()));
+    let outcome = (|| {
+        let root = stage_source(&kind, &location, &staging)?;
+        let preview = build_install_preview(&root, &skills_dir)?;
+        let target = skills_dir.join(&preview.target_name);
+        fs::create_dir_all(&skills_dir)
+            .map_err(|error| format!("create the skills directory: {error}"))?;
+        if target.exists() {
+            if !replace {
+                return Err("a skill with this name already exists".to_string());
+            }
+            let backup = skills_backup_root(&app)?
+                .join(format!("{}-{}", preview.target_name, now_millis()));
+            move_dir(&target, &backup)?;
+            if let Err(error) = move_dir(&root, &target) {
+                let _ = move_dir(&backup, &target);
+                return Err(error);
+            }
+            Ok(())
+        } else {
+            move_dir(&root, &target)
+        }
+    })();
+    let _ = fs::remove_dir_all(&staging);
+    outcome
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
     use std::path::PathBuf;
 
     fn temp_root(label: &str) -> PathBuf {
@@ -1736,6 +2002,103 @@ mod tests {
         // The active skill must NOT adopt the disabled entry's id.
         assert_ne!(result.skills[0].id, "old");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn write_zip(path: &Path, files: &[(&str, &[u8])], symlink: Option<(&str, &str)>) {
+        let file = fs::File::create(path).expect("create zip");
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, data) in files {
+            writer.start_file(*name, options).expect("start file");
+            writer.write_all(data).expect("write file");
+        }
+        if let Some((name, target)) = symlink {
+            writer
+                .add_symlink(name, target, options)
+                .expect("add symlink");
+        }
+        writer.finish().expect("finish zip");
+    }
+
+    #[test]
+    fn is_valid_skill_name_rules() {
+        assert!(is_valid_skill_name("release-notes"));
+        assert!(is_valid_skill_name("imagegen"));
+        assert!(!is_valid_skill_name(""));
+        assert!(!is_valid_skill_name(".hidden"));
+        assert!(!is_valid_skill_name("a/b"));
+        assert!(!is_valid_skill_name(".."));
+    }
+
+    #[test]
+    fn extract_zip_safe_accepts_valid_and_locates_root() {
+        let root = temp_root("zip-ok");
+        let zip_path = root.join("skill.zip");
+        write_zip(
+            &zip_path,
+            &[(
+                "SKILL.md",
+                b"---\nname: demo\ndescription: d.\n---\n" as &[u8],
+            )],
+            None,
+        );
+        let dest = root.join("out");
+        extract_zip_safe(&zip_path, &dest).expect("extract");
+        let skill_root = locate_skill_root(&dest).expect("locate");
+        assert!(skill_root.join(SKILL_MANIFEST_FILE).is_file());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn extract_zip_safe_rejects_traversal_and_symlinks() {
+        let root = temp_root("zip-bad");
+
+        let traversal = root.join("traversal.zip");
+        write_zip(&traversal, &[("../evil.txt", b"x" as &[u8])], None);
+        assert!(extract_zip_safe(&traversal, &root.join("t")).is_err());
+
+        let linked = root.join("link.zip");
+        write_zip(
+            &linked,
+            &[(
+                "SKILL.md",
+                b"---\nname: demo\ndescription: d.\n---\n" as &[u8],
+            )],
+            Some(("link", "/etc/hosts")),
+        );
+        assert!(extract_zip_safe(&linked, &root.join("l")).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn install_preview_flags_conflict_and_scripts() {
+        let root = temp_root("preview");
+        let pkg = root.join("pkg");
+        fs::create_dir_all(pkg.join("scripts")).expect("scripts");
+        fs::write(
+            pkg.join(SKILL_MANIFEST_FILE),
+            "---\nname: release-notes\ndescription: d.\n---\n",
+        )
+        .expect("manifest");
+        fs::write(pkg.join("scripts/run.py"), "print('x')\n").expect("script");
+
+        let skills_dir = root.join("skills");
+        fs::create_dir_all(&skills_dir).expect("skills");
+
+        // No conflict yet, but scripts produce a warning.
+        let preview = build_install_preview(&pkg, &skills_dir).expect("preview");
+        assert_eq!(preview.target_name, "release-notes");
+        assert!(!preview.conflict);
+        assert_eq!(preview.scripts, vec!["scripts/run.py".to_string()]);
+        assert!(preview.warnings.iter().any(|w| w.code == "SCRIPTS_PRESENT"));
+
+        // Create the target → conflict flagged.
+        fs::create_dir_all(skills_dir.join("release-notes")).expect("existing");
+        let preview = build_install_preview(&pkg, &skills_dir).expect("preview");
+        assert!(preview.conflict);
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -73,6 +73,8 @@ import {
   removeSkill,
   restoreSkill,
   listRecoverableSkills,
+  validateSkillSource,
+  installSkill,
   signOutDesktop,
   showMainWindow,
   updateTrayStatus,
@@ -89,6 +91,8 @@ import {
   type SkillFileEntry,
   type SkillCategory,
   type RecoverableSkill,
+  type SkillInstallPreview,
+  type SkillInstallSourceKind,
 } from "./desktop";
 import {
   readLocalePreference,
@@ -1285,6 +1289,14 @@ function App() {
     RecoverableSkill[]
   >([]);
   const [trashLoading, setTrashLoading] = useState(false);
+  const [showInstallDialog, setShowInstallDialog] = useState(false);
+  const [installKind, setInstallKind] =
+    useState<SkillInstallSourceKind>("dir");
+  const [installLocation, setInstallLocation] = useState("");
+  const [installPreview, setInstallPreview] =
+    useState<SkillInstallPreview | null>(null);
+  const [installBusy, setInstallBusy] = useState(false);
+  const [installError, setInstallError] = useState("");
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
   const [localePreference, setLocalePreference] = useState<LocalePreference>(
     () => readLocalePreference(),
@@ -3164,6 +3176,188 @@ function App() {
     );
   }
 
+  function openInstallDialog() {
+    setInstallKind("dir");
+    setInstallLocation("");
+    setInstallPreview(null);
+    setInstallError("");
+    setShowInstallDialog(true);
+  }
+
+  async function previewInstall() {
+    if (!installLocation.trim()) return;
+    setInstallBusy(true);
+    setInstallError("");
+    setInstallPreview(null);
+    try {
+      const preview = await validateSkillSource(
+        installKind,
+        installLocation.trim(),
+      );
+      setInstallPreview(preview);
+    } catch (error) {
+      setInstallError(String(error));
+    } finally {
+      setInstallBusy(false);
+    }
+  }
+
+  async function doInstall() {
+    if (!installPreview) return;
+    setInstallBusy(true);
+    setInstallError("");
+    try {
+      await installSkill(installKind, installLocation.trim(), installPreview.conflict);
+      setShowInstallDialog(false);
+      setSkillsRefreshNonce((nonce) => nonce + 1);
+    } catch (error) {
+      setInstallError(String(error));
+    } finally {
+      setInstallBusy(false);
+    }
+  }
+
+  function renderInstallDialog() {
+    if (!showInstallDialog) return null;
+    return (
+      <div
+        className="skillDrawerOverlay skillModalOverlay"
+        onClick={() => setShowInstallDialog(false)}
+      >
+        <div
+          className="skillModal"
+          role="dialog"
+          aria-modal="true"
+          aria-label={tr("skillInstallTitle")}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <header className="skillDrawerHeader">
+            <strong>{tr("skillInstallTitle")}</strong>
+            <button
+              className="iconButton"
+              aria-label={tr("skillDetailClose")}
+              onClick={() => setShowInstallDialog(false)}
+            >
+              <XIcon weight="bold" />
+            </button>
+          </header>
+          <div className="skillModalBody">
+            <div className="skillInstallSource">
+              <select
+                className="skillSelect"
+                value={installKind}
+                onChange={(event) => {
+                  setInstallKind(event.target.value as SkillInstallSourceKind);
+                  setInstallPreview(null);
+                }}
+              >
+                <option value="dir">{tr("skillInstallFromDir")}</option>
+                <option value="zip">{tr("skillInstallFromZip")}</option>
+              </select>
+              <input
+                type="text"
+                className="skillInstallInput"
+                value={installLocation}
+                placeholder={
+                  installKind === "dir"
+                    ? tr("skillInstallDirPlaceholder")
+                    : tr("skillInstallZipPlaceholder")
+                }
+                onChange={(event) => {
+                  setInstallLocation(event.target.value);
+                  setInstallPreview(null);
+                }}
+              />
+              <button
+                className="secondaryButton"
+                disabled={!installLocation.trim() || installBusy}
+                onClick={() => void previewInstall()}
+              >
+                {tr("skillInstallPreview")}
+              </button>
+            </div>
+            {installError ? (
+              <section className="notice warning">
+                <strong>{installError}</strong>
+              </section>
+            ) : null}
+            {installPreview ? (
+              <>
+                <div className="skillDrawerSection">
+                  <div className="skillCardHeader">
+                    <strong>{installPreview.name}</strong>
+                    {installPreview.version ? (
+                      <span className="skillCardVersion">
+                        {tr("skillVersionLabel", {
+                          version: installPreview.version,
+                        })}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="skillCardDescription">
+                    {installPreview.description}
+                  </p>
+                  <dl className="skillDetailGrid">
+                    <div className="skillDetailWide">
+                      <dt>{tr("skillInstallTarget")}</dt>
+                      <dd className="skillInstallPath">
+                        {installPreview.targetPath}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailFileCount")}</dt>
+                      <dd>{installPreview.fileCount}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailSize")}</dt>
+                      <dd>{formatDataSize(installPreview.totalSizeBytes)}</dd>
+                    </div>
+                  </dl>
+                </div>
+                {installPreview.warnings.length > 0 ? (
+                  <section className="notice warning">
+                    <strong>{tr("skillInstallRisks")}</strong>
+                    <ul className="skillScriptList">
+                      {installPreview.warnings.map((warning, index) => (
+                        <li key={`${warning.code}-${index}`}>
+                          {warning.path
+                            ? `${warning.path}: ${warning.message}`
+                            : warning.message}
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                ) : null}
+                {installPreview.conflict ? (
+                  <section className="notice warning">
+                    <strong>{tr("skillInstallConflict")}</strong>
+                  </section>
+                ) : null}
+                <div className="skillDrawerActions">
+                  <button
+                    className="primaryButton"
+                    disabled={installBusy}
+                    onClick={() => void doInstall()}
+                  >
+                    {installPreview.conflict
+                      ? tr("skillInstallReplace")
+                      : tr("skillInstallConfirm")}
+                  </button>
+                  <button
+                    className="linkButton"
+                    onClick={() => setShowInstallDialog(false)}
+                  >
+                    {tr("skillCategoryCancel")}
+                  </button>
+                </div>
+              </>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   function renderTrashPanel() {
     if (!showTrash) return null;
     return (
@@ -3318,6 +3512,12 @@ function App() {
                 <option value="updated-desc">{tr("skillsSortUpdated")}</option>
               </select>
               <button
+                className="primaryButton"
+                onClick={() => openInstallDialog()}
+              >
+                {tr("skillInstall")}
+              </button>
+              <button
                 className="secondaryButton"
                 onClick={() => setShowCategoryManager((open) => !open)}
               >
@@ -3350,6 +3550,7 @@ function App() {
             {renderTrashPanel()}
             {renderInstalledSkills()}
             {renderSkillDetailDrawer()}
+            {renderInstallDialog()}
           </>
         ) : (
           <div className="skillsComingSoon">

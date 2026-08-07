@@ -23,8 +23,9 @@ use desktop_auth::{
 };
 use skills::{
     archive_category, create_category, delete_category, disable_skill, enable_skill,
-    get_skill_detail, list_recoverable_skills, remove_skill, rename_category, reorder_categories,
-    restore_skill, scan_skills, set_skill_category, set_skill_tags, set_skills_category,
+    get_skill_detail, install_skill, list_recoverable_skills, remove_skill, rename_category,
+    reorder_categories, restore_skill, scan_skills, set_skill_category, set_skill_tags,
+    set_skills_category, validate_skill_source,
 };
 use futures_util::StreamExt;
 use std::{
@@ -731,6 +732,8 @@ fn main() {
             remove_skill,
             restore_skill,
             list_recoverable_skills,
+            validate_skill_source,
+            install_skill,
             open_devtools
         ])
         .build(tauri::generate_context!())

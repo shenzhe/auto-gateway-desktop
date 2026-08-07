@@ -2843,6 +2843,50 @@ h1 {
   background: var(--warning-soft);
   border-color: color-mix(in oklch, var(--warning) 30%, var(--line));
 }
+.skillModalOverlay {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.skillModal {
+  display: flex;
+  flex-direction: column;
+  width: min(640px, 100%);
+  max-height: 86vh;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.skillModalBody {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+  padding: 20px;
+  overflow-y: auto;
+}
+.skillInstallSource {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.skillInstallInput {
+  flex: 1 1 260px;
+  min-width: 180px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--control-bg);
+  color: var(--text);
+  font-size: 13px;
+}
+@media (max-width: 700px) {
+  .skillModal {
+    width: 100%;
+    max-height: 92vh;
+  }
+}
 @media (max-width: 700px) {
   .skillOverview {
     grid-template-columns: repeat(2, 1fr);
