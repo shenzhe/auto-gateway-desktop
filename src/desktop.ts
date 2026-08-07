@@ -310,11 +310,19 @@ export function listRecoverableSkills(): Promise<RecoverableSkill[]> {
   return invoke<RecoverableSkill[]>("list_recoverable_skills");
 }
 
+export type SkillInstallSkip = { name: string; reason: string };
+
+export type SkillInstallSummary = {
+  installed: string[];
+  skipped: SkillInstallSkip[];
+  failed: SkillInstallSkip[];
+};
+
 export function validateSkillSource(
   kind: SkillInstallSourceKind,
   location: string,
-): Promise<SkillInstallPreview> {
-  return invoke<SkillInstallPreview>("validate_skill_source", {
+): Promise<SkillInstallPreview[]> {
+  return invoke<SkillInstallPreview[]>("validate_skill_source", {
     kind,
     location,
   });
@@ -324,8 +332,14 @@ export function installSkill(
   kind: SkillInstallSourceKind,
   location: string,
   replace: boolean,
-): Promise<void> {
-  return invoke<void>("install_skill", { kind, location, replace });
+  names: string[],
+): Promise<SkillInstallSummary> {
+  return invoke<SkillInstallSummary>("install_skill", {
+    kind,
+    location,
+    replace,
+    names,
+  });
 }
 
 export type SkillExportResult = {

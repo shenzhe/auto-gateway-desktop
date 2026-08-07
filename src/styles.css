@@ -2903,6 +2903,39 @@ h1 {
   gap: 6px;
   word-break: break-all;
 }
+.skillInlineCheck {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.skillPlanList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.skillPlanList li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+}
+.skillPlanList li:nth-child(odd) {
+  background: var(--panel-soft);
+}
+.skillPlanName {
+  font-weight: 600;
+  font-size: 13px;
+}
+.skillPlanList .skillFileSize {
+  margin-left: auto;
+}
 .skillLibrary {
   display: grid;
   gap: 16px;

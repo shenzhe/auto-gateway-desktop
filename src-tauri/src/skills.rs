@@ -1534,50 +1534,32 @@ fn extract_zip_safe(zip_path: &Path, dest: &Path) -> Result<(), String> {
 
 /// Find the skill root: a directory that directly contains SKILL.md, either the
 /// base itself or its single top-level subdirectory.
-fn locate_skill_root(base: &Path) -> Result<PathBuf, String> {
+/// Discover installable skills under a base directory: the base itself if it
+/// contains SKILL.md, otherwise every immediate subdirectory that contains one.
+/// This handles a collection of skills (e.g. a repo of many skills), not just a
+/// single skill folder.
+fn discover_skill_roots(base: &Path) -> Vec<PathBuf> {
     if base.join(SKILL_MANIFEST_FILE).is_file() {
-        return Ok(base.to_path_buf());
+        return vec![base.to_path_buf()];
     }
-    let mut subdirs: Vec<PathBuf> = Vec::new();
-    for entry in
-        fs::read_dir(base).map_err(|error| format!("read the skill package: {error}"))?
-    {
-        let entry = entry.map_err(|error| format!("read a package entry: {error}"))?;
-        if entry.path().is_dir() {
-            subdirs.push(entry.path());
-        }
-    }
-    if subdirs.len() == 1 && subdirs[0].join(SKILL_MANIFEST_FILE).is_file() {
-        return Ok(subdirs[0].clone());
-    }
-    Err(format!("could not find {SKILL_MANIFEST_FILE} in the skill package"))
-}
-
-/// Stage a source (local dir copy or safe ZIP extract) into `staging` and
-/// return the located skill root within it.
-fn stage_source(kind: &str, location: &str, staging: &Path) -> Result<PathBuf, String> {
-    fs::create_dir_all(staging)
-        .map_err(|error| format!("create the staging directory: {error}"))?;
-    let staged = staging.join("payload");
-    match kind {
-        "dir" => {
-            let source = Path::new(location);
-            reject_symlink(source)?;
-            if !source.is_dir() {
-                return Err("the source directory was not found".to_string());
+    let mut roots = Vec::new();
+    if let Ok(entries) = fs::read_dir(base) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
             }
-            copy_dir_all(source, &staged)?;
-        }
-        "zip" => {
-            let source = Path::new(location);
-            if !source.is_file() {
-                return Err("the archive file was not found".to_string());
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') {
+                continue;
             }
-            extract_zip_safe(source, &staged)?;
+            if path.join(SKILL_MANIFEST_FILE).is_file() {
+                roots.push(path);
+            }
         }
-        _ => return Err("unsupported install source".to_string()),
     }
-    locate_skill_root(&staged)
+    roots.sort();
+    roots
 }
 
 fn build_install_preview(skill_root: &Path, skills_dir: &Path) -> Result<InstallPreview, String> {
@@ -1788,9 +1770,9 @@ fn single_subdir(base: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// Stage a source into `staging` and return the located skill root. Handles
-/// local dir, local zip, and a public GitHub URL (downloaded via codeload).
-async fn stage_source_async(
+/// Prepare the base directory to discover skills in: the local dir itself (no
+/// copy), the extracted ZIP payload, or the extracted GitHub repo path.
+async fn prepare_base(
     app: &tauri::AppHandle,
     kind: &str,
     location: &str,
@@ -1798,84 +1780,170 @@ async fn stage_source_async(
 ) -> Result<PathBuf, String> {
     fs::create_dir_all(staging)
         .map_err(|error| format!("create the staging directory: {error}"))?;
-    if kind == "git" {
-        emit_skill_progress(app, "resolving", 0, None);
-        let (owner, repo, git_ref, subpath) = parse_github_url(location)?;
-        let archive = staging.join("repo.zip");
-        download_codeload_zip(app, &owner, &repo, &git_ref, &archive).await?;
-        emit_skill_progress(app, "extracting", 0, None);
-        let payload = staging.join("payload");
-        extract_zip_safe(&archive, &payload)?;
-        let repo_root = single_subdir(&payload)?;
-        let skill_dir = match &subpath {
-            Some(path) => repo_root.join(path),
-            None => repo_root,
-        };
-        return locate_skill_root(&skill_dir);
+    match kind {
+        "dir" => {
+            let source = Path::new(location);
+            reject_symlink(source)?;
+            if !source.is_dir() {
+                return Err("the source directory was not found".to_string());
+            }
+            Ok(source.to_path_buf())
+        }
+        "zip" => {
+            let source = Path::new(location);
+            if !source.is_file() {
+                return Err("the archive file was not found".to_string());
+            }
+            let payload = staging.join("payload");
+            extract_zip_safe(source, &payload)?;
+            Ok(payload)
+        }
+        "git" => {
+            emit_skill_progress(app, "resolving", 0, None);
+            let (owner, repo, git_ref, subpath) = parse_github_url(location)?;
+            let archive = staging.join("repo.zip");
+            download_codeload_zip(app, &owner, &repo, &git_ref, &archive).await?;
+            emit_skill_progress(app, "extracting", 0, None);
+            let payload = staging.join("payload");
+            extract_zip_safe(&archive, &payload)?;
+            let repo_root = single_subdir(&payload)?;
+            Ok(match &subpath {
+                Some(path) => repo_root.join(path),
+                None => repo_root,
+            })
+        }
+        _ => Err("unsupported install source".to_string()),
     }
-    stage_source(kind, location, staging)
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallSkip {
+    pub name: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallSummary {
+    pub installed: Vec<String>,
+    pub skipped: Vec<InstallSkip>,
+    pub failed: Vec<InstallSkip>,
+}
+
+/// Preview every installable skill found in the source (1 for a single skill,
+/// N for a collection directory / repo).
 #[tauri::command]
 pub async fn validate_skill_source(
     app: tauri::AppHandle,
     kind: String,
     location: String,
-) -> Result<InstallPreview, String> {
+) -> Result<Vec<InstallPreview>, String> {
     let skills_dir = default_skills_dir()?;
     let staging = std::env::temp_dir().join(format!("autogateway-skill-stage-{}", Uuid::new_v4()));
     let result = async {
-        let root = stage_source_async(&app, &kind, &location, &staging).await?;
-        build_install_preview(&root, &skills_dir)
+        let base = prepare_base(&app, &kind, &location, &staging).await?;
+        let roots = discover_skill_roots(&base);
+        if roots.is_empty() {
+            return Err(format!(
+                "could not find {SKILL_MANIFEST_FILE} in the selected source"
+            ));
+        }
+        let mut previews: Vec<InstallPreview> = roots
+            .iter()
+            .filter_map(|root| build_install_preview(root, &skills_dir).ok())
+            .collect();
+        if previews.is_empty() {
+            return Err("no valid skills were found in the selected source".to_string());
+        }
+        previews.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        Ok(previews)
     }
     .await;
     let _ = fs::remove_dir_all(&staging);
     result
 }
 
-async fn install_skill_inner(
+fn install_one(
     app: &tauri::AppHandle,
-    kind: &str,
-    location: &str,
-    replace: bool,
+    root: &Path,
+    target_name: &str,
     skills_dir: &Path,
     staging: &Path,
 ) -> Result<(), String> {
-    let root = stage_source_async(app, kind, location, staging).await?;
-    let preview = build_install_preview(&root, skills_dir)?;
-    let target = skills_dir.join(&preview.target_name);
-    fs::create_dir_all(skills_dir)
-        .map_err(|error| format!("create the skills directory: {error}"))?;
-    emit_skill_progress(app, "installing", 0, None);
+    let target = skills_dir.join(target_name);
+    let staged = staging.join(format!("install-{}", Uuid::new_v4()));
+    copy_dir_all(root, &staged)?;
     if target.exists() {
-        if !replace {
-            return Err("a skill with this name already exists".to_string());
-        }
-        let backup =
-            skills_backup_root(app)?.join(format!("{}-{}", preview.target_name, now_millis()));
+        let backup = skills_backup_root(app)?.join(format!("{target_name}-{}", now_millis()));
         move_dir(&target, &backup)?;
-        if let Err(error) = move_dir(&root, &target) {
+        if let Err(error) = move_dir(&staged, &target) {
             let _ = move_dir(&backup, &target);
             return Err(error);
         }
     } else {
-        move_dir(&root, &target)?;
+        move_dir(&staged, &target)?;
     }
-    emit_skill_progress(app, "complete", 0, None);
     Ok(())
 }
 
+/// Install skills from a source. `names` selects which discovered skills to
+/// install (empty = all). Existing skills are skipped unless `replace` is set
+/// (which backs up the existing copy first). Returns a per-skill summary.
 #[tauri::command]
 pub async fn install_skill(
     app: tauri::AppHandle,
     kind: String,
     location: String,
     replace: bool,
-) -> Result<(), String> {
+    names: Vec<String>,
+) -> Result<InstallSummary, String> {
     let skills_dir = default_skills_dir()?;
+    fs::create_dir_all(&skills_dir)
+        .map_err(|error| format!("create the skills directory: {error}"))?;
     let staging = std::env::temp_dir().join(format!("autogateway-skill-stage-{}", Uuid::new_v4()));
-    let outcome =
-        install_skill_inner(&app, &kind, &location, replace, &skills_dir, &staging).await;
+    let outcome = async {
+        let base = prepare_base(&app, &kind, &location, &staging).await?;
+        let roots = discover_skill_roots(&base);
+        if roots.is_empty() {
+            return Err(format!(
+                "could not find {SKILL_MANIFEST_FILE} in the selected source"
+            ));
+        }
+        emit_skill_progress(&app, "installing", 0, None);
+        let select_all = names.is_empty();
+        let mut summary = InstallSummary {
+            installed: Vec::new(),
+            skipped: Vec::new(),
+            failed: Vec::new(),
+        };
+        for root in &roots {
+            let Ok(preview) = build_install_preview(root, &skills_dir) else {
+                continue;
+            };
+            if !select_all && !names.contains(&preview.target_name) {
+                continue;
+            }
+            let target = skills_dir.join(&preview.target_name);
+            if target.exists() && !replace {
+                summary.skipped.push(InstallSkip {
+                    name: preview.target_name.clone(),
+                    reason: "exists".to_string(),
+                });
+                continue;
+            }
+            match install_one(&app, root, &preview.target_name, &skills_dir, &staging) {
+                Ok(()) => summary.installed.push(preview.target_name.clone()),
+                Err(error) => summary.failed.push(InstallSkip {
+                    name: preview.target_name.clone(),
+                    reason: error,
+                }),
+            }
+        }
+        emit_skill_progress(&app, "complete", 0, None);
+        Ok(summary)
+    }
+    .await;
     let _ = fs::remove_dir_all(&staging);
     outcome
 }
@@ -2391,8 +2459,9 @@ mod tests {
         );
         let dest = root.join("out");
         extract_zip_safe(&zip_path, &dest).expect("extract");
-        let skill_root = locate_skill_root(&dest).expect("locate");
-        assert!(skill_root.join(SKILL_MANIFEST_FILE).is_file());
+        let roots = discover_skill_roots(&dest);
+        assert_eq!(roots.len(), 1);
+        assert!(roots[0].join(SKILL_MANIFEST_FILE).is_file());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -2460,6 +2529,27 @@ mod tests {
         let (files, _s, _t) = walk_skill_files(&root);
         let warnings = scan_export_warnings(&root, &files);
         assert!(warnings.iter().any(|w| w.code == "POSSIBLE_SECRET"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn discover_skill_roots_handles_single_and_collection() {
+        let root = temp_root("collection");
+        for name in ["alpha", "beta"] {
+            let dir = root.join(name);
+            fs::create_dir_all(&dir).expect("skill dir");
+            fs::write(
+                dir.join(SKILL_MANIFEST_FILE),
+                format!("---\nname: {name}\ndescription: d.\n---\n"),
+            )
+            .expect("manifest");
+        }
+        fs::create_dir_all(root.join(".hidden")).expect("hidden");
+
+        // A collection directory yields one root per contained skill.
+        assert_eq!(discover_skill_roots(&root).len(), 2);
+        // A single-skill directory yields itself.
+        assert_eq!(discover_skill_roots(&root.join("alpha")).len(), 1);
         let _ = fs::remove_dir_all(&root);
     }
 

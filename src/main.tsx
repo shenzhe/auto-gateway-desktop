@@ -1,4 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -95,6 +96,7 @@ import {
   type SkillInstallPreview,
   type SkillInstallSourceKind,
   type SkillInstallProgress,
+  type SkillInstallSummary,
   type SkillExportResult,
 } from "./desktop";
 import {
@@ -1305,8 +1307,15 @@ function App() {
   const [installKind, setInstallKind] =
     useState<SkillInstallSourceKind>("dir");
   const [installLocation, setInstallLocation] = useState("");
-  const [installPreview, setInstallPreview] =
-    useState<SkillInstallPreview | null>(null);
+  const [installPlan, setInstallPlan] = useState<SkillInstallPreview[] | null>(
+    null,
+  );
+  const [selectedInstallNames, setSelectedInstallNames] = useState<Set<string>>(
+    new Set(),
+  );
+  const [installReplace, setInstallReplace] = useState(false);
+  const [installSummary, setInstallSummary] =
+    useState<SkillInstallSummary | null>(null);
   const [installBusy, setInstallBusy] = useState(false);
   const [installError, setInstallError] = useState("");
   const [skillInstallProgress, setSkillInstallProgress] =
@@ -3632,26 +3641,46 @@ function App() {
     );
   }
 
+  function resetInstallResults() {
+    setInstallPlan(null);
+    setSelectedInstallNames(new Set());
+    setInstallReplace(false);
+    setInstallSummary(null);
+    setSkillInstallProgress(null);
+    setInstallError("");
+  }
+
   function openInstallDialog() {
     setInstallKind("dir");
     setInstallLocation("");
-    setInstallPreview(null);
-    setInstallError("");
-    setSkillInstallProgress(null);
+    resetInstallResults();
     setShowInstallDialog(true);
+  }
+
+  async function pickInstallSource() {
+    try {
+      const selected = await openFileDialog(
+        installKind === "dir"
+          ? { directory: true }
+          : { filters: [{ name: "Zip", extensions: ["zip"] }] },
+      );
+      if (typeof selected === "string") {
+        setInstallLocation(selected);
+        resetInstallResults();
+      }
+    } catch (error) {
+      setInstallError(String(error));
+    }
   }
 
   async function previewInstall() {
     if (!installLocation.trim()) return;
     setInstallBusy(true);
-    setInstallError("");
-    setInstallPreview(null);
+    resetInstallResults();
     try {
-      const preview = await validateSkillSource(
-        installKind,
-        installLocation.trim(),
-      );
-      setInstallPreview(preview);
+      const plan = await validateSkillSource(installKind, installLocation.trim());
+      setInstallPlan(plan);
+      setSelectedInstallNames(new Set(plan.map((item) => item.targetName)));
     } catch (error) {
       setInstallError(String(error));
     } finally {
@@ -3660,19 +3689,42 @@ function App() {
   }
 
   async function doInstall() {
-    if (!installPreview) return;
+    if (!installPlan || installPlan.length === 0) return;
+    const single = installPlan.length === 1;
+    const names = single
+      ? []
+      : installPlan
+          .map((item) => item.targetName)
+          .filter((name) => selectedInstallNames.has(name));
+    if (!single && names.length === 0) return;
+    const replace = single ? installPlan[0].conflict : installReplace;
     setInstallBusy(true);
     setInstallError("");
     setSkillInstallProgress(null);
     trackSkillEvent("skill_install_started", { kind: installKind });
     try {
-      await installSkill(installKind, installLocation.trim(), installPreview.conflict);
-      setShowInstallDialog(false);
+      const summary = await installSkill(
+        installKind,
+        installLocation.trim(),
+        replace,
+        names,
+      );
       setSkillsRefreshNonce((nonce) => nonce + 1);
       trackSkillEvent("skill_install_completed", {
         kind: installKind,
         result: "ok",
+        count: summary.installed.length,
       });
+      if (
+        single &&
+        summary.installed.length === 1 &&
+        summary.skipped.length === 0 &&
+        summary.failed.length === 0
+      ) {
+        setShowInstallDialog(false);
+      } else {
+        setInstallSummary(summary);
+      }
     } catch (error) {
       setInstallError(String(error));
       trackSkillEvent("skill_install_failed", {
@@ -3686,6 +3738,10 @@ function App() {
 
   function renderInstallDialog() {
     if (!showInstallDialog) return null;
+    const singlePreview =
+      installPlan && installPlan.length === 1 ? installPlan[0] : null;
+    const collection =
+      installPlan && installPlan.length > 1 ? installPlan : null;
     return (
       <div
         className="skillDrawerOverlay skillModalOverlay"
@@ -3715,7 +3771,7 @@ function App() {
                 value={installKind}
                 onChange={(event) => {
                   setInstallKind(event.target.value as SkillInstallSourceKind);
-                  setInstallPreview(null);
+                  resetInstallResults();
                 }}
               >
                 <option value="dir">{tr("skillInstallFromDir")}</option>
@@ -3735,9 +3791,17 @@ function App() {
                 }
                 onChange={(event) => {
                   setInstallLocation(event.target.value);
-                  setInstallPreview(null);
+                  resetInstallResults();
                 }}
               />
+              {installKind !== "git" ? (
+                <button
+                  className="secondaryButton"
+                  onClick={() => void pickInstallSource()}
+                >
+                  {tr("skillInstallBrowse")}
+                </button>
+              ) : null}
               <button
                 className="secondaryButton"
                 disabled={!installLocation.trim() || installBusy}
@@ -3778,44 +3842,73 @@ function App() {
                 </div>
               </div>
             ) : null}
-            {installPreview ? (
+            {installSummary ? (
+              <>
+                <section className="notice">
+                  <strong>
+                    {tr("skillInstallSummary", {
+                      installed: installSummary.installed.length,
+                      skipped: installSummary.skipped.length,
+                      failed: installSummary.failed.length,
+                    })}
+                  </strong>
+                  {installSummary.failed.length > 0 ? (
+                    <ul className="skillScriptList">
+                      {installSummary.failed.map((item) => (
+                        <li key={item.name}>
+                          {item.name}: {item.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </section>
+                <div className="skillDrawerActions">
+                  <button
+                    className="primaryButton"
+                    onClick={() => setShowInstallDialog(false)}
+                  >
+                    {tr("skillInstallClose")}
+                  </button>
+                </div>
+              </>
+            ) : singlePreview ? (
               <>
                 <div className="skillDrawerSection">
                   <div className="skillCardHeader">
-                    <strong>{installPreview.name}</strong>
-                    {installPreview.version ? (
+                    <strong>{singlePreview.name}</strong>
+                    {singlePreview.version ? (
                       <span className="skillCardVersion">
                         {tr("skillVersionLabel", {
-                          version: installPreview.version,
+                          version: singlePreview.version,
                         })}
                       </span>
                     ) : null}
                   </div>
                   <p className="skillCardDescription">
-                    {installPreview.description}
+                    {singlePreview.description}
                   </p>
                   <dl className="skillDetailGrid">
                     <div className="skillDetailWide">
                       <dt>{tr("skillInstallTarget")}</dt>
                       <dd className="skillInstallPath">
-                        {installPreview.targetPath}
+                        {singlePreview.targetPath}
                       </dd>
                     </div>
                     <div>
                       <dt>{tr("skillDetailFileCount")}</dt>
-                      <dd>{installPreview.fileCount}</dd>
+                      <dd>{singlePreview.fileCount}</dd>
                     </div>
                     <div>
                       <dt>{tr("skillDetailSize")}</dt>
-                      <dd>{formatDataSize(installPreview.totalSizeBytes)}</dd>
+                      <dd>{formatDataSize(singlePreview.totalSizeBytes)}</dd>
                     </div>
                   </dl>
                 </div>
-                {installPreview.warnings.length > 0 ? (
+                {singlePreview.warnings.length > 0 ? (
                   <section className="notice warning">
                     <strong>{tr("skillInstallRisks")}</strong>
                     <ul className="skillScriptList">
-                      {installPreview.warnings.map((warning, index) => (
+                      {singlePreview.warnings.map((warning, index) => (
                         <li key={`${warning.code}-${index}`}>
                           {warning.path
                             ? `${warning.path}: ${warning.message}`
@@ -3825,7 +3918,7 @@ function App() {
                     </ul>
                   </section>
                 ) : null}
-                {installPreview.conflict ? (
+                {singlePreview.conflict ? (
                   <section className="notice warning">
                     <strong>{tr("skillInstallConflict")}</strong>
                   </section>
@@ -3836,9 +3929,90 @@ function App() {
                     disabled={installBusy}
                     onClick={() => void doInstall()}
                   >
-                    {installPreview.conflict
+                    {singlePreview.conflict
                       ? tr("skillInstallReplace")
                       : tr("skillInstallConfirm")}
+                  </button>
+                  <button
+                    className="linkButton"
+                    onClick={() => setShowInstallDialog(false)}
+                  >
+                    {tr("skillCategoryCancel")}
+                  </button>
+                </div>
+              </>
+            ) : collection ? (
+              <>
+                <div className="skillsToolbar">
+                  <span className="skillsCount">
+                    {tr("skillInstallFound", { count: collection.length })}
+                  </span>
+                  <label className="skillInlineCheck">
+                    <input
+                      type="checkbox"
+                      checked={selectedInstallNames.size === collection.length}
+                      onChange={(event) =>
+                        setSelectedInstallNames(
+                          event.target.checked
+                            ? new Set(collection.map((item) => item.targetName))
+                            : new Set(),
+                        )
+                      }
+                    />
+                    {tr("skillInstallSelectAll")}
+                  </label>
+                  <label className="skillInlineCheck">
+                    <input
+                      type="checkbox"
+                      checked={installReplace}
+                      onChange={(event) =>
+                        setInstallReplace(event.target.checked)
+                      }
+                    />
+                    {tr("skillInstallReplaceExisting")}
+                  </label>
+                </div>
+                <ul className="skillPlanList">
+                  {collection.map((item) => (
+                    <li key={item.targetName}>
+                      <label className="skillInlineCheck">
+                        <input
+                          type="checkbox"
+                          checked={selectedInstallNames.has(item.targetName)}
+                          onChange={(event) =>
+                            setSelectedInstallNames((previous) => {
+                              const next = new Set(previous);
+                              if (event.target.checked) {
+                                next.add(item.targetName);
+                              } else {
+                                next.delete(item.targetName);
+                              }
+                              return next;
+                            })
+                          }
+                        />
+                        <span className="skillPlanName">{item.name}</span>
+                      </label>
+                      <span className="skillFileSize">
+                        {formatDataSize(item.totalSizeBytes)}
+                      </span>
+                      {item.conflict ? (
+                        <span className="skillTag pending">
+                          {tr("skillInstallExists")}
+                        </span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+                <div className="skillDrawerActions">
+                  <button
+                    className="primaryButton"
+                    disabled={installBusy || selectedInstallNames.size === 0}
+                    onClick={() => void doInstall()}
+                  >
+                    {tr("skillInstallSelected", {
+                      count: selectedInstallNames.size,
+                    })}
                   </button>
                   <button
                     className="linkButton"
