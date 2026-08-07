@@ -317,7 +317,44 @@ jobs:
         shell: pwsh
         run: |
           npm ci
-          npm run tauri build -- --target ${{ matrix.target }} --bundles nsis
+          $target = '${{ matrix.target }}'
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "src-tauri/target/$target/release"
+
+          # Build the application first. Running Artifact Signing directly keeps
+          # the signing output visible in the workflow when Azure rejects it.
+          npm run tauri build -- --target $target --no-bundle --no-sign
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tauri failed to build the Windows application."
+          }
+
+          $app = Get-ChildItem -LiteralPath $releaseDir -File -Filter "*.exe" |
+            Where-Object { $_.Name -eq "autogateway-desktop.exe" } |
+            Select-Object -First 1
+          if ($null -eq $app) {
+            throw "The Windows application was not produced."
+          }
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File ./scripts/sign-windows-artifact.ps1 -FilePath $app.FullName
+          if ($LASTEXITCODE -ne 0) {
+            throw "Artifact Signing failed for the Windows application."
+          }
+
+          # Bundle the already-signed executable without allowing Tauri's custom
+          # signing hook to re-run it, then sign the generated installer itself.
+          npm run tauri bundle -- --target $target --bundles nsis --no-sign
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tauri failed to bundle the Windows installer."
+          }
+          $installer = Get-ChildItem -LiteralPath (Join-Path $releaseDir "bundle/nsis") -File -Filter "*-setup.exe" |
+            Select-Object -First 1
+          if ($null -eq $installer) {
+            throw "The Windows installer was not produced."
+          }
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File ./scripts/sign-windows-artifact.ps1 -FilePath $installer.FullName
+          if ($LASTEXITCODE -ne 0) {
+            throw "Artifact Signing failed for the Windows installer."
+          }
 
       - name: Verify Windows signatures
         shell: pwsh
