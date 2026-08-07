@@ -43,11 +43,24 @@ if (-not $dlib) {
 }
 
 $metadataPath = Join-Path $env:RUNNER_TEMP ("artifact-signing-{0}.json" -f $env:ARTIFACT_SIGNING_CORRELATION_ID)
+# azure/login authenticates the Azure CLI. Skip every other credential provider
+# so the signing client does not wait for unavailable runner identities.
 [ordered]@{
     Endpoint = $env:AZURE_ARTIFACT_SIGNING_ENDPOINT
     CodeSigningAccountName = $env:AZURE_ARTIFACT_SIGNING_ACCOUNT
     CertificateProfileName = $env:AZURE_ARTIFACT_SIGNING_PROFILE
     CorrelationId = $env:ARTIFACT_SIGNING_CORRELATION_ID
+    ExcludeCredentials = @(
+        "EnvironmentCredential"
+        "WorkloadIdentityCredential"
+        "ManagedIdentityCredential"
+        "SharedTokenCacheCredential"
+        "VisualStudioCredential"
+        "VisualStudioCodeCredential"
+        "AzurePowerShellCredential"
+        "AzureDeveloperCliCredential"
+        "InteractiveBrowserCredential"
+    )
 } | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
 
 "AZURE_ARTIFACT_SIGNING_DLIB_PATH=$($dlib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

@@ -100,10 +100,23 @@ function Resolve-MetadataFile {
         throw "Set AZURE_ARTIFACT_SIGNING_METADATA_FILE or set AZURE_ARTIFACT_SIGNING_ENDPOINT, AZURE_ARTIFACT_SIGNING_ACCOUNT, and AZURE_ARTIFACT_SIGNING_PROFILE."
     }
 
+    # Local and CI signing use an Azure CLI session. Skip every other credential
+    # provider so the signing client fails fast instead of probing unavailable identities.
     $metadata = [ordered]@{
         Endpoint = $endpoint
         CodeSigningAccountName = $account
         CertificateProfileName = $profile
+        ExcludeCredentials = @(
+            "EnvironmentCredential"
+            "WorkloadIdentityCredential"
+            "ManagedIdentityCredential"
+            "SharedTokenCacheCredential"
+            "VisualStudioCredential"
+            "VisualStudioCodeCredential"
+            "AzurePowerShellCredential"
+            "AzureDeveloperCliCredential"
+            "InteractiveBrowserCredential"
+        )
     }
     if ($env:AZURE_ARTIFACT_SIGNING_CORRELATION_ID) {
         $metadata.CorrelationId = $env:AZURE_ARTIFACT_SIGNING_CORRELATION_ID

@@ -250,14 +250,10 @@ jobs:
           path: ${{ runner.temp }}/release/*_universal.dmg
           if-no-files-found: error
 
-  windows:
-    name: Build Windows (${{ matrix.label }})
+  windows-build:
+    name: Cross-build and prepare Windows bundle on Ubuntu (${{ matrix.label }})
     needs: prepare
-    runs-on: windows-2022
-    environment: release
-    permissions:
-      contents: read
-      id-token: write
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -269,16 +265,9 @@ jobs:
             suffix: arm64
             label: ARM64
     env:
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-      AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-      AZURE_ARTIFACT_SIGNING_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
-      ARTIFACT_SIGNING_CORRELATION_ID: desktop-${{ github.run_id }}-${{ matrix.suffix }}
-      AUTOGATEWAY_ROOT: ${{ github.workspace }}
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      XWIN_CACHE_DIR: ${{ github.workspace }}/.xwin-cache
     steps:
       - uses: actions/checkout@v4
 
@@ -295,7 +284,79 @@ jobs:
       - name: Cache Rust dependencies and build output
         uses: Swatinem/rust-cache@v2
         with:
+          key: windows-cross-${{ matrix.suffix }}
           workspaces: "src-tauri -> target"
+
+      - name: Cache cargo-xwin and Windows SDK files
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-xwin
+            ${{ env.XWIN_CACHE_DIR }}
+          key: cargo-xwin-${{ runner.os }}-${{ matrix.suffix }}-v1
+
+      - name: Install Windows cross-compilation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes clang lld llvm nsis
+          if ! command -v cargo-xwin >/dev/null 2>&1; then
+            cargo install --locked cargo-xwin --version 0.23.0
+          fi
+          cargo xwin --version
+
+      - name: Build unsigned Windows bundle context
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          target='${{ matrix.target }}'
+          release_dir="src-tauri/target/$target/release"
+          app="$release_dir/autogateway-desktop.exe"
+          npm run tauri build -- \
+            --runner cargo-xwin \
+            --target "$target" \
+            --bundles nsis \
+            --no-sign \
+            --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          test -f "$app"
+          test -d "$release_dir/nsis"
+          mkdir -p "$RUNNER_TEMP/bundle-context"
+          cp "$app" "$RUNNER_TEMP/bundle-context/autogateway-desktop.exe"
+          tar -C "$release_dir" -czf "$RUNNER_TEMP/bundle-context/nsis-context.tar.gz" nsis
+
+      - name: Publish unsigned Windows bundle context
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-windows-unsigned-context-${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/bundle-context/*
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-sign-app:
+    name: Sign Windows application (${{ matrix.label }})
+    needs: [prepare, windows-build]
+    runs-on: windows-2022
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suffix: x64
+            label: x64
+          - suffix: arm64
+            label: ARM64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-windows-unsigned-context-${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/signed-context
 
       - name: Install .NET 8 runtime
         uses: actions/setup-dotnet@v4
@@ -309,108 +370,214 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Prepare Artifact Signing client
-        shell: pwsh
-        run: ./scripts/prepare-artifact-signing.ps1
+      - name: Sign Windows application with Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ runner.temp }}\signed-context\autogateway-desktop.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+          timeout: 300
+          correlation-id: desktop-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.suffix }}-app
 
-      - name: Build Windows installer
+      - name: Verify Windows application signature
         shell: pwsh
         run: |
+          ./scripts/verify-windows-signatures.ps1 `
+            -Files "$env:RUNNER_TEMP/signed-context/autogateway-desktop.exe"
+
+      - name: Publish signed Windows bundle context
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-windows-signed-context-${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/signed-context/*
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-bundle:
+    name: Bundle Windows installer on Ubuntu (${{ matrix.label }})
+    needs: [prepare, windows-sign-app]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            nsis_arch: x64
+            suffix: x64
+            label: x64
+          - target: aarch64-pc-windows-msvc
+            nsis_arch: arm64
+            suffix: arm64
+            label: ARM64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install NSIS
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes nsis
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-windows-signed-context-${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/signed-context
+
+      - name: Bundle unsigned Windows installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.prepare.outputs.version }}'
+          target='${{ matrix.target }}'
+          suffix='${{ matrix.suffix }}'
+          release_dir="src-tauri/target/$target/release"
+          context_dir="$RUNNER_TEMP/signed-context"
+          nsis_dir="$release_dir/nsis/${{ matrix.nsis_arch }}"
+          mkdir -p "$release_dir"
+          cp "$context_dir/autogateway-desktop.exe" "$release_dir/autogateway-desktop.exe"
+          tar -C "$release_dir" -xzf "$context_dir/nsis-context.tar.gz"
+          test -f "$nsis_dir/installer.nsi"
+          (
+            cd "$nsis_dir"
+            makensis installer.nsi
+          )
+          installer="$nsis_dir/nsis-output.exe"
+          test -f "$installer"
+          mkdir -p "$RUNNER_TEMP/unsigned-installer"
+          cp "$installer" "$RUNNER_TEMP/unsigned-installer/AUTO Gateway Desktop_${version}_${suffix}-setup.exe"
+
+      - name: Publish unsigned Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-windows-unsigned-installer-${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/unsigned-installer/*-setup.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-sign-installer:
+    name: Sign Windows installer (${{ matrix.label }})
+    needs: [prepare, windows-bundle]
+    runs-on: windows-2022
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suffix: x64
+            label: x64
+          - suffix: arm64
+            label: ARM64
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-windows-unsigned-installer-${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/release
+
+      - name: Install .NET 8 runtime
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Sign in to Azure with OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows installer with Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ runner.temp }}\release\AUTO Gateway Desktop_${{ needs.prepare.outputs.version }}_${{ matrix.suffix }}-setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+          timeout: 300
+          correlation-id: desktop-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.suffix }}-installer
+
+      - name: Verify installer and create updater signature
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installer = Join-Path $env:RUNNER_TEMP "release/AUTO Gateway Desktop_${{ needs.prepare.outputs.version }}_${{ matrix.suffix }}-setup.exe"
+          ./scripts/verify-windows-signatures.ps1 -Files $installer
+
           npm ci
-          $target = '${{ matrix.target }}'
-          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "src-tauri/target/$target/release"
-
-          # Build the application first. Running Artifact Signing directly keeps
-          # the signing output visible in the workflow when Azure rejects it.
-          npm run tauri build -- --target $target --no-bundle --no-sign
           if ($LASTEXITCODE -ne 0) {
-            throw "Tauri failed to build the Windows application."
+            throw "npm failed to install the Tauri signing CLI."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY) -or
+              [string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD)) {
+            throw "The Tauri updater signing key and password are required."
+          }
+          $keyPath = Join-Path $env:RUNNER_TEMP "tauri-updater.key"
+          $keyPassword = $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+          [System.IO.File]::WriteAllText($keyPath, $env:TAURI_SIGNING_PRIVATE_KEY, $utf8WithoutBom)
+          Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY
+          Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+          $signaturePath = "${installer}.sig"
+          & "$env:GITHUB_WORKSPACE/node_modules/.bin/tauri.cmd" signer sign `
+            --private-key-path $keyPath `
+            --password $keyPassword `
+            $installer
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $signaturePath -PathType Leaf)) {
+            throw "The updater signature was not produced."
           }
 
-          $app = Get-ChildItem -LiteralPath $releaseDir -File -Filter "*.exe" |
-            Where-Object { $_.Name -eq "autogateway-desktop.exe" } |
-            Select-Object -First 1
-          if ($null -eq $app) {
-            throw "The Windows application was not produced."
-          }
-          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-            -File ./scripts/sign-windows-artifact.ps1 -FilePath $app.FullName
-          if ($LASTEXITCODE -ne 0) {
-            throw "Artifact Signing failed for the Windows application."
-          }
-
-          # Bundle the already-signed executable without allowing Tauri's custom
-          # signing hook to re-run it, then sign the generated installer itself.
-          npm run tauri bundle -- --target $target --bundles nsis --no-sign
-          if ($LASTEXITCODE -ne 0) {
-            throw "Tauri failed to bundle the Windows installer."
-          }
-          $installer = Get-ChildItem -LiteralPath (Join-Path $releaseDir "bundle/nsis") -File -Filter "*-setup.exe" |
-            Select-Object -First 1
-          if ($null -eq $installer) {
-            throw "The Windows installer was not produced."
-          }
-          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-            -File ./scripts/sign-windows-artifact.ps1 -FilePath $installer.FullName
-          if ($LASTEXITCODE -ne 0) {
-            throw "Artifact Signing failed for the Windows installer."
-          }
-
-      - name: Verify Windows signatures
-        shell: pwsh
-        run: |
-          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "src-tauri/target/${{ matrix.target }}/release"
-          $app = Get-ChildItem -LiteralPath $releaseDir -File -Filter "*.exe" |
-            Where-Object { $_.Name -eq "autogateway-desktop.exe" } |
-            Select-Object -First 1
-          if ($null -eq $app) {
-            $app = Get-ChildItem -LiteralPath $releaseDir -File -Filter "*.exe" | Select-Object -First 1
-          }
-          $installer = Get-ChildItem -LiteralPath (Join-Path $releaseDir "bundle/nsis") -File -Filter "*-setup.exe" |
-            Select-Object -First 1
-          if ($null -eq $app -or $null -eq $installer) {
-            throw "The Windows application or NSIS installer was not produced."
-          }
-          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-            -File ./scripts/verify-windows-signatures.ps1 `
-            -Files $app.FullName, $installer.FullName
-
-      - name: Collect Windows release files
-        shell: pwsh
-        run: |
-          $version = '${{ needs.prepare.outputs.version }}'
-          $source = Get-ChildItem -Path src-tauri/target/${{ matrix.target }}/release/bundle/nsis -Filter '*-setup.exe' | Select-Object -First 1
-          if ($null -eq $source) { throw 'The Windows NSIS installer was not produced.' }
-          $releaseDir = Join-Path $env:RUNNER_TEMP 'release'
-          New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
-          $target = Join-Path $releaseDir "AUTO Gateway Desktop_$version`_${{ matrix.suffix }}-setup.exe"
-          Copy-Item $source.FullName $target
-          Copy-Item "$($source.FullName).sig" "$target.sig"
-
-      - name: Publish Windows build artifact
+      - name: Publish signed Windows installer
         uses: actions/upload-artifact@v4
         with:
           name: desktop-windows-${{ needs.prepare.outputs.version }}-${{ matrix.suffix }}
           path: ${{ runner.temp }}/release/*
           if-no-files-found: error
 
-  windows-unified-installer:
-    name: Build Windows unified installer
-    needs: [prepare, windows]
-    runs-on: windows-2022
-    environment: release
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
-      AZURE_ARTIFACT_SIGNING_ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
-      AZURE_ARTIFACT_SIGNING_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
-      ARTIFACT_SIGNING_CORRELATION_ID: desktop-${{ github.run_id }}-unified
-      AUTOGATEWAY_ROOT: ${{ github.workspace }}
+  windows-unified-bundle:
+    name: Bundle Windows unified installer on Ubuntu
+    needs: [prepare, windows-sign-installer]
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -424,6 +591,60 @@ jobs:
           name: desktop-windows-${{ needs.prepare.outputs.version }}-arm64
           path: ${{ runner.temp }}/windows-artifacts/arm64
 
+      - name: Install NSIS
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes nsis
+
+      - name: Bundle architecture-selecting installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          version='${{ needs.prepare.outputs.version }}'
+          artifact_dir="$RUNNER_TEMP/windows-artifacts"
+          payload_dir="$RUNNER_TEMP/unified-payload"
+          release_dir="$RUNNER_TEMP/release"
+          x64_source="$artifact_dir/x64/AUTO Gateway Desktop_${version}_x64-setup.exe"
+          arm64_source="$artifact_dir/arm64/AUTO Gateway Desktop_${version}_arm64-setup.exe"
+          test -f "$x64_source"
+          test -f "$arm64_source"
+          mkdir -p "$payload_dir" "$release_dir"
+          cp "$x64_source" "$payload_dir/AUTO-Gateway-Desktop-x64-setup.exe"
+          cp "$arm64_source" "$payload_dir/AUTO-Gateway-Desktop-arm64-setup.exe"
+          output="$release_dir/AUTO Gateway Desktop_${version}_setup.exe"
+          makensis \
+            "-DPAYLOAD_DIR=$payload_dir" \
+            "-DOUTFILE=$output" \
+            "-DAPP_VERSION=$version" \
+            scripts/windows-unified-installer.nsi
+          test -f "$output"
+
+      - name: Publish unsigned unified Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-windows-unsigned-unified-${{ needs.prepare.outputs.version }}
+          path: ${{ runner.temp }}/release/*_setup.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-unified-sign:
+    name: Sign Windows unified installer
+    needs: [prepare, windows-unified-bundle]
+    runs-on: windows-2022
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-windows-unsigned-unified-${{ needs.prepare.outputs.version }}
+          path: ${{ runner.temp }}/release
+
       - name: Install .NET 8 runtime
         uses: actions/setup-dotnet@v4
         with:
@@ -436,50 +657,34 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Prepare Artifact Signing client
-        shell: pwsh
-        run: ./scripts/prepare-artifact-signing.ps1
+      - name: Sign unified installer with Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_PROFILE }}
+          files: ${{ runner.temp }}\release\AUTO Gateway Desktop_${{ needs.prepare.outputs.version }}_setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+          timeout: 300
+          correlation-id: desktop-${{ github.run_id }}-${{ github.run_attempt }}-unified
 
-      - name: Build and sign architecture-selecting installer
+      - name: Verify unified installer signature
         shell: pwsh
         run: |
-          version='${{ needs.prepare.outputs.version }}'
-          $artifactDir = Join-Path $env:RUNNER_TEMP 'windows-artifacts'
-          $payloadDir = Join-Path $env:RUNNER_TEMP 'unified-payload'
-          $releaseDir = Join-Path $env:RUNNER_TEMP 'release'
-          $x64Source = Join-Path $artifactDir "x64/AUTO Gateway Desktop_${version}_x64-setup.exe"
-          $arm64Source = Join-Path $artifactDir "arm64/AUTO Gateway Desktop_${version}_arm64-setup.exe"
-          if (-not (Test-Path -LiteralPath $x64Source -PathType Leaf) -or -not (Test-Path -LiteralPath $arm64Source -PathType Leaf)) {
-            throw 'Both native Windows installers are required for the unified installer.'
-          }
-          New-Item -ItemType Directory -Force -Path $payloadDir, $releaseDir | Out-Null
-          Copy-Item -LiteralPath $x64Source -Destination (Join-Path $payloadDir 'AUTO-Gateway-Desktop-x64-setup.exe')
-          Copy-Item -LiteralPath $arm64Source -Destination (Join-Path $payloadDir 'AUTO-Gateway-Desktop-arm64-setup.exe')
-          $makensisCommand = Get-Command makensis -ErrorAction SilentlyContinue
-          $makensisPath = if ($makensisCommand) { $makensisCommand.Source } else { $null }
-          if (-not $makensisPath) {
-            choco install nsis --no-progress --yes
-            $makensisCommand = Get-Command makensis -ErrorAction SilentlyContinue
-            $makensisPath = if ($makensisCommand) { $makensisCommand.Source } else { $null }
-          }
-          if (-not $makensisPath) {
-            $fallbackMakensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
-            if (Test-Path -LiteralPath $fallbackMakensis -PathType Leaf) {
-              $makensisPath = $fallbackMakensis
-            }
-          }
-          if (-not $makensisPath) {
-            throw 'NSIS makensis.exe was not found.'
-          }
-          $output = Join-Path $releaseDir "AUTO Gateway Desktop_${version}_setup.exe"
-          & $makensisPath "-DPAYLOAD_DIR=$payloadDir" "-DOUTFILE=$output" "-DAPP_VERSION=$version" 'scripts/windows-unified-installer.nsi'
-          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $output -PathType Leaf)) {
-            throw 'The unified Windows installer was not produced.'
-          }
-          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-            -File ./scripts/sign-windows-artifact.ps1 -FilePath $output
-          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-            -File ./scripts/verify-windows-signatures.ps1 -Files $output
+          ./scripts/verify-windows-signatures.ps1 `
+            -Files "$env:RUNNER_TEMP/release/AUTO Gateway Desktop_${{ needs.prepare.outputs.version }}_setup.exe"
 
       - name: Publish unified Windows installer artifact
         uses: actions/upload-artifact@v4
@@ -490,7 +695,7 @@ jobs:
 
   publish-r2:
     name: Publish artifacts to R2
-    needs: [prepare, macos, macos-universal, windows, windows-unified-installer]
+    needs: [prepare, macos, macos-universal, windows-sign-installer, windows-unified-sign]
     runs-on: ubuntu-24.04
     env:
       VERSION: ${{ needs.prepare.outputs.version }}
