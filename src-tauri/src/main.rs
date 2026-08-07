@@ -4,6 +4,7 @@ mod codex_app;
 mod codex_config;
 mod desktop_auth;
 mod http_client;
+mod skills;
 
 use codex_app::{
     install as install_codex_app, is_installed_app_running, local_status as local_codex_app_status,
@@ -20,6 +21,7 @@ use desktop_auth::{
     save_desktop_api_key, save_desktop_session, DesktopAccountSummary, DesktopBootstrapKey,
     DesktopNotificationList, DesktopSession, StoredDesktopState,
 };
+use skills::scan_skills;
 use futures_util::StreamExt;
 use std::{
     fs::{self, File},
@@ -710,6 +712,7 @@ fn main() {
             open_notification_window,
             open_notification_browser,
             download_and_open_desktop_installer,
+            scan_skills,
             open_devtools
         ])
         .build(tauri::generate_context!())

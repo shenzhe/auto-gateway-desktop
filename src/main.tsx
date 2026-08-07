@@ -22,6 +22,7 @@ import {
   HouseIcon,
   ChatCircleTextIcon,
   MoonIcon,
+  PuzzlePieceIcon,
   QuestionIcon,
   SignOutIcon,
   SunIcon,
@@ -57,6 +58,7 @@ import {
   refreshDesktopState,
   restoreDesktopState,
   restoreLatestCodexBackups,
+  scanSkills,
   signOutDesktop,
   showMainWindow,
   updateTrayStatus,
@@ -67,6 +69,8 @@ import {
   type DesktopNotification,
   type DesktopNotificationList,
   type DesktopSession,
+  type SkillRecord,
+  type SkillScanResult,
 } from "./desktop";
 import {
   readLocalePreference,
@@ -1212,6 +1216,14 @@ function App() {
     useState<CodexOpenPhase>("closed");
   const [selectedStep, setSelectedStep] = useState<WizardStep>(1);
   const [showSettings, setShowSettings] = useState(false);
+  const [activeView, setActiveView] = useState<"home" | "skills">("home");
+  const [skillsTab, setSkillsTab] = useState<
+    "installed" | "library" | "distribution"
+  >("installed");
+  const [skillScan, setSkillScan] = useState<SkillScanResult | null>(null);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsError, setSkillsError] = useState("");
+  const [skillsRefreshNonce, setSkillsRefreshNonce] = useState(0);
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
   const [localePreference, setLocalePreference] = useState<LocalePreference>(
     () => readLocalePreference(),
@@ -1224,6 +1236,26 @@ function App() {
     key: Parameters<typeof translate>[1],
     values?: Record<string, string | number>,
   ) => translate(locale, key, values);
+
+  useEffect(() => {
+    if (activeView !== "skills") return;
+    let active = true;
+    setSkillsLoading(true);
+    setSkillsError("");
+    scanSkills()
+      .then((result) => {
+        if (active) setSkillScan(result);
+      })
+      .catch((error) => {
+        if (active) setSkillsError(String(error));
+      })
+      .finally(() => {
+        if (active) setSkillsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, skillsRefreshNonce]);
 
   const accountConnected = Boolean(desktopAccessToken);
   const appInstalled = Boolean(appStatus?.installed);
@@ -2300,6 +2332,183 @@ function App() {
     }
   }
 
+  function skillSourceLabel(source: SkillRecord["sourceType"]): string {
+    switch (source) {
+      case "user":
+        return tr("skillSourceUser");
+      case "system":
+        return tr("skillSourceSystem");
+      case "plugin":
+        return tr("skillSourcePlugin");
+      case "external":
+        return tr("skillSourceExternal");
+      case "autogateway":
+        return tr("skillSourceAutogateway");
+      case "team":
+        return tr("skillSourceTeam");
+      default:
+        return source;
+    }
+  }
+
+  function renderSkillCard(skill: SkillRecord) {
+    const readOnly = skill.ownership !== "user-managed";
+    const statusClass =
+      skill.status === "enabled"
+        ? "enabled"
+        : skill.status === "error"
+          ? "error"
+          : "";
+    const statusLabel =
+      skill.status === "enabled"
+        ? tr("skillStatusEnabled")
+        : skill.status === "error"
+          ? tr("skillStatusError")
+          : tr("skillStatusSourceUnavailable");
+    return (
+      <article className="skillCard" key={skill.id}>
+        <div className="skillCardMain">
+          <div className="skillCardHeader">
+            <strong>{skill.name}</strong>
+            {skill.version ? (
+              <span className="skillCardVersion">
+                {tr("skillVersionLabel", { version: skill.version })}
+              </span>
+            ) : null}
+          </div>
+          <p className="skillCardDescription">{skill.description}</p>
+          <div className="skillCardMeta">
+            <span className="skillTag source">
+              {skillSourceLabel(skill.sourceType)}
+            </span>
+            {readOnly ? (
+              <span className="skillTag readOnly">{tr("skillReadOnly")}</span>
+            ) : null}
+          </div>
+        </div>
+        <div className="skillCardAside">
+          <span className={`skillStatusBadge ${statusClass}`.trim()}>
+            {statusLabel}
+          </span>
+        </div>
+      </article>
+    );
+  }
+
+  function renderInstalledSkills() {
+    if (skillsLoading && !skillScan) {
+      return (
+        <div className="skillSkeleton" aria-busy="true">
+          <div className="skillSkeletonRow" />
+          <div className="skillSkeletonRow" />
+          <div className="skillSkeletonRow" />
+        </div>
+      );
+    }
+    if (skillsError) {
+      return (
+        <section className="notice warning">
+          <strong>{tr("skillsScanError", { error: skillsError })}</strong>
+          <button
+            className="secondaryButton"
+            onClick={() => setSkillsRefreshNonce((nonce) => nonce + 1)}
+          >
+            {tr("skillsRescan")}
+          </button>
+        </section>
+      );
+    }
+    const skills = skillScan?.skills ?? [];
+    const failures = skillScan?.failedSources ?? [];
+    if (skills.length === 0) {
+      return (
+        <div className="skillsComingSoon">
+          <PuzzlePieceIcon weight="duotone" />
+          <strong>{tr("skillsEmptyTitle")}</strong>
+          <span>{tr("skillsEmptyBody")}</span>
+        </div>
+      );
+    }
+    return (
+      <>
+        {failures.length > 0 ? (
+          <section className="notice warning skillsNotice">
+            <strong>
+              {tr("skillsPartialFailure", { count: failures.length })}
+            </strong>
+            <details>
+              <summary>{tr("skillsPartialFailureToggle")}</summary>
+              <ul>
+                {failures.map((failure) => (
+                  <li key={failure.path}>
+                    {failure.path}: {failure.reason}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          </section>
+        ) : null}
+        <div className="skillList">{skills.map(renderSkillCard)}</div>
+      </>
+    );
+  }
+
+  function renderSkillsContent() {
+    const skillCount = skillScan?.skills.length ?? 0;
+    const tab = (
+      key: "installed" | "library" | "distribution",
+      label: string,
+      comingSoon = false,
+    ) => (
+      <button
+        role="tab"
+        className={`skillsTab ${skillsTab === key ? "selected" : ""}`.trim()}
+        aria-selected={skillsTab === key}
+        onClick={() => setSkillsTab(key)}
+      >
+        {label}
+        {comingSoon ? (
+          <span className="skillsTabBadge">{tr("skillsTabComingSoon")}</span>
+        ) : null}
+      </button>
+    );
+    return (
+      <section className="homeContent skillsView">
+        <p className="sectionKicker">{tr("workspace")}</p>
+        <h1>{tr("skillsTitle")}</h1>
+        <p className="lead homeLead">{tr("skillsLead")}</p>
+        <div className="skillsTabs" role="tablist">
+          {tab("installed", tr("skillsTabInstalled"))}
+          {tab("library", tr("skillsTabLibrary"), true)}
+          {tab("distribution", tr("skillsTabDistribution"), true)}
+        </div>
+        {skillsTab === "installed" ? (
+          <>
+            <div className="skillsToolbar">
+              <span className="skillsCount">
+                {tr("skillsCount", { count: skillCount })}
+              </span>
+              <button
+                className="secondaryButton"
+                disabled={skillsLoading}
+                onClick={() => setSkillsRefreshNonce((nonce) => nonce + 1)}
+              >
+                <ArrowsClockwiseIcon weight="bold" />
+                {tr("skillsRescan")}
+              </button>
+            </div>
+            {renderInstalledSkills()}
+          </>
+        ) : (
+          <div className="skillsComingSoon">
+            <PuzzlePieceIcon weight="duotone" />
+            <strong>{tr("skillsTabComingSoon")}</strong>
+          </div>
+        )}
+      </section>
+    );
+  }
+
   function renderHomeContent() {
     const version = appStatus?.localVersion || tr("versionUnavailable");
     const buildTime = formatBuildTime(locale);
@@ -2401,13 +2610,25 @@ function App() {
             </div>
           </div>
           <nav className="homeNav" aria-label={tr("homeNavigation")}>
-            <button className="selected">
+            <button
+              className={activeView === "home" ? "selected" : ""}
+              aria-current={activeView === "home" ? "page" : undefined}
+              onClick={() => setActiveView("home")}
+            >
               <HouseIcon weight="bold" />
               {tr("home")}
             </button>
             <button onClick={openSetupFromHome}>
               <CubeIcon />
               {tr("codexSetup")}
+            </button>
+            <button
+              className={activeView === "skills" ? "selected" : ""}
+              aria-current={activeView === "skills" ? "page" : undefined}
+              onClick={() => setActiveView("skills")}
+            >
+              <PuzzlePieceIcon weight="bold" />
+              {tr("skillManagement")}
             </button>
             <button onClick={() => void handleOpenConsole()}>
               <UserCircleIcon />
@@ -2488,6 +2709,9 @@ function App() {
               <span>{tr("signOut")}</span>
             </button>
           </header>
+          {activeView === "skills" ? (
+            renderSkillsContent()
+          ) : (
           <section className="homeContent">
             <p className="sectionKicker">{tr("workspace")}</p>
             <h1>{tr("homeTitle")}</h1>
@@ -2856,6 +3080,7 @@ function App() {
               </div>
             </section>
           </section>
+          )}
         </section>
       </main>
     );

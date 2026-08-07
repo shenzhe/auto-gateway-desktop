@@ -2230,7 +2230,7 @@ h1 {
     border-bottom: 1px solid var(--line);
   }
   .homeNav {
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     margin-top: 24px;
   }
   .homeNav button {
@@ -2295,4 +2295,201 @@ h1 {
   .recentSetup span {
     grid-column: 2;
   }
+}
+
+/* Skill management view */
+.skillsView {
+  display: grid;
+  gap: 20px;
+  align-content: start;
+}
+.skillsTabs {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.skillsTab {
+  position: relative;
+  padding: 10px 4px;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 640;
+}
+.skillsTab:hover:not(:disabled) {
+  color: var(--text);
+}
+.skillsTab.selected {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+}
+.skillsTab:disabled {
+  color: var(--subtle);
+  cursor: default;
+}
+.skillsTabBadge {
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--subtle);
+  font-size: 11px;
+  font-weight: 620;
+}
+.skillsToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.skillsToolbar .skillsCount {
+  color: var(--muted);
+  font-size: 13px;
+}
+.skillsNotice {
+  display: grid;
+  gap: 6px;
+}
+.skillsNotice details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+}
+.skillsNotice ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: var(--subtle);
+  font-size: 12px;
+}
+.skillList {
+  display: grid;
+  gap: 10px;
+}
+.skillCard {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.skillCardMain {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.skillCardHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.skillCardHeader strong {
+  font-size: 15px;
+}
+.skillCardVersion {
+  color: var(--subtle);
+  font-size: 12px;
+  font-weight: 600;
+}
+.skillCardDescription {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.skillCardMeta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.skillCardAside {
+  display: grid;
+  gap: 8px;
+  justify-items: end;
+}
+.skillTag {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.skillTag.source {
+  color: var(--info);
+  border-color: color-mix(in oklch, var(--info) 30%, var(--line));
+  background: color-mix(in oklch, var(--info) 12%, transparent);
+}
+.skillTag.readOnly {
+  color: var(--subtle);
+}
+.skillStatusBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 640;
+}
+.skillStatusBadge.enabled {
+  color: var(--success);
+  border-color: color-mix(in oklch, var(--success) 34%, var(--line));
+  background: var(--success-soft);
+}
+.skillStatusBadge.error {
+  color: var(--danger);
+  border-color: color-mix(in oklch, var(--danger) 40%, var(--line));
+  background: color-mix(in oklch, var(--danger-soft) 56%, var(--panel-soft));
+}
+.skillSkeleton {
+  display: grid;
+  gap: 10px;
+}
+.skillSkeletonRow {
+  height: 84px;
+  border-radius: 12px;
+  border: 1px solid var(--line-soft);
+  background: linear-gradient(
+    100deg,
+    var(--panel-soft) 30%,
+    color-mix(in oklch, var(--panel-strong) 60%, var(--panel-soft)) 50%,
+    var(--panel-soft) 70%
+  );
+  background-size: 220% 100%;
+  animation: skillSkeletonShimmer 1.3s ease-in-out infinite;
+}
+@keyframes skillSkeletonShimmer {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -40% 0;
+  }
+}
+.skillsComingSoon {
+  display: grid;
+  gap: 8px;
+  place-items: center;
+  padding: 48px 24px;
+  border: 1px dashed var(--line);
+  border-radius: 12px;
+  color: var(--muted);
+  text-align: center;
 }

@@ -109,8 +109,61 @@ export type DesktopNotificationList = {
   unreadCount?: number;
 };
 
+export type SkillSourceType =
+  | "user"
+  | "system"
+  | "plugin"
+  | "external"
+  | "autogateway"
+  | "team";
+
+export type SkillOwnership = "user-managed" | "source-managed" | "read-only";
+
+export type SkillStatus = "enabled" | "error" | "source-unavailable";
+
+export type SkillTrustLevel =
+  | "system"
+  | "verified"
+  | "known-source"
+  | "unverified";
+
+export type SkillRecord = {
+  id: string;
+  name: string;
+  description: string;
+  sourceType: SkillSourceType;
+  sourceUri?: string;
+  installPath: string;
+  scope: string;
+  ownership: SkillOwnership;
+  status: SkillStatus;
+  version?: string;
+  checksum?: string;
+  categoryId?: string;
+  tags: string[];
+  trustLevel: SkillTrustLevel;
+  installedAt?: string;
+  updatedAt?: string;
+  lastScannedAt: string;
+};
+
+export type SkillScanFailure = {
+  path: string;
+  reason: string;
+};
+
+export type SkillScanResult = {
+  skills: SkillRecord[];
+  failedSources: SkillScanFailure[];
+  scannedAt: string;
+};
+
 export function getCodexStatus(): Promise<CodexStatus> {
   return invoke<CodexStatus>("get_codex_status");
+}
+
+export function scanSkills(): Promise<SkillScanResult> {
+  return invoke<SkillScanResult>("scan_skills");
 }
 
 export function getCodexAppStatus(): Promise<CodexAppStatus> {

@@ -55,13 +55,26 @@ pub struct RestoreResult {
 }
 
 pub fn default_codex_paths() -> Result<CodexPaths, String> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| "unable to determine the current user home directory".to_string())?;
-    let codex_directory = home.join(".codex");
+    let codex_directory = codex_home_dir()?;
     Ok(CodexPaths {
         config: codex_directory.join("config.toml"),
         auth: codex_directory.join("auth.json"),
     })
+}
+
+/// Resolve the Codex home directory. Honors `$CODEX_HOME` the way the official
+/// Codex tooling does (and matching `skills::default_skills_dir`), so a sandbox
+/// copy can be used for local testing; otherwise defaults to `~/.codex`.
+fn codex_home_dir() -> Result<PathBuf, String> {
+    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
+        let codex_home = PathBuf::from(codex_home);
+        if !codex_home.as_os_str().is_empty() {
+            return Ok(codex_home);
+        }
+    }
+    let home = dirs::home_dir()
+        .ok_or_else(|| "unable to determine the current user home directory".to_string())?;
+    Ok(home.join(".codex"))
 }
 
 impl CodexPaths {
