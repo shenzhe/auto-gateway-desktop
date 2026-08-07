@@ -105,6 +105,7 @@ import {
   type LocalePreference,
 } from "./i18n";
 import { applyTheme, readTheme, writeTheme, type ThemeMode } from "./theme";
+import { trackSkillEvent } from "./analytics";
 import {
   skillLibraryClient,
   skillLibraryIsMock,
@@ -1351,14 +1352,24 @@ function App() {
   useEffect(() => {
     if (activeView !== "skills") return;
     let active = true;
+    const started = performance.now();
     setSkillsLoading(true);
     setSkillsError("");
     scanSkills()
       .then((result) => {
-        if (active) setSkillScan(result);
+        if (!active) return;
+        setSkillScan(result);
+        trackSkillEvent("skill_scan_completed", {
+          result: "ok",
+          count: result.skills.length,
+          failedCount: result.failedSources.length,
+          durationMs: Math.round(performance.now() - started),
+        });
       })
       .catch((error) => {
-        if (active) setSkillsError(String(error));
+        if (!active) return;
+        setSkillsError(String(error));
+        trackSkillEvent("skill_scan_completed", { result: "error" });
       })
       .finally(() => {
         if (active) setSkillsLoading(false);
@@ -2595,6 +2606,7 @@ function App() {
       await action();
       setSkillCategoryError("");
       setSkillsRefreshNonce((nonce) => nonce + 1);
+      trackSkillEvent("skill_category_changed", { result: "ok" });
     } catch (error) {
       setSkillCategoryError(String(error));
     }
@@ -2606,6 +2618,9 @@ function App() {
       setSkillCategoryError("");
       setPendingReloadIds((previous) => new Set(previous).add(id));
       setSkillsRefreshNonce((nonce) => nonce + 1);
+      trackSkillEvent("skill_status_changed", {
+        result: enable ? "enabled" : "disabled",
+      });
     } catch (error) {
       setSkillCategoryError(String(error));
     }
@@ -2628,6 +2643,7 @@ function App() {
       await restoreSkill(id);
       setSkillCategoryError("");
       setSkillsRefreshNonce((nonce) => nonce + 1);
+      trackSkillEvent("skill_recovery_completed", { result: "ok" });
     } catch (error) {
       setSkillCategoryError(String(error));
     }
@@ -2639,6 +2655,7 @@ function App() {
     setExportResult(null);
     try {
       setExportResult(await exportSkill(id));
+      trackSkillEvent("skill_export_completed", { result: "ok" });
     } catch (error) {
       setSkillCategoryError(String(error));
     } finally {
@@ -3647,12 +3664,21 @@ function App() {
     setInstallBusy(true);
     setInstallError("");
     setSkillInstallProgress(null);
+    trackSkillEvent("skill_install_started", { kind: installKind });
     try {
       await installSkill(installKind, installLocation.trim(), installPreview.conflict);
       setShowInstallDialog(false);
       setSkillsRefreshNonce((nonce) => nonce + 1);
+      trackSkillEvent("skill_install_completed", {
+        kind: installKind,
+        result: "ok",
+      });
     } catch (error) {
       setInstallError(String(error));
+      trackSkillEvent("skill_install_failed", {
+        kind: installKind,
+        result: "error",
+      });
     } finally {
       setInstallBusy(false);
     }
@@ -4148,7 +4174,12 @@ function App() {
             <button
               className={activeView === "skills" ? "selected" : ""}
               aria-current={activeView === "skills" ? "page" : undefined}
-              onClick={() => setActiveView("skills")}
+              onClick={() => {
+                if (activeView !== "skills") {
+                  trackSkillEvent("skill_manager_opened");
+                }
+                setActiveView("skills");
+              }}
             >
               <PuzzlePieceIcon weight="bold" />
               {tr("skillManagement")}
