@@ -21,10 +21,12 @@ import {
   GearIcon,
   HouseIcon,
   ChatCircleTextIcon,
+  MagnifyingGlassIcon,
   MoonIcon,
   PuzzlePieceIcon,
   QuestionIcon,
   SignOutIcon,
+  XIcon,
   SunIcon,
   TranslateIcon,
   UserCircleIcon,
@@ -59,6 +61,7 @@ import {
   restoreDesktopState,
   restoreLatestCodexBackups,
   scanSkills,
+  getSkillDetail,
   signOutDesktop,
   showMainWindow,
   updateTrayStatus,
@@ -71,6 +74,8 @@ import {
   type DesktopSession,
   type SkillRecord,
   type SkillScanResult,
+  type SkillDetail,
+  type SkillFileEntry,
 } from "./desktop";
 import {
   readLocalePreference,
@@ -1224,6 +1229,17 @@ function App() {
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState("");
   const [skillsRefreshNonce, setSkillsRefreshNonce] = useState(0);
+  const [skillSearch, setSkillSearch] = useState("");
+  const [skillSourceFilter, setSkillSourceFilter] = useState<
+    "all" | SkillRecord["sourceType"]
+  >("all");
+  const [skillSort, setSkillSort] = useState<
+    "name-asc" | "name-desc" | "updated-desc"
+  >("name-asc");
+  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
+  const [skillDetail, setSkillDetail] = useState<SkillDetail | null>(null);
+  const [skillDetailLoading, setSkillDetailLoading] = useState(false);
+  const [skillDetailError, setSkillDetailError] = useState("");
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
   const [localePreference, setLocalePreference] = useState<LocalePreference>(
     () => readLocalePreference(),
@@ -1256,6 +1272,31 @@ function App() {
       active = false;
     };
   }, [activeView, skillsRefreshNonce]);
+
+  useEffect(() => {
+    if (!selectedSkillId) {
+      setSkillDetail(null);
+      setSkillDetailError("");
+      return;
+    }
+    let active = true;
+    setSkillDetailLoading(true);
+    setSkillDetailError("");
+    setSkillDetail(null);
+    getSkillDetail(selectedSkillId)
+      .then((detail) => {
+        if (active) setSkillDetail(detail);
+      })
+      .catch((error) => {
+        if (active) setSkillDetailError(String(error));
+      })
+      .finally(() => {
+        if (active) setSkillDetailLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedSkillId, skillsRefreshNonce]);
 
   const accountConnected = Boolean(desktopAccessToken);
   const appInstalled = Boolean(appStatus?.installed);
@@ -2351,6 +2392,38 @@ function App() {
     }
   }
 
+  function skillStatusLabel(status: SkillRecord["status"]): string {
+    return status === "enabled"
+      ? tr("skillStatusEnabled")
+      : status === "error"
+        ? tr("skillStatusError")
+        : tr("skillStatusSourceUnavailable");
+  }
+
+  function fileKindLabel(kind: SkillFileEntry["kind"]): string {
+    switch (kind) {
+      case "markdown":
+        return tr("skillFileKindMarkdown");
+      case "script":
+        return tr("skillFileKindScript");
+      case "reference":
+        return tr("skillFileKindReference");
+      case "asset":
+        return tr("skillFileKindAsset");
+      case "agent":
+        return tr("skillFileKindAgent");
+      default:
+        return tr("skillFileKindOther");
+    }
+  }
+
+  function formatSkillTime(value?: string): string {
+    if (!value) return "—";
+    const ms = Number(value);
+    if (!Number.isFinite(ms) || ms <= 0) return "—";
+    return new Date(ms).toLocaleString(locale === "zh" ? "zh-CN" : "en-US");
+  }
+
   function renderSkillCard(skill: SkillRecord) {
     const readOnly = skill.ownership !== "user-managed";
     const statusClass =
@@ -2359,14 +2432,21 @@ function App() {
         : skill.status === "error"
           ? "error"
           : "";
-    const statusLabel =
-      skill.status === "enabled"
-        ? tr("skillStatusEnabled")
-        : skill.status === "error"
-          ? tr("skillStatusError")
-          : tr("skillStatusSourceUnavailable");
     return (
-      <article className="skillCard" key={skill.id}>
+      <article
+        className={`skillCard ${selectedSkillId === skill.id ? "selected" : ""}`.trim()}
+        key={skill.id}
+        role="button"
+        tabIndex={0}
+        aria-label={skill.name}
+        onClick={() => setSelectedSkillId(skill.id)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setSelectedSkillId(skill.id);
+          }
+        }}
+      >
         <div className="skillCardMain">
           <div className="skillCardHeader">
             <strong>{skill.name}</strong>
@@ -2388,7 +2468,7 @@ function App() {
         </div>
         <div className="skillCardAside">
           <span className={`skillStatusBadge ${statusClass}`.trim()}>
-            {statusLabel}
+            {skillStatusLabel(skill.status)}
           </span>
         </div>
       </article>
@@ -2429,6 +2509,24 @@ function App() {
         </div>
       );
     }
+    const query = skillSearch.trim().toLowerCase();
+    const visible = skills
+      .filter(
+        (skill) =>
+          skillSourceFilter === "all" ||
+          skill.sourceType === skillSourceFilter,
+      )
+      .filter(
+        (skill) =>
+          !query ||
+          skill.name.toLowerCase().includes(query) ||
+          skill.description.toLowerCase().includes(query),
+      )
+      .sort((a, b) => {
+        if (skillSort === "name-asc") return a.name.localeCompare(b.name);
+        if (skillSort === "name-desc") return b.name.localeCompare(a.name);
+        return Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0);
+      });
     return (
       <>
         {failures.length > 0 ? (
@@ -2448,13 +2546,189 @@ function App() {
             </details>
           </section>
         ) : null}
-        <div className="skillList">{skills.map(renderSkillCard)}</div>
+        {visible.length === 0 ? (
+          <div className="skillsComingSoon">
+            <MagnifyingGlassIcon weight="duotone" />
+            <strong>{tr("skillsNoMatches")}</strong>
+          </div>
+        ) : (
+          <div className="skillList">{visible.map(renderSkillCard)}</div>
+        )}
       </>
     );
   }
 
+  function renderSkillDetailDrawer() {
+    if (!selectedSkillId) return null;
+    return (
+      <div
+        className="skillDrawerOverlay"
+        onClick={() => setSelectedSkillId(null)}
+      >
+        <aside
+          className="skillDrawer"
+          role="dialog"
+          aria-modal="true"
+          aria-label={skillDetail?.name ?? tr("skillsTabInstalled")}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <header className="skillDrawerHeader">
+            <div className="skillCardHeader">
+              <strong>{skillDetail?.name ?? "…"}</strong>
+              {skillDetail?.version ? (
+                <span className="skillCardVersion">
+                  {tr("skillVersionLabel", { version: skillDetail.version })}
+                </span>
+              ) : null}
+            </div>
+            <button
+              className="iconButton"
+              aria-label={tr("skillDetailClose")}
+              onClick={() => setSelectedSkillId(null)}
+            >
+              <XIcon weight="bold" />
+            </button>
+          </header>
+          <div className="skillDrawerBody">
+            {skillDetailLoading ? (
+              <div className="skillSkeleton" aria-busy="true">
+                <div className="skillSkeletonRow" />
+                <div className="skillSkeletonRow" />
+              </div>
+            ) : skillDetailError ? (
+              <section className="notice warning">
+                <strong>
+                  {tr("skillDetailError", { error: skillDetailError })}
+                </strong>
+              </section>
+            ) : skillDetail ? (
+              <>
+                {skillDetail.ownership !== "user-managed" ? (
+                  <section className="notice skillReadOnlyNote">
+                    <WarningIcon weight="bold" />
+                    <span>{tr("skillDetailReadOnlyNote")}</span>
+                  </section>
+                ) : null}
+                {skillDetail.markdownBody ? (
+                  <section className="skillDrawerSection">
+                    <h3>{tr("skillDetailDescription")}</h3>
+                    <MarkdownContent
+                      value={skillDetail.markdownBody}
+                      onOpenLink={(url) => void openUrl(url)}
+                    />
+                  </section>
+                ) : (
+                  <p className="skillCardDescription">
+                    {skillDetail.description}
+                  </p>
+                )}
+                <section className="skillDrawerSection">
+                  <dl className="skillDetailGrid">
+                    <div>
+                      <dt>{tr("skillDetailSource")}</dt>
+                      <dd>{skillSourceLabel(skillDetail.sourceType)}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailStatus")}</dt>
+                      <dd>{skillStatusLabel(skillDetail.status)}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailFileCount")}</dt>
+                      <dd>{skillDetail.fileCount}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailSize")}</dt>
+                      <dd>{formatDataSize(skillDetail.totalSizeBytes)}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailInstalledAt")}</dt>
+                      <dd>{formatSkillTime(skillDetail.installedAt)}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailUpdatedAt")}</dt>
+                      <dd>{formatSkillTime(skillDetail.updatedAt)}</dd>
+                    </div>
+                    <div className="skillDetailWide">
+                      <dt>{tr("skillDetailChecksum")}</dt>
+                      <dd className="skillChecksum">
+                        {skillDetail.checksum ?? tr("skillDetailChecksumNA")}
+                      </dd>
+                    </div>
+                    <div className="skillDetailWide">
+                      <dt>{tr("skillDetailInstallPath")}</dt>
+                      <dd className="skillInstallPath">
+                        {skillDetail.installPath}
+                      </dd>
+                    </div>
+                  </dl>
+                </section>
+                <section className="skillDrawerSection">
+                  <h3>{tr("skillDetailScripts")}</h3>
+                  {skillDetail.scripts.length > 0 ? (
+                    <>
+                      <section className="notice warning skillScriptsWarning">
+                        <WarningIcon weight="bold" />
+                        <span>
+                          {tr("skillDetailScriptsWarning", {
+                            count: skillDetail.scripts.length,
+                          })}
+                        </span>
+                      </section>
+                      <ul className="skillScriptList">
+                        {skillDetail.scripts.map((script) => (
+                          <li key={script}>{script}</li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : (
+                    <p className="skillMuted">{tr("skillDetailNoScripts")}</p>
+                  )}
+                </section>
+                <section className="skillDrawerSection">
+                  <h3>{tr("skillDetailFiles")}</h3>
+                  {skillDetail.truncated ? (
+                    <p className="skillMuted">{tr("skillDetailTruncated")}</p>
+                  ) : null}
+                  <ul className="skillFileList">
+                    {skillDetail.files.map((file) => (
+                      <li key={file.relativePath}>
+                        <span className={`skillFileKind ${file.kind}`}>
+                          {fileKindLabel(file.kind)}
+                        </span>
+                        <span className="skillFilePath">
+                          {file.relativePath}
+                        </span>
+                        {file.isExecutable ? (
+                          <span className="skillTag readOnly">
+                            {tr("skillFileExecutable")}
+                          </span>
+                        ) : null}
+                        <span className="skillFileSize">
+                          {formatDataSize(file.sizeBytes)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              </>
+            ) : null}
+          </div>
+        </aside>
+      </div>
+    );
+  }
+
   function renderSkillsContent() {
-    const skillCount = skillScan?.skills.length ?? 0;
+    const skills = skillScan?.skills ?? [];
+    const failureCount = skillScan?.failedSources.length ?? 0;
+    const overview = {
+      total: skills.length,
+      enabled: skills.filter((skill) => skill.status === "enabled").length,
+      system: skills.filter((skill) => skill.sourceType === "system").length,
+      issues:
+        failureCount +
+        skills.filter((skill) => skill.status === "error").length,
+    };
     const tab = (
       key: "installed" | "library" | "distribution",
       label: string,
@@ -2464,7 +2738,10 @@ function App() {
         role="tab"
         className={`skillsTab ${skillsTab === key ? "selected" : ""}`.trim()}
         aria-selected={skillsTab === key}
-        onClick={() => setSkillsTab(key)}
+        onClick={() => {
+          setSkillsTab(key);
+          if (key !== "installed") setSelectedSkillId(null);
+        }}
       >
         {label}
         {comingSoon ? (
@@ -2484,10 +2761,60 @@ function App() {
         </div>
         {skillsTab === "installed" ? (
           <>
+            <div className="skillOverview">
+              <div className="skillMetric">
+                <strong>{overview.total}</strong>
+                <span>{tr("skillsOverviewTotal")}</span>
+              </div>
+              <div className="skillMetric">
+                <strong>{overview.enabled}</strong>
+                <span>{tr("skillsOverviewEnabled")}</span>
+              </div>
+              <div className="skillMetric">
+                <strong>{overview.system}</strong>
+                <span>{tr("skillsOverviewSystem")}</span>
+              </div>
+              <div className="skillMetric">
+                <strong>{overview.issues}</strong>
+                <span>{tr("skillsOverviewIssues")}</span>
+              </div>
+            </div>
             <div className="skillsToolbar">
-              <span className="skillsCount">
-                {tr("skillsCount", { count: skillCount })}
-              </span>
+              <label className="skillSearch">
+                <MagnifyingGlassIcon weight="bold" />
+                <input
+                  type="search"
+                  value={skillSearch}
+                  placeholder={tr("skillsSearchPlaceholder")}
+                  onChange={(event) => setSkillSearch(event.target.value)}
+                />
+              </label>
+              <select
+                className="skillSelect"
+                aria-label={tr("skillsFilterSource")}
+                value={skillSourceFilter}
+                onChange={(event) =>
+                  setSkillSourceFilter(
+                    event.target.value as typeof skillSourceFilter,
+                  )
+                }
+              >
+                <option value="all">{tr("skillsFilterAllSources")}</option>
+                <option value="user">{tr("skillSourceUser")}</option>
+                <option value="system">{tr("skillSourceSystem")}</option>
+              </select>
+              <select
+                className="skillSelect"
+                aria-label={tr("skillsSortLabel")}
+                value={skillSort}
+                onChange={(event) =>
+                  setSkillSort(event.target.value as typeof skillSort)
+                }
+              >
+                <option value="name-asc">{tr("skillsSortNameAsc")}</option>
+                <option value="name-desc">{tr("skillsSortNameDesc")}</option>
+                <option value="updated-desc">{tr("skillsSortUpdated")}</option>
+              </select>
               <button
                 className="secondaryButton"
                 disabled={skillsLoading}
@@ -2498,6 +2825,7 @@ function App() {
               </button>
             </div>
             {renderInstalledSkills()}
+            {renderSkillDetailDrawer()}
           </>
         ) : (
           <div className="skillsComingSoon">

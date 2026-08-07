@@ -21,7 +21,7 @@ use desktop_auth::{
     save_desktop_api_key, save_desktop_session, DesktopAccountSummary, DesktopBootstrapKey,
     DesktopNotificationList, DesktopSession, StoredDesktopState,
 };
-use skills::scan_skills;
+use skills::{get_skill_detail, scan_skills};
 use futures_util::StreamExt;
 use std::{
     fs::{self, File},
@@ -713,6 +713,7 @@ fn main() {
             open_notification_browser,
             download_and_open_desktop_installer,
             scan_skills,
+            get_skill_detail,
             open_devtools
         ])
         .build(tauri::generate_context!())

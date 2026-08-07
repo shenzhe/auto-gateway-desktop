@@ -2493,3 +2493,243 @@ h1 {
   color: var(--muted);
   text-align: center;
 }
+
+/* Skill management — M1 (overview, filters, detail drawer) */
+.skillCard {
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+.skillCard:hover,
+.skillCard:focus-visible {
+  border-color: color-mix(in oklch, var(--primary) 34%, var(--line));
+  background: color-mix(in oklch, var(--primary-soft) 30%, var(--panel));
+  outline: none;
+}
+.skillCard.selected {
+  border-color: var(--primary);
+  box-shadow: inset 3px 0 var(--primary);
+}
+.skillOverview {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+.skillMetric {
+  display: grid;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.skillMetric strong {
+  font-size: 24px;
+  line-height: 1;
+}
+.skillMetric span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.skillSearch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 220px;
+  min-width: 180px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--control-bg);
+  color: var(--muted);
+}
+.skillSearch input {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+}
+.skillSelect {
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--control-bg);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.skillsToolbar {
+  flex-wrap: wrap;
+}
+.iconButton {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--control-bg);
+  color: var(--muted);
+}
+.iconButton:hover {
+  color: var(--text);
+  border-color: color-mix(in oklch, var(--primary) 30%, var(--line));
+}
+.iconButton svg {
+  width: 18px;
+  height: 18px;
+}
+.skillMuted {
+  color: var(--subtle);
+  font-size: 13px;
+}
+.skillDrawerOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: flex-end;
+  background: color-mix(in oklch, var(--bg) 40%, transparent);
+  backdrop-filter: blur(2px);
+}
+.skillDrawer {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100%);
+  height: 100%;
+  background: var(--surface);
+  border-left: 1px solid var(--line);
+  box-shadow: var(--shadow);
+}
+.skillDrawerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--line);
+}
+.skillDrawerBody {
+  display: grid;
+  gap: 20px;
+  align-content: start;
+  padding: 20px;
+  overflow-y: auto;
+}
+.skillDrawerSection {
+  display: grid;
+  gap: 10px;
+}
+.skillDrawerSection h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.skillDetailGrid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px 16px;
+  margin: 0;
+}
+.skillDetailGrid > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.skillDetailGrid .skillDetailWide {
+  grid-column: 1 / -1;
+}
+.skillDetailGrid dt {
+  color: var(--subtle);
+  font-size: 12px;
+}
+.skillDetailGrid dd {
+  margin: 0;
+  font-size: 14px;
+}
+.skillChecksum,
+.skillInstallPath {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  color: var(--muted);
+}
+.skillReadOnlyNote {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.skillScriptsWarning {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.skillScriptList,
+.skillFileList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+}
+.skillScriptList li {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text);
+}
+.skillFileList li {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+.skillFileList li:nth-child(odd) {
+  background: var(--panel-soft);
+}
+.skillFileKind {
+  padding: 1px 7px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 640;
+  background: var(--panel-strong);
+  color: var(--muted);
+}
+.skillFileKind.script {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+.skillFileKind.markdown {
+  color: var(--info);
+  background: color-mix(in oklch, var(--info) 14%, transparent);
+}
+.skillFilePath {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skillFileSize {
+  color: var(--subtle);
+  font-size: 12px;
+  white-space: nowrap;
+}
+@media (max-width: 700px) {
+  .skillOverview {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .skillDrawer {
+    width: 100%;
+  }
+  .skillDetailGrid {
+    grid-template-columns: 1fr;
+  }
+}

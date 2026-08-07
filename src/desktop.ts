@@ -158,12 +158,40 @@ export type SkillScanResult = {
   scannedAt: string;
 };
 
+export type SkillFileKind =
+  | "markdown"
+  | "script"
+  | "reference"
+  | "asset"
+  | "agent"
+  | "other";
+
+export type SkillFileEntry = {
+  relativePath: string;
+  sizeBytes: number;
+  isExecutable: boolean;
+  kind: SkillFileKind;
+};
+
+export type SkillDetail = SkillRecord & {
+  files: SkillFileEntry[];
+  scripts: string[];
+  markdownBody?: string;
+  totalSizeBytes: number;
+  fileCount: number;
+  truncated: boolean;
+};
+
 export function getCodexStatus(): Promise<CodexStatus> {
   return invoke<CodexStatus>("get_codex_status");
 }
 
 export function scanSkills(): Promise<SkillScanResult> {
   return invoke<SkillScanResult>("scan_skills");
+}
+
+export function getSkillDetail(id: string): Promise<SkillDetail> {
+  return invoke<SkillDetail>("get_skill_detail", { id });
 }
 
 export function getCodexAppStatus(): Promise<CodexAppStatus> {
