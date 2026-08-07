@@ -12,11 +12,6 @@ on:
         required: false
         default: Bug fixes and improvements.
         type: string
-  push:
-    tags:
-      - "v*"
-      - "desktop-v*"
-
 permissions:
   contents: read
 

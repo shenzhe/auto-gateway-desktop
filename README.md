@@ -67,6 +67,12 @@ winget install -e --id Microsoft.Azure.ArtifactSigningClientTools
 az login
 ```
 
+Artifact Signing keeps the signing private key inside the managed Azure
+service. It does not provide an exportable private key or `.pfx` file. Local
+and CI builds use SignTool with the Artifact Signing dlib and metadata to
+request remote signing; only non-secret account and certificate-profile
+metadata belongs in the repository's ignored local configuration.
+
 Create `configs/artifact-signing.metadata.json` from the example file, then
 set the repository root and metadata path before building:
 
