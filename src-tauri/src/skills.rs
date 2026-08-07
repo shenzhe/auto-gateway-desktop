@@ -2,10 +2,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::Manager;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tauri::{Emitter, Manager};
+use url::Url;
 use uuid::Uuid;
 
 const SKILL_MANIFEST_FILE: &str = "SKILL.md";
@@ -1632,24 +1633,240 @@ fn build_install_preview(skill_root: &Path, skills_dir: &Path) -> Result<Install
     })
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillInstallProgress {
+    stage: String,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    percent: Option<u64>,
+}
+
+fn emit_skill_progress(app: &tauri::AppHandle, stage: &str, downloaded: u64, total: Option<u64>) {
+    let percent = total.map(|total| {
+        if total > 0 {
+            (downloaded.saturating_mul(100) / total).min(100)
+        } else {
+            0
+        }
+    });
+    let _ = app.emit(
+        "skill-install-progress",
+        SkillInstallProgress {
+            stage: stage.to_string(),
+            downloaded_bytes: downloaded,
+            total_bytes: total,
+            percent,
+        },
+    );
+}
+
+/// Parse a public GitHub URL into (owner, repo, ref, optional subpath). HTTPS
+/// and github.com only, no embedded credentials.
+fn parse_github_url(raw: &str) -> Result<(String, String, String, Option<String>), String> {
+    let url = Url::parse(raw.trim()).map_err(|error| format!("parse the URL: {error}"))?;
+    if url.scheme() != "https" {
+        return Err("only HTTPS GitHub URLs are supported".to_string());
+    }
+    if url.host_str() != Some("github.com") {
+        return Err("only github.com URLs are supported".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("the URL must not contain credentials".to_string());
+    }
+    let segments: Vec<String> = url
+        .path_segments()
+        .map(|parts| {
+            parts
+                .filter(|part| !part.is_empty())
+                .map(|part| part.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    if segments.len() < 2 {
+        return Err("the URL must include an owner and repository".to_string());
+    }
+    let owner = segments[0].clone();
+    let repo = segments[1]
+        .strip_suffix(".git")
+        .unwrap_or(&segments[1])
+        .to_string();
+    let mut git_ref = "main".to_string();
+    let mut subpath: Option<String> = None;
+    if segments.len() > 2 && (segments[2] == "tree" || segments[2] == "blob") {
+        if segments.len() < 4 {
+            return Err("the URL is missing a branch or path".to_string());
+        }
+        git_ref = segments[3].clone();
+        if segments.len() > 4 {
+            subpath = Some(segments[4..].join("/"));
+        }
+    }
+    let safe = |value: &str| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    };
+    if !safe(&owner) || !safe(&repo) || !safe(&git_ref) {
+        return Err("the URL contains unsupported characters".to_string());
+    }
+    if let Some(path) = &subpath {
+        if path.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
+            return Err("the URL path is invalid".to_string());
+        }
+    }
+    Ok((owner, repo, git_ref, subpath))
+}
+
+async fn download_codeload_zip(
+    app: &tauri::AppHandle,
+    owner: &str,
+    repo: &str,
+    git_ref: &str,
+    destination: &Path,
+) -> Result<(), String> {
+    let url = format!("https://codeload.github.com/{owner}/{repo}/zip/{git_ref}");
+    let client = reqwest::Client::builder()
+        .user_agent(crate::http_client::desktop_user_agent())
+        .connect_timeout(Duration::from_secs(20))
+        .read_timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|error| format!("create the download client: {error}"))?;
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|error| format!("download the repository: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("download the repository: {error}"))?;
+    let final_host = response.url().host_str().unwrap_or("").to_string();
+    if !matches!(final_host.as_str(), "codeload.github.com" | "github.com") {
+        return Err("the download was redirected to an untrusted host".to_string());
+    }
+    let total = response.content_length();
+    if total.is_some_and(|length| length > MAX_ARCHIVE_BYTES) {
+        return Err("the repository archive is too large".to_string());
+    }
+    let mut file =
+        fs::File::create(destination).map_err(|error| format!("create the download file: {error}"))?;
+    let mut downloaded: u64 = 0;
+    let mut last_emit: u64 = 0;
+    let mut stream = response.bytes_stream();
+    use futures_util::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("read the download: {error}"))?;
+        downloaded = downloaded.saturating_add(chunk.len() as u64);
+        if downloaded > MAX_ARCHIVE_BYTES {
+            return Err("the repository archive is too large".to_string());
+        }
+        file.write_all(&chunk)
+            .map_err(|error| format!("save the download: {error}"))?;
+        if downloaded - last_emit >= 512 * 1024 {
+            last_emit = downloaded;
+            emit_skill_progress(app, "downloading", downloaded, total);
+        }
+    }
+    file.sync_all()
+        .map_err(|error| format!("finish the download: {error}"))?;
+    emit_skill_progress(app, "downloading", downloaded, total);
+    Ok(())
+}
+
+fn single_subdir(base: &Path) -> Result<PathBuf, String> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(base).map_err(|error| format!("read the archive: {error}"))? {
+        let entry = entry.map_err(|error| format!("read an archive entry: {error}"))?;
+        if entry.path().is_dir() {
+            dirs.push(entry.path());
+        }
+    }
+    if dirs.len() == 1 {
+        Ok(dirs.remove(0))
+    } else {
+        Err("unexpected repository archive layout".to_string())
+    }
+}
+
+/// Stage a source into `staging` and return the located skill root. Handles
+/// local dir, local zip, and a public GitHub URL (downloaded via codeload).
+async fn stage_source_async(
+    app: &tauri::AppHandle,
+    kind: &str,
+    location: &str,
+    staging: &Path,
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(staging)
+        .map_err(|error| format!("create the staging directory: {error}"))?;
+    if kind == "git" {
+        emit_skill_progress(app, "resolving", 0, None);
+        let (owner, repo, git_ref, subpath) = parse_github_url(location)?;
+        let archive = staging.join("repo.zip");
+        download_codeload_zip(app, &owner, &repo, &git_ref, &archive).await?;
+        emit_skill_progress(app, "extracting", 0, None);
+        let payload = staging.join("payload");
+        extract_zip_safe(&archive, &payload)?;
+        let repo_root = single_subdir(&payload)?;
+        let skill_dir = match &subpath {
+            Some(path) => repo_root.join(path),
+            None => repo_root,
+        };
+        return locate_skill_root(&skill_dir);
+    }
+    stage_source(kind, location, staging)
+}
+
 #[tauri::command]
-pub fn validate_skill_source(
-    _app: tauri::AppHandle,
+pub async fn validate_skill_source(
+    app: tauri::AppHandle,
     kind: String,
     location: String,
 ) -> Result<InstallPreview, String> {
     let skills_dir = default_skills_dir()?;
     let staging = std::env::temp_dir().join(format!("autogateway-skill-stage-{}", Uuid::new_v4()));
-    let result = (|| {
-        let root = stage_source(&kind, &location, &staging)?;
+    let result = async {
+        let root = stage_source_async(&app, &kind, &location, &staging).await?;
         build_install_preview(&root, &skills_dir)
-    })();
+    }
+    .await;
     let _ = fs::remove_dir_all(&staging);
     result
 }
 
+async fn install_skill_inner(
+    app: &tauri::AppHandle,
+    kind: &str,
+    location: &str,
+    replace: bool,
+    skills_dir: &Path,
+    staging: &Path,
+) -> Result<(), String> {
+    let root = stage_source_async(app, kind, location, staging).await?;
+    let preview = build_install_preview(&root, skills_dir)?;
+    let target = skills_dir.join(&preview.target_name);
+    fs::create_dir_all(skills_dir)
+        .map_err(|error| format!("create the skills directory: {error}"))?;
+    emit_skill_progress(app, "installing", 0, None);
+    if target.exists() {
+        if !replace {
+            return Err("a skill with this name already exists".to_string());
+        }
+        let backup =
+            skills_backup_root(app)?.join(format!("{}-{}", preview.target_name, now_millis()));
+        move_dir(&target, &backup)?;
+        if let Err(error) = move_dir(&root, &target) {
+            let _ = move_dir(&backup, &target);
+            return Err(error);
+        }
+    } else {
+        move_dir(&root, &target)?;
+    }
+    emit_skill_progress(app, "complete", 0, None);
+    Ok(())
+}
+
 #[tauri::command]
-pub fn install_skill(
+pub async fn install_skill(
     app: tauri::AppHandle,
     kind: String,
     location: String,
@@ -1657,28 +1874,8 @@ pub fn install_skill(
 ) -> Result<(), String> {
     let skills_dir = default_skills_dir()?;
     let staging = std::env::temp_dir().join(format!("autogateway-skill-stage-{}", Uuid::new_v4()));
-    let outcome = (|| {
-        let root = stage_source(&kind, &location, &staging)?;
-        let preview = build_install_preview(&root, &skills_dir)?;
-        let target = skills_dir.join(&preview.target_name);
-        fs::create_dir_all(&skills_dir)
-            .map_err(|error| format!("create the skills directory: {error}"))?;
-        if target.exists() {
-            if !replace {
-                return Err("a skill with this name already exists".to_string());
-            }
-            let backup = skills_backup_root(&app)?
-                .join(format!("{}-{}", preview.target_name, now_millis()));
-            move_dir(&target, &backup)?;
-            if let Err(error) = move_dir(&root, &target) {
-                let _ = move_dir(&backup, &target);
-                return Err(error);
-            }
-            Ok(())
-        } else {
-            move_dir(&root, &target)
-        }
-    })();
+    let outcome =
+        install_skill_inner(&app, &kind, &location, replace, &skills_dir, &staging).await;
     let _ = fs::remove_dir_all(&staging);
     outcome
 }
@@ -2069,6 +2266,27 @@ mod tests {
         assert!(extract_zip_safe(&linked, &root.join("l")).is_err());
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parse_github_url_extracts_parts_and_rejects_untrusted() {
+        let (owner, repo, git_ref, subpath) =
+            parse_github_url("https://github.com/openai/skills").expect("root url");
+        assert_eq!((owner.as_str(), repo.as_str(), git_ref.as_str()), ("openai", "skills", "main"));
+        assert_eq!(subpath, None);
+
+        let (_, repo, git_ref, subpath) = parse_github_url(
+            "https://github.com/openai/skills/tree/main/skills/.curated/release-notes",
+        )
+        .expect("tree url");
+        assert_eq!(repo, "skills");
+        assert_eq!(git_ref, "main");
+        assert_eq!(subpath.as_deref(), Some("skills/.curated/release-notes"));
+
+        assert!(parse_github_url("http://github.com/o/r").is_err()); // not https
+        assert!(parse_github_url("https://example.com/o/r").is_err()); // not github
+        assert!(parse_github_url("https://user@github.com/o/r").is_err()); // credentials
+        assert!(parse_github_url("https://github.com/only-owner").is_err()); // missing repo
     }
 
     #[test]

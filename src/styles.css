@@ -2881,6 +2881,23 @@ h1 {
   color: var(--text);
   font-size: 13px;
 }
+.skillInstallProgress {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.skillProgressTrack {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  overflow: hidden;
+}
+.skillProgressBar {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.2s ease;
+}
 @media (max-width: 700px) {
   .skillModal {
     width: 100%;

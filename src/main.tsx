@@ -93,6 +93,7 @@ import {
   type RecoverableSkill,
   type SkillInstallPreview,
   type SkillInstallSourceKind,
+  type SkillInstallProgress,
 } from "./desktop";
 import {
   readLocalePreference,
@@ -1297,6 +1298,8 @@ function App() {
     useState<SkillInstallPreview | null>(null);
   const [installBusy, setInstallBusy] = useState(false);
   const [installError, setInstallError] = useState("");
+  const [skillInstallProgress, setSkillInstallProgress] =
+    useState<SkillInstallProgress | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
   const [localePreference, setLocalePreference] = useState<LocalePreference>(
     () => readLocalePreference(),
@@ -1377,6 +1380,17 @@ function App() {
       active = false;
     };
   }, [activeView, showTrash, skillsRefreshNonce]);
+
+  useEffect(() => {
+    if (!showInstallDialog) return;
+    const unlisten = listen<SkillInstallProgress>(
+      "skill-install-progress",
+      ({ payload }) => setSkillInstallProgress(payload),
+    );
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [showInstallDialog]);
 
   const accountConnected = Boolean(desktopAccessToken);
   const appInstalled = Boolean(appStatus?.installed);
@@ -3181,6 +3195,7 @@ function App() {
     setInstallLocation("");
     setInstallPreview(null);
     setInstallError("");
+    setSkillInstallProgress(null);
     setShowInstallDialog(true);
   }
 
@@ -3206,6 +3221,7 @@ function App() {
     if (!installPreview) return;
     setInstallBusy(true);
     setInstallError("");
+    setSkillInstallProgress(null);
     try {
       await installSkill(installKind, installLocation.trim(), installPreview.conflict);
       setShowInstallDialog(false);
@@ -3253,6 +3269,7 @@ function App() {
               >
                 <option value="dir">{tr("skillInstallFromDir")}</option>
                 <option value="zip">{tr("skillInstallFromZip")}</option>
+                <option value="git">{tr("skillInstallFromGit")}</option>
               </select>
               <input
                 type="text"
@@ -3261,7 +3278,9 @@ function App() {
                 placeholder={
                   installKind === "dir"
                     ? tr("skillInstallDirPlaceholder")
-                    : tr("skillInstallZipPlaceholder")
+                    : installKind === "zip"
+                      ? tr("skillInstallZipPlaceholder")
+                      : tr("skillInstallGitPlaceholder")
                 }
                 onChange={(event) => {
                   setInstallLocation(event.target.value);
@@ -3280,6 +3299,33 @@ function App() {
               <section className="notice warning">
                 <strong>{installError}</strong>
               </section>
+            ) : null}
+            {installBusy && skillInstallProgress ? (
+              <div className="skillInstallProgress">
+                <span>
+                  {tr(
+                    `skillInstallStage_${skillInstallProgress.stage}` as Parameters<
+                      typeof tr
+                    >[0],
+                  )}
+                  {typeof skillInstallProgress.percent === "number" &&
+                  skillInstallProgress.stage === "downloading"
+                    ? ` ${skillInstallProgress.percent}%`
+                    : ""}
+                </span>
+                <div className="skillProgressTrack">
+                  <div
+                    className="skillProgressBar"
+                    style={{
+                      width: `${
+                        skillInstallProgress.stage === "complete"
+                          ? 100
+                          : (skillInstallProgress.percent ?? 20)
+                      }%`,
+                    }}
+                  />
+                </div>
+              </div>
             ) : null}
             {installPreview ? (
               <>

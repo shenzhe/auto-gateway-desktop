@@ -210,7 +210,19 @@ export type SkillRiskFinding = {
   message: string;
 };
 
-export type SkillInstallSourceKind = "dir" | "zip";
+export type SkillInstallSourceKind = "dir" | "zip" | "git";
+
+export type SkillInstallProgress = {
+  stage:
+    | "resolving"
+    | "downloading"
+    | "extracting"
+    | "installing"
+    | "complete";
+  downloadedBytes: number;
+  totalBytes?: number;
+  percent?: number;
+};
 
 export type SkillInstallPreview = {
   name: string;
