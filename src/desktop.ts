@@ -119,7 +119,11 @@ export type SkillSourceType =
 
 export type SkillOwnership = "user-managed" | "source-managed" | "read-only";
 
-export type SkillStatus = "enabled" | "error" | "source-unavailable";
+export type SkillStatus =
+  | "enabled"
+  | "disabled"
+  | "error"
+  | "source-unavailable";
 
 export type SkillTrustLevel =
   | "system"
@@ -193,6 +197,12 @@ export type SkillDetail = SkillRecord & {
   truncated: boolean;
 };
 
+export type RecoverableSkill = {
+  id: string;
+  name: string;
+  removedAt?: string;
+};
+
 export function getCodexStatus(): Promise<CodexStatus> {
   return invoke<CodexStatus>("get_codex_status");
 }
@@ -244,6 +254,26 @@ export function deleteCategory(
   migrateTo: string | null,
 ): Promise<void> {
   return invoke<void>("delete_category", { id, migrateTo });
+}
+
+export function enableSkill(id: string): Promise<void> {
+  return invoke<void>("enable_skill", { id });
+}
+
+export function disableSkill(id: string): Promise<void> {
+  return invoke<void>("disable_skill", { id });
+}
+
+export function removeSkill(id: string): Promise<void> {
+  return invoke<void>("remove_skill", { id });
+}
+
+export function restoreSkill(id: string): Promise<void> {
+  return invoke<void>("restore_skill", { id });
+}
+
+export function listRecoverableSkills(): Promise<RecoverableSkill[]> {
+  return invoke<RecoverableSkill[]>("list_recoverable_skills");
 }
 
 export function getCodexAppStatus(): Promise<CodexAppStatus> {

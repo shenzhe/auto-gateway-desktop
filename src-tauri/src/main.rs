@@ -22,8 +22,9 @@ use desktop_auth::{
     DesktopNotificationList, DesktopSession, StoredDesktopState,
 };
 use skills::{
-    archive_category, create_category, delete_category, get_skill_detail, rename_category,
-    reorder_categories, scan_skills, set_skill_category, set_skill_tags, set_skills_category,
+    archive_category, create_category, delete_category, disable_skill, enable_skill,
+    get_skill_detail, list_recoverable_skills, remove_skill, rename_category, reorder_categories,
+    restore_skill, scan_skills, set_skill_category, set_skill_tags, set_skills_category,
 };
 use futures_util::StreamExt;
 use std::{
@@ -725,6 +726,11 @@ fn main() {
             reorder_categories,
             archive_category,
             delete_category,
+            disable_skill,
+            enable_skill,
+            remove_skill,
+            restore_skill,
+            list_recoverable_skills,
             open_devtools
         ])
         .build(tauri::generate_context!())

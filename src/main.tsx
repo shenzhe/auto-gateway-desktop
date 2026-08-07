@@ -68,6 +68,11 @@ import {
   renameCategory,
   archiveCategory,
   deleteCategory,
+  enableSkill,
+  disableSkill,
+  removeSkill,
+  restoreSkill,
+  listRecoverableSkills,
   signOutDesktop,
   showMainWindow,
   updateTrayStatus,
@@ -83,6 +88,7 @@ import {
   type SkillDetail,
   type SkillFileEntry,
   type SkillCategory,
+  type RecoverableSkill,
 } from "./desktop";
 import {
   readLocalePreference,
@@ -1270,6 +1276,15 @@ function App() {
   );
   const [deleteMigrateTo, setDeleteMigrateTo] = useState("");
   const [skillCategoryError, setSkillCategoryError] = useState("");
+  const [pendingReloadIds, setPendingReloadIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [removeConfirmId, setRemoveConfirmId] = useState<string | null>(null);
+  const [showTrash, setShowTrash] = useState(false);
+  const [recoverableSkills, setRecoverableSkills] = useState<
+    RecoverableSkill[]
+  >([]);
+  const [trashLoading, setTrashLoading] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
   const [localePreference, setLocalePreference] = useState<LocalePreference>(
     () => readLocalePreference(),
@@ -1331,6 +1346,25 @@ function App() {
   useEffect(() => {
     setSkillTagDraft(skillDetail ? skillDetail.tags.join(", ") : "");
   }, [skillDetail]);
+
+  useEffect(() => {
+    if (activeView !== "skills" || !showTrash) return;
+    let active = true;
+    setTrashLoading(true);
+    listRecoverableSkills()
+      .then((items) => {
+        if (active) setRecoverableSkills(items);
+      })
+      .catch(() => {
+        if (active) setRecoverableSkills([]);
+      })
+      .finally(() => {
+        if (active) setTrashLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, showTrash, skillsRefreshNonce]);
 
   const accountConnected = Boolean(desktopAccessToken);
   const appInstalled = Boolean(appStatus?.installed);
@@ -2452,12 +2486,50 @@ function App() {
     }
   }
 
+  async function toggleSkill(id: string, enable: boolean) {
+    try {
+      await (enable ? enableSkill(id) : disableSkill(id));
+      setSkillCategoryError("");
+      setPendingReloadIds((previous) => new Set(previous).add(id));
+      setSkillsRefreshNonce((nonce) => nonce + 1);
+    } catch (error) {
+      setSkillCategoryError(String(error));
+    }
+  }
+
+  async function confirmRemoveSkill(id: string) {
+    try {
+      await removeSkill(id);
+      setSkillCategoryError("");
+      setRemoveConfirmId(null);
+      setSelectedSkillId(null);
+      setSkillsRefreshNonce((nonce) => nonce + 1);
+    } catch (error) {
+      setSkillCategoryError(String(error));
+    }
+  }
+
+  async function restoreSkillAction(id: string) {
+    try {
+      await restoreSkill(id);
+      setSkillCategoryError("");
+      setSkillsRefreshNonce((nonce) => nonce + 1);
+    } catch (error) {
+      setSkillCategoryError(String(error));
+    }
+  }
+
   function skillStatusLabel(status: SkillRecord["status"]): string {
-    return status === "enabled"
-      ? tr("skillStatusEnabled")
-      : status === "error"
-        ? tr("skillStatusError")
-        : tr("skillStatusSourceUnavailable");
+    switch (status) {
+      case "enabled":
+        return tr("skillStatusEnabled");
+      case "disabled":
+        return tr("skillStatusDisabled");
+      case "error":
+        return tr("skillStatusError");
+      default:
+        return tr("skillStatusSourceUnavailable");
+    }
   }
 
   function fileKindLabel(kind: SkillFileEntry["kind"]): string {
@@ -2489,9 +2561,11 @@ function App() {
     const statusClass =
       skill.status === "enabled"
         ? "enabled"
-        : skill.status === "error"
-          ? "error"
-          : "";
+        : skill.status === "disabled"
+          ? "disabled"
+          : skill.status === "error"
+            ? "error"
+            : "";
     return (
       <article
         className={`skillCard ${selectedSkillId === skill.id ? "selected" : ""}`.trim()}
@@ -2540,6 +2614,22 @@ function App() {
           <span className={`skillStatusBadge ${statusClass}`.trim()}>
             {skillStatusLabel(skill.status)}
           </span>
+          {pendingReloadIds.has(skill.id) ? (
+            <span className="skillTag pending">{tr("skillPendingReload")}</span>
+          ) : null}
+          {skill.ownership === "user-managed" ? (
+            <button
+              className="linkButton"
+              onClick={(event) => {
+                event.stopPropagation();
+                void toggleSkill(skill.id, skill.status !== "enabled");
+              }}
+            >
+              {skill.status === "enabled"
+                ? tr("skillDisable")
+                : tr("skillEnable")}
+            </button>
+          ) : null}
         </div>
       </article>
     );
@@ -2682,6 +2772,53 @@ function App() {
                   <section className="notice skillReadOnlyNote">
                     <WarningIcon weight="bold" />
                     <span>{tr("skillDetailReadOnlyNote")}</span>
+                  </section>
+                ) : (
+                  <div className="skillDrawerActions">
+                    <button
+                      className="secondaryButton"
+                      onClick={() =>
+                        void toggleSkill(
+                          skillDetail.id,
+                          skillDetail.status !== "enabled",
+                        )
+                      }
+                    >
+                      {skillDetail.status === "enabled"
+                        ? tr("skillDisable")
+                        : tr("skillEnable")}
+                    </button>
+                    {removeConfirmId === skillDetail.id ? (
+                      <>
+                        <span className="skillMuted">
+                          {tr("skillRemoveConfirm")}
+                        </span>
+                        <button
+                          className="linkButton danger"
+                          onClick={() => void confirmRemoveSkill(skillDetail.id)}
+                        >
+                          {tr("skillRemoveConfirmYes")}
+                        </button>
+                        <button
+                          className="linkButton"
+                          onClick={() => setRemoveConfirmId(null)}
+                        >
+                          {tr("skillCategoryCancel")}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="linkButton danger"
+                        onClick={() => setRemoveConfirmId(skillDetail.id)}
+                      >
+                        {tr("skillRemove")}
+                      </button>
+                    )}
+                  </div>
+                )}
+                {pendingReloadIds.has(skillDetail.id) ? (
+                  <section className="notice skillPendingNote">
+                    <span>{tr("skillPendingReloadNote")}</span>
                   </section>
                 ) : null}
                 {skillDetail.markdownBody ? (
@@ -3027,6 +3164,47 @@ function App() {
     );
   }
 
+  function renderTrashPanel() {
+    if (!showTrash) return null;
+    return (
+      <section className="categoryManager">
+        <div className="categoryManagerHeader">
+          <h3>{tr("skillTrashTitle")}</h3>
+          <button
+            className="iconButton"
+            aria-label={tr("skillDetailClose")}
+            onClick={() => setShowTrash(false)}
+          >
+            <XIcon weight="bold" />
+          </button>
+        </div>
+        {trashLoading ? (
+          <p className="skillMuted">{tr("skillsScanning")}</p>
+        ) : recoverableSkills.length === 0 ? (
+          <p className="skillMuted">{tr("skillTrashEmpty")}</p>
+        ) : (
+          <ul className="categoryList">
+            {recoverableSkills.map((item) => (
+              <li key={item.id}>
+                <div className="categoryRow">
+                  <span className="categoryName">{item.name}</span>
+                  <div className="categoryActions">
+                    <button
+                      className="linkButton"
+                      onClick={() => void restoreSkillAction(item.id)}
+                    >
+                      {tr("skillRestore")}
+                    </button>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    );
+  }
+
   function renderSkillsContent() {
     const skills = skillScan?.skills ?? [];
     const failureCount = skillScan?.failedSources.length ?? 0;
@@ -3147,14 +3325,29 @@ function App() {
               </button>
               <button
                 className="secondaryButton"
+                onClick={() => setShowTrash((open) => !open)}
+              >
+                {tr("skillTrashTitle")}
+              </button>
+              <button
+                className="secondaryButton"
                 disabled={skillsLoading}
-                onClick={() => setSkillsRefreshNonce((nonce) => nonce + 1)}
+                onClick={() => {
+                  setPendingReloadIds(new Set());
+                  setSkillsRefreshNonce((nonce) => nonce + 1);
+                }}
               >
                 <ArrowsClockwiseIcon weight="bold" />
                 {tr("skillsRescan")}
               </button>
             </div>
+            {skillCategoryError ? (
+              <section className="notice warning">
+                <strong>{skillCategoryError}</strong>
+              </section>
+            ) : null}
             {renderCategoryManager()}
+            {renderTrashPanel()}
             {renderInstalledSkills()}
             {renderSkillDetailDrawer()}
           </>

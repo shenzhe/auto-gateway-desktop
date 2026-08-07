@@ -62,6 +62,7 @@ pub enum Ownership {
 #[serde(rename_all = "kebab-case")]
 pub enum SkillStatus {
     Enabled,
+    Disabled,
     Error,
     SourceUnavailable,
 }
@@ -433,8 +434,42 @@ fn reconciled_scan(app: &tauri::AppHandle) -> Result<SkillScanResult, String> {
     if changed {
         save_index_at(&index_path, &index)?;
     }
+    append_disabled_skills(&index, &mut result);
+    result
+        .skills
+        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     result.categories = index.categories.clone();
     Ok(result)
+}
+
+/// Disabled skills live in quarantine (outside the scan root), so add them back
+/// to the result from the index so the UI can list and re-enable them.
+fn append_disabled_skills(index: &SkillIndex, result: &mut SkillScanResult) {
+    for entry in index.entries.values() {
+        if !entry.disabled || entry.removed {
+            continue;
+        }
+        let Some(quarantine_path) = &entry.quarantine_path else {
+            continue;
+        };
+        let path = Path::new(quarantine_path);
+        match build_skill_record(
+            path,
+            SourceType::User,
+            Ownership::UserManaged,
+            TrustLevel::Unverified,
+            &result.scanned_at,
+        ) {
+            Ok(mut record) => {
+                record.id = entry.id.clone();
+                record.status = SkillStatus::Disabled;
+                record.category_id = entry.category_id.clone();
+                record.tags = entry.tags.clone();
+                result.skills.push(record);
+            }
+            Err(failure) => result.failed_sources.push(failure),
+        }
+    }
 }
 
 #[tauri::command]
@@ -683,7 +718,7 @@ pub struct SkillCategory {
     pub archived: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexEntry {
     pub id: String,
@@ -695,9 +730,22 @@ pub struct IndexEntry {
     pub tags: Vec<String>,
     #[serde(default)]
     pub source_type: Option<String>,
-    // Recorded when a skill is moved to quarantine (M3), to restore it later.
+    // Disabled = moved out of the active skills dir into quarantine.
+    #[serde(default)]
+    pub disabled: bool,
+    // Removed = moved to the recoverable trash.
+    #[serde(default)]
+    pub removed: bool,
+    // Current on-disk location while disabled / removed.
+    #[serde(default)]
+    pub quarantine_path: Option<String>,
+    #[serde(default)]
+    pub trash_path: Option<String>,
+    // The directory name to restore to under the skills dir.
     #[serde(default)]
     pub original_relative_path: Option<String>,
+    #[serde(default)]
+    pub removed_at: Option<String>,
     #[serde(default)]
     pub installed_at: Option<String>,
 }
@@ -854,7 +902,10 @@ fn reconcile_index(index: &mut SkillIndex, result: &mut SkillScanResult) -> bool
             .entries
             .iter()
             .find(|(id, entry)| {
-                !used.contains(id.as_str()) && entry.install_path == record.install_path
+                !used.contains(id.as_str())
+                    && !entry.disabled
+                    && !entry.removed
+                    && entry.install_path == record.install_path
             })
             .map(|(id, _)| id.clone())
             .or_else(|| {
@@ -862,7 +913,10 @@ fn reconcile_index(index: &mut SkillIndex, result: &mut SkillScanResult) -> bool
                     .entries
                     .iter()
                     .find(|(id, entry)| {
-                        !used.contains(id.as_str()) && entry.name == record.name
+                        !used.contains(id.as_str())
+                            && !entry.disabled
+                            && !entry.removed
+                            && entry.name == record.name
                     })
                     .map(|(id, _)| id.clone())
             });
@@ -891,11 +945,9 @@ fn reconcile_index(index: &mut SkillIndex, result: &mut SkillScanResult) -> bool
                         id: id.clone(),
                         install_path: record.install_path.clone(),
                         name: record.name.clone(),
-                        category_id: None,
-                        tags: Vec::new(),
                         source_type: Some(source_type_str(record.source_type)),
-                        original_relative_path: None,
                         installed_at: record.installed_at.clone(),
+                        ..Default::default()
                     },
                 );
                 changed = true;
@@ -1092,6 +1144,278 @@ pub fn delete_category(
     let mut index = load_index_at(&path);
     delete_category_in(&mut index, &id, migrate_to)?;
     save_index_at(&path, &index)
+}
+
+// ---------------------------------------------------------------------------
+// Enable / disable / remove / restore — move a skill directory between the
+// active skills dir and AUTO Gateway-managed quarantine/trash areas. Effect
+// takes place on the next Codex session (surfaced as pending reload in the UI).
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoverableSkill {
+    pub id: String,
+    pub name: String,
+    pub removed_at: Option<String>,
+}
+
+fn quarantine_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(skills_data_dir(app)?.join("skills-quarantine"))
+}
+
+fn trash_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(skills_data_dir(app)?.join("skills-trash"))
+}
+
+fn dir_name_of(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+}
+
+fn reject_symlink(path: &Path) -> Result<(), String> {
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() {
+            return Err("refusing to operate on a symlinked skill directory".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn require_user_managed(entry: &IndexEntry) -> Result<(), String> {
+    if entry.source_type.as_deref() == Some("user") {
+        Ok(())
+    } else {
+        Err("only user-installed skills can be changed here".to_string())
+    }
+}
+
+fn copy_dir_all(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir_all(to).map_err(|error| format!("create the destination directory: {error}"))?;
+    for entry in
+        fs::read_dir(from).map_err(|error| format!("read the source directory: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("read a directory entry: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect a directory entry: {error}"))?;
+        let target = to.join(entry.file_name());
+        if file_type.is_symlink() {
+            // Do not copy symlinks out of an untrusted skill directory.
+            continue;
+        }
+        if file_type.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else if file_type.is_file() {
+            fs::copy(entry.path(), &target)
+                .map_err(|error| format!("copy a skill file: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Move a directory, falling back to copy+remove across volumes. On a failed
+/// copy the partial destination is cleaned up.
+fn move_dir(from: &Path, to: &Path) -> Result<(), String> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create the destination directory: {error}"))?;
+    }
+    if to.exists() {
+        return Err("the destination path already exists".to_string());
+    }
+    if fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    if let Err(error) = copy_dir_all(from, to) {
+        let _ = fs::remove_dir_all(to);
+        return Err(error);
+    }
+    fs::remove_dir_all(from).map_err(|error| format!("remove the original directory: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn disable_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let index_path = skill_index_path(&app)?;
+    let mut index = load_index_at(&index_path);
+    let entry = index
+        .entries
+        .get(&id)
+        .ok_or_else(|| "the requested skill was not found".to_string())?;
+    require_user_managed(entry)?;
+    if entry.disabled {
+        return Ok(());
+    }
+    let dir_name =
+        dir_name_of(&entry.install_path).ok_or_else(|| "the skill path is invalid".to_string())?;
+    let skills_dir = default_skills_dir()?;
+    let source = skills_dir.join(&dir_name);
+    reject_symlink(&source)?;
+    if !source.is_dir() {
+        return Err("the skill directory was not found".to_string());
+    }
+    let quarantine = quarantine_root(&app)?.join(&id).join(&dir_name);
+    move_dir(&source, &quarantine)?;
+
+    let entry = index.entries.get_mut(&id).unwrap();
+    entry.disabled = true;
+    entry.quarantine_path = Some(quarantine.to_string_lossy().to_string());
+    entry.original_relative_path = Some(dir_name);
+    if let Err(error) = save_index_at(&index_path, &index) {
+        let _ = move_dir(&quarantine, &source);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn enable_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let index_path = skill_index_path(&app)?;
+    let mut index = load_index_at(&index_path);
+    let entry = index
+        .entries
+        .get(&id)
+        .ok_or_else(|| "the requested skill was not found".to_string())?;
+    require_user_managed(entry)?;
+    if !entry.disabled {
+        return Ok(());
+    }
+    let quarantine_path = entry
+        .quarantine_path
+        .clone()
+        .ok_or_else(|| "the disabled skill location is unknown".to_string())?;
+    let dir_name = entry
+        .original_relative_path
+        .clone()
+        .or_else(|| dir_name_of(&quarantine_path))
+        .ok_or_else(|| "the skill path is invalid".to_string())?;
+    let skills_dir = default_skills_dir()?;
+    let target = skills_dir.join(&dir_name);
+    if target.exists() {
+        return Err("a skill with this name already exists; resolve the conflict first".to_string());
+    }
+    let quarantine = PathBuf::from(&quarantine_path);
+    reject_symlink(&quarantine)?;
+    move_dir(&quarantine, &target)?;
+
+    let entry = index.entries.get_mut(&id).unwrap();
+    entry.disabled = false;
+    entry.quarantine_path = None;
+    entry.install_path = target.to_string_lossy().to_string();
+    if let Err(error) = save_index_at(&index_path, &index) {
+        let _ = move_dir(&target, &quarantine);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remove_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let index_path = skill_index_path(&app)?;
+    let mut index = load_index_at(&index_path);
+    let entry = index
+        .entries
+        .get(&id)
+        .ok_or_else(|| "the requested skill was not found".to_string())?;
+    require_user_managed(entry)?;
+    if entry.removed {
+        return Ok(());
+    }
+    let source = if entry.disabled {
+        PathBuf::from(
+            entry
+                .quarantine_path
+                .clone()
+                .ok_or_else(|| "the disabled skill location is unknown".to_string())?,
+        )
+    } else {
+        let dir_name = dir_name_of(&entry.install_path)
+            .ok_or_else(|| "the skill path is invalid".to_string())?;
+        default_skills_dir()?.join(dir_name)
+    };
+    reject_symlink(&source)?;
+    if !source.is_dir() {
+        return Err("the skill directory was not found".to_string());
+    }
+    let dir_name =
+        dir_name_of(&source.to_string_lossy()).unwrap_or_else(|| "skill".to_string());
+    let stamp = now_millis();
+    let trash = trash_root(&app)?
+        .join(format!("{id}-{stamp}"))
+        .join(&dir_name);
+    move_dir(&source, &trash)?;
+
+    let entry = index.entries.get_mut(&id).unwrap();
+    entry.removed = true;
+    entry.disabled = false;
+    entry.quarantine_path = None;
+    entry.trash_path = Some(trash.to_string_lossy().to_string());
+    entry.removed_at = Some(stamp);
+    entry.original_relative_path = Some(dir_name);
+    if let Err(error) = save_index_at(&index_path, &index) {
+        let _ = move_dir(&trash, &source);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn restore_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let index_path = skill_index_path(&app)?;
+    let mut index = load_index_at(&index_path);
+    let entry = index
+        .entries
+        .get(&id)
+        .ok_or_else(|| "the requested skill was not found".to_string())?;
+    if !entry.removed {
+        return Ok(());
+    }
+    let trash_path = entry
+        .trash_path
+        .clone()
+        .ok_or_else(|| "the removed skill location is unknown".to_string())?;
+    let dir_name = entry
+        .original_relative_path
+        .clone()
+        .or_else(|| dir_name_of(&trash_path))
+        .ok_or_else(|| "the skill path is invalid".to_string())?;
+    let skills_dir = default_skills_dir()?;
+    let target = skills_dir.join(&dir_name);
+    if target.exists() {
+        return Err("a skill with this name already exists; resolve the conflict first".to_string());
+    }
+    let trash = PathBuf::from(&trash_path);
+    reject_symlink(&trash)?;
+    move_dir(&trash, &target)?;
+
+    let entry = index.entries.get_mut(&id).unwrap();
+    entry.removed = false;
+    entry.trash_path = None;
+    entry.install_path = target.to_string_lossy().to_string();
+    if let Err(error) = save_index_at(&index_path, &index) {
+        let _ = move_dir(&target, &trash);
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_recoverable_skills(app: tauri::AppHandle) -> Result<Vec<RecoverableSkill>, String> {
+    let index = load_index_at(&skill_index_path(&app)?);
+    let mut items: Vec<RecoverableSkill> = index
+        .entries
+        .values()
+        .filter(|entry| entry.removed)
+        .map(|entry| RecoverableSkill {
+            id: entry.id.clone(),
+            name: entry.name.clone(),
+            removed_at: entry.removed_at.clone(),
+        })
+        .collect();
+    items.sort_by(|a, b| b.removed_at.cmp(&a.removed_at));
+    Ok(items)
 }
 
 #[cfg(test)]
@@ -1330,10 +1654,7 @@ mod tests {
                 install_path: "/p".into(),
                 name: "n".into(),
                 category_id: Some("custom-x".into()),
-                tags: vec![],
-                source_type: None,
-                original_relative_path: None,
-                installed_at: None,
+                ..Default::default()
             },
         );
 
@@ -1347,5 +1668,110 @@ mod tests {
             index.entries["e1"].category_id.as_deref(),
             Some("development")
         );
+    }
+
+    #[test]
+    fn move_dir_relocates_a_tree_and_removes_the_source() {
+        let root = temp_root("move");
+        let from = root.join("from");
+        fs::create_dir_all(from.join("nested")).expect("nested");
+        fs::write(from.join("SKILL.md"), "x").expect("file");
+        fs::write(from.join("nested/inner.txt"), "y").expect("inner");
+        let to = root.join("dest").join("from");
+
+        move_dir(&from, &to).expect("move");
+        assert!(!from.exists());
+        assert!(to.join("SKILL.md").is_file());
+        assert!(to.join("nested/inner.txt").is_file());
+
+        // Refuses to overwrite an existing destination.
+        let other = root.join("other");
+        fs::create_dir_all(&other).expect("other");
+        assert!(move_dir(&other, &to).is_err());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copy_dir_all_skips_symlinks() {
+        let root = temp_root("copy");
+        let from = root.join("from");
+        fs::create_dir_all(&from).expect("from");
+        fs::write(from.join("real.txt"), "ok").expect("real");
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc/hosts", from.join("link")).expect("symlink");
+        }
+        let to = root.join("to");
+        copy_dir_all(&from, &to).expect("copy");
+        assert!(to.join("real.txt").is_file());
+        assert!(!to.join("link").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconcile_skips_disabled_entries_so_new_same_name_gets_new_id() {
+        let dir = temp_root("reconcile-disabled");
+        write_skill(
+            &dir,
+            "release-notes",
+            "---\nname: release-notes\ndescription: d.\n---\n",
+        );
+        let mut index = SkillIndex::default();
+        // Pre-existing DISABLED entry with the same name but a stale path.
+        index.entries.insert(
+            "old".into(),
+            IndexEntry {
+                id: "old".into(),
+                install_path: "/gone/release-notes".into(),
+                name: "release-notes".into(),
+                source_type: Some("user".into()),
+                disabled: true,
+                quarantine_path: Some("/gone/release-notes".into()),
+                ..Default::default()
+            },
+        );
+        let mut result = scan_skills_in(&dir);
+        reconcile_index(&mut index, &mut result);
+        // The active skill must NOT adopt the disabled entry's id.
+        assert_ne!(result.skills[0].id, "old");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_disabled_skills_lists_quarantined_skill() {
+        let root = temp_root("append-disabled");
+        let quarantine = root.join("q").join("release-notes");
+        fs::create_dir_all(&quarantine).expect("quarantine");
+        fs::write(
+            quarantine.join(SKILL_MANIFEST_FILE),
+            "---\nname: release-notes\ndescription: d.\n---\n",
+        )
+        .expect("manifest");
+
+        let mut index = SkillIndex::default();
+        index.entries.insert(
+            "e1".into(),
+            IndexEntry {
+                id: "e1".into(),
+                install_path: "/skills/release-notes".into(),
+                name: "release-notes".into(),
+                source_type: Some("user".into()),
+                disabled: true,
+                quarantine_path: Some(quarantine.to_string_lossy().to_string()),
+                ..Default::default()
+            },
+        );
+        let mut result = SkillScanResult {
+            skills: Vec::new(),
+            failed_sources: Vec::new(),
+            categories: Vec::new(),
+            scanned_at: now_millis(),
+        };
+        append_disabled_skills(&index, &mut result);
+        assert_eq!(result.skills.len(), 1);
+        assert_eq!(result.skills[0].id, "e1");
+        assert_eq!(result.skills[0].status, SkillStatus::Disabled);
+        let _ = fs::remove_dir_all(&root);
     }
 }

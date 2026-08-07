@@ -2822,6 +2822,27 @@ h1 {
 .skillInstallPath {
   min-width: 0;
 }
+.skillStatusBadge.disabled {
+  color: var(--subtle);
+  border-color: var(--line);
+  background: var(--panel-soft);
+}
+.skillTag.pending {
+  color: var(--warning);
+  border-color: color-mix(in oklch, var(--warning) 40%, var(--line));
+  background: var(--warning-soft);
+}
+.skillDrawerActions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.skillPendingNote {
+  color: var(--warning);
+  background: var(--warning-soft);
+  border-color: color-mix(in oklch, var(--warning) 30%, var(--line));
+}
 @media (max-width: 700px) {
   .skillOverview {
     grid-template-columns: repeat(2, 1fr);
