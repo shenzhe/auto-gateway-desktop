@@ -1880,6 +1880,156 @@ pub async fn install_skill(
     outcome
 }
 
+// ---------------------------------------------------------------------------
+// Export a user skill as a standard ZIP package with a SHA-256 checksum.
+// (Import is the existing zip install path — install_skill kind="zip".)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportResult {
+    pub zip_path: String,
+    pub sha256: String,
+    pub size_bytes: u64,
+    pub warnings: Vec<RiskFinding>,
+}
+
+fn sha256_hex_of_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| format!("read the package: {error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("hash the package: {error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn write_skill_zip(root: &Path, files: &[SkillFileEntry], dest: &Path) -> Result<(), String> {
+    let file =
+        fs::File::create(dest).map_err(|error| format!("create the package file: {error}"))?;
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+    for entry in files {
+        writer
+            .start_file(&entry.relative_path, options)
+            .map_err(|error| format!("add a file to the package: {error}"))?;
+        let bytes = fs::read(root.join(&entry.relative_path))
+            .map_err(|error| format!("read a skill file: {error}"))?;
+        writer
+            .write_all(&bytes)
+            .map_err(|error| format!("write a file to the package: {error}"))?;
+    }
+    writer
+        .finish()
+        .map_err(|error| format!("finish the package: {error}"))?;
+    Ok(())
+}
+
+/// Light, non-blocking scan for content that a user probably should not
+/// distribute: absolute paths pointing at their home directory, or private-key
+/// markers. Only small text files are inspected.
+fn scan_export_warnings(root: &Path, files: &[SkillFileEntry]) -> Vec<RiskFinding> {
+    const TEXT_EXTS: &[&str] = &[
+        "md", "txt", "py", "js", "ts", "json", "yaml", "yml", "toml", "sh", "cfg", "ini",
+    ];
+    const SECRET_MARKERS: &[&str] = &[
+        "BEGIN RSA PRIVATE KEY",
+        "BEGIN PRIVATE KEY",
+        "BEGIN OPENSSH PRIVATE KEY",
+        "aws_secret_access_key",
+    ];
+    let home = dirs::home_dir().map(|path| path.to_string_lossy().to_string());
+    let mut findings = Vec::new();
+    for entry in files {
+        let is_text = Path::new(&entry.relative_path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| TEXT_EXTS.contains(&ext.to_ascii_lowercase().as_str()))
+            .unwrap_or(false);
+        if !is_text || entry.size_bytes > 1024 * 1024 {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(root.join(&entry.relative_path)) else {
+            continue;
+        };
+        if let Some(home) = &home {
+            if home.len() > 1 && content.contains(home.as_str()) {
+                findings.push(RiskFinding {
+                    code: "ABSOLUTE_PATH".to_string(),
+                    severity: "warning".to_string(),
+                    path: Some(entry.relative_path.clone()),
+                    message: "contains an absolute path to your home directory".to_string(),
+                });
+            }
+        }
+        if SECRET_MARKERS.iter().any(|marker| content.contains(marker)) {
+            findings.push(RiskFinding {
+                code: "POSSIBLE_SECRET".to_string(),
+                severity: "warning".to_string(),
+                path: Some(entry.relative_path.clone()),
+                message: "may contain a private key or credential".to_string(),
+            });
+        }
+    }
+    findings
+}
+
+#[tauri::command]
+pub fn export_skill(app: tauri::AppHandle, id: String) -> Result<ExportResult, String> {
+    let record = reconciled_scan(&app)?
+        .skills
+        .into_iter()
+        .find(|skill| skill.id == id)
+        .ok_or_else(|| "the requested skill was not found".to_string())?;
+    if record.ownership != Ownership::UserManaged {
+        return Err("only user-installed skills can be exported".to_string());
+    }
+    let root = PathBuf::from(&record.install_path);
+    let (files, total_size, truncated) = walk_skill_files(&root);
+    if truncated || files.len() > MAX_INSTALL_FILES || total_size > MAX_UNPACKED_BYTES {
+        return Err("the skill is too large to export".to_string());
+    }
+    if files.is_empty() {
+        return Err("the skill has no files to export".to_string());
+    }
+    let warnings = scan_export_warnings(&root, &files);
+
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(|error| format!("find the Downloads folder: {error}"))?;
+    fs::create_dir_all(&downloads)
+        .map_err(|error| format!("create the Downloads folder: {error}"))?;
+    let stem = if is_valid_skill_name(&record.name) {
+        record.name.clone()
+    } else {
+        "skill".to_string()
+    };
+    let mut dest = downloads.join(format!("{stem}.zip"));
+    if dest.exists() {
+        dest = downloads.join(format!("{stem}-{}.zip", now_millis()));
+    }
+    write_skill_zip(&root, &files, &dest)?;
+    let sha256 = sha256_hex_of_file(&dest)?;
+    let size_bytes = fs::metadata(&dest).map(|meta| meta.len()).unwrap_or(0);
+    Ok(ExportResult {
+        zip_path: dest.to_string_lossy().to_string(),
+        sha256,
+        size_bytes,
+        warnings,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2265,6 +2415,51 @@ mod tests {
         );
         assert!(extract_zip_safe(&linked, &root.join("l")).is_err());
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_skill_zip_roundtrips_and_hashes_stably() {
+        let root = temp_root("export");
+        let pkg = root.join("pkg");
+        fs::create_dir_all(pkg.join("scripts")).expect("scripts");
+        fs::write(
+            pkg.join(SKILL_MANIFEST_FILE),
+            "---\nname: demo\ndescription: d.\n---\n",
+        )
+        .expect("manifest");
+        fs::write(pkg.join("scripts/run.py"), "print('x')\n").expect("script");
+
+        let (files, _size, _truncated) = walk_skill_files(&pkg);
+        let zip_a = root.join("a.zip");
+        write_skill_zip(&pkg, &files, &zip_a).expect("zip a");
+        let zip_b = root.join("b.zip");
+        write_skill_zip(&pkg, &files, &zip_b).expect("zip b");
+
+        // Re-open and confirm the manifest is present.
+        let file = fs::File::open(&zip_a).expect("open");
+        let mut archive = zip::ZipArchive::new(file).expect("archive");
+        assert!(archive.by_name(SKILL_MANIFEST_FILE).is_ok());
+
+        // Same content → same checksum.
+        assert_eq!(
+            sha256_hex_of_file(&zip_a).unwrap(),
+            sha256_hex_of_file(&zip_b).unwrap()
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_export_warnings_flags_private_key() {
+        let root = temp_root("export-warn");
+        fs::write(
+            root.join(SKILL_MANIFEST_FILE),
+            "---\nname: demo\ndescription: d.\n---\n-----BEGIN PRIVATE KEY-----\n",
+        )
+        .expect("manifest");
+        let (files, _s, _t) = walk_skill_files(&root);
+        let warnings = scan_export_warnings(&root, &files);
+        assert!(warnings.iter().any(|w| w.code == "POSSIBLE_SECRET"));
         let _ = fs::remove_dir_all(&root);
     }
 

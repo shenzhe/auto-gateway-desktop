@@ -328,6 +328,17 @@ export function installSkill(
   return invoke<void>("install_skill", { kind, location, replace });
 }
 
+export type SkillExportResult = {
+  zipPath: string;
+  sha256: string;
+  sizeBytes: number;
+  warnings: SkillRiskFinding[];
+};
+
+export function exportSkill(id: string): Promise<SkillExportResult> {
+  return invoke<SkillExportResult>("export_skill", { id });
+}
+
 export function getCodexAppStatus(): Promise<CodexAppStatus> {
   return invoke<CodexAppStatus>("get_codex_app_status");
 }

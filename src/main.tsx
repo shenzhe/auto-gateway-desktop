@@ -75,6 +75,7 @@ import {
   listRecoverableSkills,
   validateSkillSource,
   installSkill,
+  exportSkill,
   signOutDesktop,
   showMainWindow,
   updateTrayStatus,
@@ -94,6 +95,7 @@ import {
   type SkillInstallPreview,
   type SkillInstallSourceKind,
   type SkillInstallProgress,
+  type SkillExportResult,
 } from "./desktop";
 import {
   readLocalePreference,
@@ -1300,6 +1302,10 @@ function App() {
   const [installError, setInstallError] = useState("");
   const [skillInstallProgress, setSkillInstallProgress] =
     useState<SkillInstallProgress | null>(null);
+  const [exportResult, setExportResult] = useState<SkillExportResult | null>(
+    null,
+  );
+  const [exportBusy, setExportBusy] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
   const [localePreference, setLocalePreference] = useState<LocalePreference>(
     () => readLocalePreference(),
@@ -1360,6 +1366,7 @@ function App() {
 
   useEffect(() => {
     setSkillTagDraft(skillDetail ? skillDetail.tags.join(", ") : "");
+    setExportResult(null);
   }, [skillDetail]);
 
   useEffect(() => {
@@ -2545,6 +2552,19 @@ function App() {
     }
   }
 
+  async function exportCurrentSkill(id: string) {
+    setExportBusy(true);
+    setSkillCategoryError("");
+    setExportResult(null);
+    try {
+      setExportResult(await exportSkill(id));
+    } catch (error) {
+      setSkillCategoryError(String(error));
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
   function skillStatusLabel(status: SkillRecord["status"]): string {
     switch (status) {
       case "enabled":
@@ -2840,11 +2860,48 @@ function App() {
                         {tr("skillRemove")}
                       </button>
                     )}
+                    <button
+                      className="linkButton"
+                      disabled={exportBusy}
+                      onClick={() => void exportCurrentSkill(skillDetail.id)}
+                    >
+                      {tr("skillExport")}
+                    </button>
                   </div>
                 )}
                 {pendingReloadIds.has(skillDetail.id) ? (
                   <section className="notice skillPendingNote">
                     <span>{tr("skillPendingReloadNote")}</span>
+                  </section>
+                ) : null}
+                {exportResult ? (
+                  <section className="notice skillExportResult">
+                    <strong>{tr("skillExportDone")}</strong>
+                    <div className="skillInstallPath">
+                      {exportResult.zipPath}
+                    </div>
+                    <div className="skillChecksum">
+                      SHA-256: {exportResult.sha256}
+                    </div>
+                    <button
+                      className="linkButton"
+                      onClick={() =>
+                        void navigator.clipboard?.writeText(exportResult.sha256)
+                      }
+                    >
+                      {tr("skillExportCopyChecksum")}
+                    </button>
+                    {exportResult.warnings.length > 0 ? (
+                      <ul className="skillScriptList">
+                        {exportResult.warnings.map((warning, index) => (
+                          <li key={`${warning.code}-${index}`}>
+                            {warning.path
+                              ? `${warning.path}: ${warning.message}`
+                              : warning.message}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
                   </section>
                 ) : null}
                 {skillDetail.markdownBody ? (
