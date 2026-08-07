@@ -15,10 +15,10 @@ use codex_config::{
 };
 use desktop_auth::{
     bootstrap_desktop_key, clear_desktop_session, clear_stored_desktop_api_key,
-    create_desktop_console_ticket, desktop_account_summary, exchange_desktop_authorization,
-    installation_id, refresh_desktop_state, restore_desktop_state, save_desktop_api_key,
-    save_desktop_session, DesktopAccountSummary, DesktopBootstrapKey, DesktopSession,
-    StoredDesktopState,
+    create_desktop_console_ticket, desktop_account_summary, desktop_notifications,
+    exchange_desktop_authorization, installation_id, refresh_desktop_state, restore_desktop_state,
+    save_desktop_api_key, save_desktop_session, DesktopAccountSummary, DesktopBootstrapKey,
+    DesktopNotificationList, DesktopSession, StoredDesktopState,
 };
 use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
@@ -213,6 +213,13 @@ async fn get_desktop_account_summary_command(
 }
 
 #[tauri::command]
+async fn get_desktop_notifications_command(
+    access_token: String,
+) -> Result<DesktopNotificationList, String> {
+    desktop_notifications(&access_token).await
+}
+
+#[tauri::command]
 fn update_tray_status_command(
     app: AppHandle,
     username: String,
@@ -366,6 +373,72 @@ async fn open_console(
 }
 
 #[tauri::command]
+fn open_notification_window(app: AppHandle, notification_id: i64) -> Result<(), String> {
+    if notification_id <= 0 {
+        return Err("the notification ID is invalid".to_string());
+    }
+    let query = format!("notificationId={notification_id}");
+    if let Some(window) = app.get_webview_window("notification-detail") {
+        let mut url = window
+            .url()
+            .map_err(|error| format!("read the notification window URL: {error}"))?;
+        url.set_query(Some(&query));
+        window
+            .navigate(url)
+            .map_err(|error| format!("load the notification: {error}"))?;
+        window
+            .show()
+            .map_err(|error| format!("show the notification window: {error}"))?;
+        window
+            .set_focus()
+            .map_err(|error| format!("focus the notification window: {error}"))?;
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(
+        &app,
+        "notification-detail",
+        WebviewUrl::App(format!("index.html?{query}").into()),
+    )
+    .title("AUTO Gateway Announcement")
+    .inner_size(760.0, 720.0)
+    .min_inner_size(520.0, 520.0)
+    .center()
+    .build()
+    .map_err(|error| format!("open the notification window: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_notification_browser(app: AppHandle, url: String) -> Result<(), String> {
+    let url =
+        Url::parse(url.trim()).map_err(|error| format!("invalid notification link: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("notification links must use a valid HTTP or HTTPS URL".to_string());
+    }
+    if let Some(window) = app.get_webview_window("notification-browser") {
+        window
+            .navigate(url)
+            .map_err(|error| format!("load the notification link: {error}"))?;
+        window
+            .show()
+            .map_err(|error| format!("show the notification browser: {error}"))?;
+        window
+            .set_focus()
+            .map_err(|error| format!("focus the notification browser: {error}"))?;
+        return Ok(());
+    }
+    WebviewWindowBuilder::new(&app, "notification-browser", WebviewUrl::External(url))
+        .title("AUTO Gateway Browser")
+        .inner_size(1180.0, 820.0)
+        .min_inner_size(720.0, 520.0)
+        .center()
+        .initialization_script(DISABLE_CONTEXT_MENU_SCRIPT)
+        .build()
+        .map_err(|error| format!("open the notification browser: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn open_devtools(app: AppHandle) -> Result<(), String> {
     let mut opened = 0;
     for label in ["main", "console"] {
@@ -446,11 +519,14 @@ fn main() {
             sign_out_desktop_command,
             close_desktop_sign_in_command,
             get_desktop_account_summary_command,
+            get_desktop_notifications_command,
             update_tray_status_command,
             show_main_window,
             get_desktop_app_version,
             clear_stored_desktop_api_key_command,
             open_console,
+            open_notification_window,
+            open_notification_browser,
             open_devtools
         ])
         .build(tauri::generate_context!())

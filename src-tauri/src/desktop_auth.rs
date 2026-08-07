@@ -88,6 +88,31 @@ pub struct DesktopAccountSummary {
     pub balance: String,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopNotification {
+    pub id: i64,
+    pub audience: String,
+    pub title: String,
+    pub body: String,
+    pub severity: Option<String>,
+    pub link_url: Option<String>,
+    pub sort_order: Option<i64>,
+    pub popup_default: Option<bool>,
+    pub enabled: Option<bool>,
+    pub starts_at: Option<String>,
+    pub ends_at: Option<String>,
+    pub read_at: Option<String>,
+    pub created_at: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopNotificationList {
+    pub items: Vec<DesktopNotification>,
+    pub unread_count: Option<u64>,
+}
+
 #[derive(Deserialize)]
 struct DesktopPurchaseResponse {
     account: DesktopAccountSummary,
@@ -293,6 +318,18 @@ pub async fn desktop_account_summary(access_token: &str) -> Result<DesktopAccoun
             .await?
             .account,
     )
+}
+
+pub async fn desktop_notifications(access_token: &str) -> Result<DesktopNotificationList, String> {
+    let response = desktop_http_client()?
+        .get(format!(
+            "{AUTO_GATEWAY_API_BASE_URL}/user/api/notifications"
+        ))
+        .bearer_auth(access_token.trim())
+        .send()
+        .await
+        .map_err(|error| format!("contact AUTO Gateway: {error}"))?;
+    decode_response(response, "read desktop notifications").await
 }
 
 async fn refresh_desktop_session(

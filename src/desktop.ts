@@ -88,6 +88,27 @@ export type DesktopAccountSummary = {
   balance: string;
 };
 
+export type DesktopNotification = {
+  id: number;
+  audience: string;
+  title: string;
+  body: string;
+  severity?: string;
+  linkUrl?: string;
+  sortOrder?: number;
+  popupDefault?: boolean;
+  enabled?: boolean;
+  startsAt?: string;
+  endsAt?: string;
+  readAt?: string;
+  createdAt?: string;
+};
+
+export type DesktopNotificationList = {
+  items: DesktopNotification[];
+  unreadCount?: number;
+};
+
 export function getCodexStatus(): Promise<CodexStatus> {
   return invoke<CodexStatus>("get_codex_status");
 }
@@ -146,6 +167,24 @@ export function getDesktopAccountSummary(
   return invoke<DesktopAccountSummary>("get_desktop_account_summary_command", {
     accessToken,
   });
+}
+
+export function getDesktopNotifications(
+  accessToken: string,
+): Promise<DesktopNotificationList> {
+  return invoke<DesktopNotificationList>("get_desktop_notifications_command", {
+    accessToken,
+  });
+}
+
+export function openNotificationWindow(notificationID: number): Promise<void> {
+  return invoke<void>("open_notification_window", {
+    notificationId: notificationID,
+  });
+}
+
+export function openNotificationBrowser(url: string): Promise<void> {
+  return invoke<void>("open_notification_browser", { url });
 }
 
 export function updateTrayStatus(

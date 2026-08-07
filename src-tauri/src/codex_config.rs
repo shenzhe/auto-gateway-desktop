@@ -99,9 +99,12 @@ fn classify_provider(content: Option<&str>) -> (bool, CodexProviderStatus) {
     let Ok(document) = content.parse::<DocumentMut>() else {
         return (false, CodexProviderStatus::Invalid);
     };
-    let Some(provider) = document
-        .get("model_provider")
-        .and_then(Item::as_str)
+    let Some(provider_item) = document.get("model_provider") else {
+        // Codex uses the official OpenAI provider when no custom provider is configured.
+        return (false, CodexProviderStatus::Openai);
+    };
+    let Some(provider) = provider_item
+        .as_str()
         .map(str::trim)
         .filter(|provider| !provider.is_empty())
     else {
@@ -596,8 +599,9 @@ base_url = "https://example.com/v1"
         fs::write(&config, "model = \"gpt-5\"\n").expect("write config");
         let status = CodexPaths { config, auth }.status().expect("read status");
         assert!(!status.configured);
-        assert!(!status.config_valid);
+        assert!(status.config_valid);
         assert_eq!(status.model_provider, None);
+        assert_eq!(status.provider_status, CodexProviderStatus::Openai);
         fs::remove_dir_all(directory).expect("remove test directory");
     }
 
@@ -666,7 +670,7 @@ base_url = "https://example.com/v1"
         );
         assert_eq!(
             classify_provider(Some("model = \"gpt-5\"\n")),
-            (false, CodexProviderStatus::Invalid)
+            (false, CodexProviderStatus::Openai)
         );
     }
 }

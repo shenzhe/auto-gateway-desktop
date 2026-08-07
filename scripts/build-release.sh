@@ -336,9 +336,10 @@ build_macos() {
 build_windows_target() {
   local target="$1"
   local suffix="$2"
-  local source
   local output="$release_dir/AUTO Gateway Desktop_${version}_${suffix}-setup.exe"
   local target_dir="$root_dir/src-tauri/target/windows-$suffix"
+  local bundle_dir="$target_dir/$target/release/bundle/nsis"
+  local source="$bundle_dir/AUTO Gateway Desktop_${version}_${suffix}-setup.exe"
   local target_env_name="${target//-/_}"
 
   rustup target add "$target"
@@ -365,12 +366,21 @@ build_windows_target() {
   # (notably ring) emit target-specific object files under the shared Cargo
   # target directory and cannot safely be reused by another Windows target.
   export CARGO_TARGET_DIR="$target_dir"
+  # A prior build can leave installers for older versions in this directory.
+  # Remove only this release's expected paths so a failed build cannot reuse it.
+  rm -f -- "$source" "$source.sig"
   npm run tauri build -- --target "$target" --bundles nsis
   mkdir -p "$release_dir"
-  source="$(find "$target_dir/$target/release/bundle/nsis" -name '*-setup.exe' -type f -print -quit)"
-  [[ -n "$source" ]] || { echo "Windows installer was not produced for $target." >&2; exit 1; }
+  [[ -s "$source" ]] || {
+    echo "Windows installer was not produced at the expected current-version path: $source" >&2
+    exit 1
+  }
   cp "$source" "$output"
-  if [[ -f "$source.sig" ]]; then
+  cmp -s "$source" "$output" || {
+    echo "Copied Windows installer does not match the current-version build output." >&2
+    exit 1
+  }
+  if [[ -s "$source.sig" ]]; then
     cp "$source.sig" "$output.sig"
   else
     echo "Windows updater signature was not produced: $source.sig" >&2

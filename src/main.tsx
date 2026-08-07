@@ -5,24 +5,31 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
+  ArrowLeftIcon,
   ArrowRightIcon,
   ArrowUUpLeftIcon,
   ArrowsClockwiseIcon,
+  BellIcon,
+  CaretDownIcon,
   CheckCircleIcon,
   CheckIcon,
   CircleNotchIcon,
   CopyIcon,
   CubeIcon,
   CurrencyDollarIcon,
+  DesktopIcon,
   GearIcon,
   HouseIcon,
   ChatCircleTextIcon,
+  MoonIcon,
   QuestionIcon,
   SignOutIcon,
+  SunIcon,
+  TranslateIcon,
   UserCircleIcon,
   WarningIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import {
   bootstrapDesktopKey,
@@ -35,6 +42,7 @@ import {
   getCodexStatus,
   getDesktopAccountSummary,
   getDesktopAppVersion,
+  getDesktopNotifications,
   getLocalCodexAppStatus,
   installCodex,
   isCodexRunning,
@@ -42,6 +50,8 @@ import {
   openDesktopSignIn,
   openCodex,
   openConsole,
+  openNotificationBrowser,
+  openNotificationWindow,
   openDevtools,
   refreshDesktopState,
   restoreDesktopState,
@@ -53,6 +63,8 @@ import {
   type CodexInstallProgress,
   type CodexStatus,
   type DesktopAccountSummary,
+  type DesktopNotification,
+  type DesktopNotificationList,
   type DesktopSession,
 } from "./desktop";
 import {
@@ -69,6 +81,12 @@ const defaultEndpoint = "https://api.autogateway.cc";
 const pendingAuthorizationStorageKey =
   "autogateway.desktop.pending-authorization";
 const setupCompletedStoragePrefix = "autogateway.desktop.setup-completed";
+const notificationReadStoragePrefix =
+  "autogateway.desktop.notification-reads.v1";
+const notificationWindowStorageKey =
+  "autogateway.desktop.notification-window.v1";
+const notificationDetailQueryKey = "notificationId";
+const notificationPageSize = 5;
 const externalInstallationTimeoutMs = 5 * 60 * 1000;
 const designPreviewState = import.meta.env.DEV
   ? new URLSearchParams(window.location.search).get("preview")
@@ -131,6 +149,297 @@ function setupCompletedStorageKey(userID: number): string {
   return `${setupCompletedStoragePrefix}:${userID}`;
 }
 
+function notificationReadStorageKey(userID: number): string {
+  return `${notificationReadStoragePrefix}:${userID}`;
+}
+
+function loadNotificationReads(userID: number): Set<number> {
+  try {
+    const raw = window.localStorage.getItem(notificationReadStorageKey(userID));
+    const parsed = JSON.parse(raw ?? "[]");
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function saveNotificationReads(userID: number, reads: Set<number>): void {
+  const compactReads = Array.from(reads).slice(-500);
+  window.localStorage.setItem(
+    notificationReadStorageKey(userID),
+    JSON.stringify(compactReads),
+  );
+}
+
+type NotificationWindowPayload = {
+  userID: number;
+  activeID: number;
+  items: DesktopNotification[];
+};
+
+function saveNotificationWindowPayload(
+  payload: NotificationWindowPayload,
+): void {
+  window.localStorage.setItem(
+    notificationWindowStorageKey,
+    JSON.stringify(payload),
+  );
+}
+
+function loadNotificationWindowPayload(): NotificationWindowPayload | null {
+  try {
+    const raw = window.localStorage.getItem(notificationWindowStorageKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as NotificationWindowPayload;
+    if (
+      !parsed ||
+      !Number.isFinite(parsed.userID) ||
+      !Number.isFinite(parsed.activeID) ||
+      !Array.isArray(parsed.items)
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function readNotificationDetailID(): number | null {
+  const rawID = new URLSearchParams(window.location.search).get(
+    notificationDetailQueryKey,
+  );
+  if (!rawID) return null;
+  const notificationID = Number(rawID);
+  return Number.isFinite(notificationID) && notificationID > 0
+    ? notificationID
+    : null;
+}
+
+function renderMarkdownInline(
+  value: string,
+  onOpenLink: (url: string) => void,
+): ReactNode[] {
+  const pattern =
+    /(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|`([^`]+)`|\*\*(.+?)\*\*|__(.+?)__|~~(.+?)~~|\*(.+?)\*|_(.+?)_|(https?:\/\/[^\s<]+))/g;
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  let key = 0;
+  while ((match = pattern.exec(value)) !== null) {
+    if (match.index > cursor) nodes.push(value.slice(cursor, match.index));
+    const fullMatch = match[0];
+    const linkLabel = match[2];
+    const linkURL = match[3];
+    const code = match[4];
+    const strong = match[5] || match[6];
+    const strike = match[7];
+    const emphasis = match[8] || match[9];
+    const plainURL = match[10];
+    if (linkLabel && linkURL) {
+      nodes.push(
+        <button
+          className="markdownLink"
+          key={`link-${key++}`}
+          type="button"
+          onClick={() => onOpenLink(linkURL)}
+        >
+          {linkLabel}
+        </button>,
+      );
+    } else if (code) {
+      nodes.push(
+        <code className="markdownInlineCode" key={`code-${key++}`}>
+          {code}
+        </code>,
+      );
+    } else if (strong) {
+      nodes.push(<strong key={`strong-${key++}`}>{strong}</strong>);
+    } else if (strike) {
+      nodes.push(<del key={`strike-${key++}`}>{strike}</del>);
+    } else if (emphasis) {
+      nodes.push(<em key={`emphasis-${key++}`}>{emphasis}</em>);
+    } else if (plainURL) {
+      const trailing = plainURL.match(/[.,!?;:]+$/)?.[0] ?? "";
+      const url = trailing ? plainURL.slice(0, -trailing.length) : plainURL;
+      nodes.push(
+        <button
+          className="markdownLink"
+          key={`url-${key++}`}
+          type="button"
+          onClick={() => onOpenLink(url)}
+        >
+          {url}
+        </button>,
+      );
+      if (trailing) nodes.push(trailing);
+    } else {
+      nodes.push(fullMatch);
+    }
+    cursor = match.index + fullMatch.length;
+  }
+  if (cursor < value.length) nodes.push(value.slice(cursor));
+  return nodes;
+}
+
+function isMarkdownBlockStart(line: string): boolean {
+  return (
+    /^#{1,6}\s+/.test(line) ||
+    /^```/.test(line) ||
+    /^~~~/.test(line) ||
+    /^>\s?/.test(line) ||
+    /^[-*+]\s+/.test(line) ||
+    /^\d+[.)]\s+/.test(line) ||
+    /^([-*_])(?:\s*\1){2,}$/.test(line)
+  );
+}
+
+function renderMarkdownBlocks(
+  markdown: string,
+  onOpenLink: (url: string) => void,
+): ReactNode[] {
+  const lines = markdown.replaceAll("\r\n", "\n").split("\n");
+  const nodes: ReactNode[] = [];
+  let index = 0;
+  let key = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+    const fence = line.match(/^\s*(```|~~~)\s*.*$/);
+    if (fence) {
+      const fenceMarker = fence[1];
+      const codeLines: string[] = [];
+      index += 1;
+      while (
+        index < lines.length &&
+        !lines[index].trimStart().startsWith(fenceMarker)
+      ) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      nodes.push(
+        <pre className="markdownCodeBlock" key={`code-block-${key++}`}>
+          <code>{codeLines.join("\n")}</code>
+        </pre>,
+      );
+      continue;
+    }
+    const heading = line.match(/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      const level = Math.min(heading[1].length, 4) as 1 | 2 | 3 | 4;
+      const Heading = `h${level}` as "h1" | "h2" | "h3" | "h4";
+      nodes.push(
+        <Heading key={`heading-${key++}`}>
+          {renderMarkdownInline(heading[2], onOpenLink)}
+        </Heading>,
+      );
+      index += 1;
+      continue;
+    }
+    if (/^\s*>\s?/.test(line)) {
+      const quoteLines: string[] = [];
+      while (index < lines.length && /^\s*>\s?/.test(lines[index])) {
+        quoteLines.push(lines[index].replace(/^\s*>\s?/, ""));
+        index += 1;
+      }
+      nodes.push(
+        <blockquote key={`quote-${key++}`}>
+          {renderMarkdownBlocks(quoteLines.join("\n"), onOpenLink)}
+        </blockquote>,
+      );
+      continue;
+    }
+    const unordered = /^\s*[-*+]\s+(.+)$/.test(line);
+    const ordered = /^\s*\d+[.)]\s+(.+)$/.test(line);
+    if (unordered || ordered) {
+      const items: string[] = [];
+      const itemPattern = ordered
+        ? /^\s*\d+[.)]\s+(.+)$/
+        : /^\s*[-*+]\s+(.+)$/;
+      while (index < lines.length) {
+        const item = lines[index].match(itemPattern);
+        if (!item) break;
+        items.push(item[1]);
+        index += 1;
+      }
+      const List = ordered ? "ol" : "ul";
+      nodes.push(
+        <List key={`list-${key++}`}>
+          {items.map((item, itemIndex) => (
+            <li key={`list-item-${itemIndex}`}>
+              {renderMarkdownInline(item, onOpenLink)}
+            </li>
+          ))}
+        </List>,
+      );
+      continue;
+    }
+    if (/^\s*([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+      nodes.push(<hr key={`rule-${key++}`} />);
+      index += 1;
+      continue;
+    }
+    const paragraphLines = [line];
+    index += 1;
+    while (
+      index < lines.length &&
+      lines[index].trim() &&
+      !isMarkdownBlockStart(lines[index])
+    ) {
+      paragraphLines.push(lines[index]);
+      index += 1;
+    }
+    nodes.push(
+      <p key={`paragraph-${key++}`}>
+        {paragraphLines.map((paragraphLine, lineIndex) => (
+          <span key={`paragraph-line-${lineIndex}`}>
+            {lineIndex > 0 ? <br /> : null}
+            {renderMarkdownInline(paragraphLine, onOpenLink)}
+          </span>
+        ))}
+      </p>,
+    );
+  }
+  return nodes;
+}
+
+function MarkdownContent({
+  value,
+  onOpenLink,
+}: {
+  value: string;
+  onOpenLink: (url: string) => void;
+}) {
+  return (
+    <div className="markdownContent">
+      {renderMarkdownBlocks(value, onOpenLink)}
+    </div>
+  );
+}
+
+function formatNotificationDate(
+  value: string | undefined,
+  locale: "en" | "zh",
+): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString(locale === "zh" ? "zh-CN" : "en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+}
+
 function hasCompletedSetup(session: DesktopSession): boolean {
   return (
     window.localStorage.getItem(setupCompletedStorageKey(session.user.id)) ===
@@ -138,16 +447,45 @@ function hasCompletedSetup(session: DesktopSession): boolean {
   );
 }
 
-function formatSyncTime(
+function formatFullSyncTime(
   value: Date | null,
   locale: "en" | "zh",
   fallback: string,
 ): string {
   if (!value) return fallback;
-  return value.toLocaleTimeString(locale === "zh" ? "zh-CN" : "en-US", {
+  return value.toLocaleString(locale === "zh" ? "zh-CN" : "en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatBuildTime(locale: "en" | "zh"): string {
+  const value = new Date(__BUILD_TIME__);
+  if (Number.isNaN(value.getTime())) return "—";
+  return value.toLocaleString(locale === "zh" ? "zh-CN" : "en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function formatBalance(value: string, locale: "en" | "zh"): string {
+  const normalized = value.trim().replaceAll(",", "");
+  if (!normalized) return "";
+  const currencyPrefix = normalized.match(/^[^\d+-]*/)?.[0] ?? "";
+  const amount = Number(normalized.slice(currencyPrefix.length));
+  if (!Number.isFinite(amount)) return value;
+  const formatted = amount.toLocaleString(locale === "zh" ? "zh-CN" : "en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+  return `${currencyPrefix}${formatted}`;
 }
 
 function formatDownloadSpeed(bytesPerSecond?: number): string {
@@ -196,17 +534,436 @@ function isTrayPopupWindow(): boolean {
   }
 }
 
-function useDisableContextMenu(): void {
+const copyMenuID = "__autogateway_copy_menu";
+
+async function copySelection(text: string): Promise<void> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+  } catch {
+    // Fall back to the legacy WebView clipboard path below.
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.cssText =
+    "position:fixed;left:-9999px;top:-9999px;opacity:0;";
+  (document.body || document.documentElement).appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
+function closeCopyMenu(): void {
+  document.getElementById(copyMenuID)?.remove();
+}
+
+function useCopyOnlyContextMenu(): void {
   useEffect(() => {
-    const preventContextMenu = (event: MouseEvent) => event.preventDefault();
-    document.addEventListener("contextmenu", preventContextMenu, true);
-    return () =>
-      document.removeEventListener("contextmenu", preventContextMenu, true);
+    function handleContextMenu(event: MouseEvent) {
+      const target = event.target;
+      if (target instanceof Element && target.closest(`#${copyMenuID}`)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      closeCopyMenu();
+      const selectedText = window.getSelection()?.toString() ?? "";
+
+      const menu = document.createElement("div");
+      menu.id = copyMenuID;
+      menu.setAttribute("role", "menu");
+      menu.style.cssText = [
+        "position:fixed",
+        "z-index:2147483647",
+        "min-width:96px",
+        "padding:5px",
+        "border:1px solid rgba(110,90,70,.25)",
+        "border-radius:8px",
+        "color:#2a211c",
+        "background:#fffaf4",
+        "box-shadow:0 8px 24px rgba(42,33,28,.18)",
+        'font:13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif',
+        "visibility:hidden",
+      ].join(";");
+
+      const copyButton = document.createElement("button");
+      copyButton.type = "button";
+      copyButton.textContent = "Copy";
+      copyButton.setAttribute("role", "menuitem");
+      copyButton.style.cssText = [
+        "display:block",
+        "width:100%",
+        "padding:7px 12px",
+        "border:0",
+        "border-radius:5px",
+        "color:inherit",
+        "background:transparent",
+        "font:inherit",
+        "text-align:left",
+        "cursor:pointer",
+      ].join(";");
+
+      if (!selectedText.trim()) {
+        copyButton.disabled = true;
+        copyButton.style.opacity = ".45";
+        copyButton.style.cursor = "default";
+      } else {
+        copyButton.addEventListener("click", async () => {
+          await copySelection(selectedText);
+          copyButton.textContent = "Copied";
+          copyButton.disabled = true;
+          copyButton.style.cursor = "default";
+          window.setTimeout(closeCopyMenu, 500);
+        });
+        copyButton.addEventListener("mouseenter", () => {
+          copyButton.style.background = "#f3e7da";
+        });
+        copyButton.addEventListener("mouseleave", () => {
+          copyButton.style.background = "transparent";
+        });
+      }
+
+      menu.appendChild(copyButton);
+      (document.body || document.documentElement).appendChild(menu);
+      const left = Math.min(
+        event.clientX,
+        window.innerWidth - menu.offsetWidth - 8,
+      );
+      const top = Math.min(
+        event.clientY,
+        window.innerHeight - menu.offsetHeight - 8,
+      );
+      menu.style.left = `${Math.max(8, left)}px`;
+      menu.style.top = `${Math.max(8, top)}px`;
+      menu.style.visibility = "visible";
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      if (
+        !(event.target instanceof Element) ||
+        !event.target.closest(`#${copyMenuID}`)
+      ) {
+        closeCopyMenu();
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") closeCopyMenu();
+    }
+
+    document.addEventListener("contextmenu", handleContextMenu, true);
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    document.addEventListener("keydown", handleKeyDown, true);
+    document.addEventListener("scroll", closeCopyMenu, true);
+    return () => {
+      document.removeEventListener("contextmenu", handleContextMenu, true);
+      document.removeEventListener("pointerdown", handlePointerDown, true);
+      document.removeEventListener("keydown", handleKeyDown, true);
+      document.removeEventListener("scroll", closeCopyMenu, true);
+      closeCopyMenu();
+    };
   }, []);
 }
 
+type HeaderMenu = "language" | "theme";
+
+type HeaderControlsProps = {
+  locale: "en" | "zh";
+  localePreference: LocalePreference;
+  theme: ThemeMode;
+  onLocaleChange: (nextLocale: LocalePreference) => void;
+  onThemeChange: (nextTheme: ThemeMode) => void;
+};
+
+function HeaderControls({
+  locale,
+  localePreference,
+  theme,
+  onLocaleChange,
+  onThemeChange,
+}: HeaderControlsProps) {
+  const [openMenu, setOpenMenu] = useState<HeaderMenu | null>(null);
+  const controlsRef = useRef<HTMLDivElement>(null);
+  const tr = (key: Parameters<typeof translate>[1]) =>
+    translate(locale, key);
+  const themeLabel =
+    theme === "system"
+      ? tr("system")
+      : theme === "light"
+        ? tr("light")
+        : tr("dark");
+  const ThemeIcon =
+    theme === "system" ? DesktopIcon : theme === "light" ? SunIcon : MoonIcon;
+
+  useEffect(() => {
+    if (!openMenu) return;
+    function handlePointerDown(event: PointerEvent) {
+      if (
+        event.target instanceof Node &&
+        !controlsRef.current?.contains(event.target)
+      ) {
+        setOpenMenu(null);
+      }
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpenMenu(null);
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [openMenu]);
+
+  function selectLocale(nextLocale: LocalePreference) {
+    onLocaleChange(nextLocale);
+    setOpenMenu(null);
+  }
+
+  function selectTheme(nextTheme: ThemeMode) {
+    onThemeChange(nextTheme);
+    setOpenMenu(null);
+  }
+
+  return (
+    <div className="headerControls" ref={controlsRef}>
+      <div className="headerMenu">
+        <button
+          className="headerMenuButton languageMenuButton"
+          type="button"
+          aria-label={tr("language")}
+          aria-expanded={openMenu === "language"}
+          aria-haspopup="menu"
+          title={tr("language")}
+          onClick={() =>
+            setOpenMenu(openMenu === "language" ? null : "language")
+          }
+        >
+          <TranslateIcon weight="bold" aria-hidden="true" />
+          <span>{locale === "zh" ? "简" : "EN"}</span>
+          <CaretDownIcon className="headerMenuCaret" aria-hidden="true" />
+        </button>
+        {openMenu === "language" ? (
+          <div className="headerMenuPopover" role="menu">
+            {(
+              [
+                ["system", tr("automatic")],
+                ["zh", tr("chinese")],
+                ["en", tr("english")],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="menuitemradio"
+                aria-checked={localePreference === value}
+                onClick={() => selectLocale(value)}
+              >
+                <TranslateIcon weight={value === "system" ? "regular" : "bold"} />
+                <span>{label}</span>
+                {localePreference === value ? (
+                  <CheckIcon className="headerMenuCheck" weight="bold" />
+                ) : null}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <div className="headerMenu">
+        <button
+          className="headerMenuButton themeMenuButton"
+          type="button"
+          aria-label={`${tr("theme")}: ${themeLabel}`}
+          aria-expanded={openMenu === "theme"}
+          aria-haspopup="menu"
+          title={themeLabel}
+          onClick={() => setOpenMenu(openMenu === "theme" ? null : "theme")}
+        >
+          <ThemeIcon weight="bold" aria-hidden="true" />
+        </button>
+        {openMenu === "theme" ? (
+          <div className="headerMenuPopover" role="menu">
+            {(
+              [
+                ["system", tr("system"), DesktopIcon],
+                ["light", tr("light"), SunIcon],
+                ["dark", tr("dark"), MoonIcon],
+              ] as const
+            ).map(([value, label, Icon]) => (
+              <button
+                key={value}
+                type="button"
+                role="menuitemradio"
+                aria-checked={theme === value}
+                onClick={() => selectTheme(value)}
+              >
+                <Icon weight="bold" />
+                <span>{label}</span>
+                {theme === value ? (
+                  <CheckIcon className="headerMenuCheck" weight="bold" />
+                ) : null}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function NotificationDetailWindow() {
+  useCopyOnlyContextMenu();
+  const [payload] = useState<NotificationWindowPayload | null>(() =>
+    loadNotificationWindowPayload(),
+  );
+  const [activeID, setActiveID] = useState<number | null>(() => {
+    const queryID = readNotificationDetailID();
+    return queryID ?? loadNotificationWindowPayload()?.activeID ?? null;
+  });
+  const theme = readTheme();
+  const localePreference = readLocalePreference();
+  const [linkError, setLinkError] = useState("");
+  const locale = resolveLocale(localePreference);
+  const tr = (
+    key: Parameters<typeof translate>[1],
+    values?: Record<string, string | number>,
+  ) => translate(locale, key, values);
+  const items = payload?.items ?? [];
+  const activeIndex = Math.max(
+    0,
+    items.findIndex((item) => item.id === activeID),
+  );
+  const activeItem = items[activeIndex] ?? null;
+
+  useEffect(() => {
+    document.documentElement.classList.add("notificationWindowHtml");
+    document.body.classList.add("notificationWindowBody");
+    return () => {
+      document.documentElement.classList.remove("notificationWindowHtml");
+      document.body.classList.remove("notificationWindowBody");
+    };
+  }, []);
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  useEffect(() => {
+    if (!payload || !activeItem) return;
+    const reads = loadNotificationReads(payload.userID);
+    if (!reads.has(activeItem.id)) {
+      reads.add(activeItem.id);
+      saveNotificationReads(payload.userID, reads);
+    }
+  }, [activeItem?.id, payload?.userID]);
+
+  function closeWindow(): void {
+    void getCurrentWebviewWindow().close();
+  }
+
+  async function handleOpenLink(url: string): Promise<void> {
+    setLinkError("");
+    try {
+      await openNotificationBrowser(url);
+    } catch (error) {
+      setLinkError(tr("announcementBrowserFailed", { error: String(error) }));
+    }
+  }
+
+  function navigateTo(index: number): void {
+    const nextItem = items[index];
+    if (!nextItem) return;
+    setActiveID(nextItem.id);
+    if (payload) {
+      saveNotificationWindowPayload({
+        ...payload,
+        activeID: nextItem.id,
+      });
+    }
+  }
+
+  return (
+    <main className="notificationWindowShell">
+      {activeItem ? (
+        <>
+          <div className="notificationDetailViewport">
+            <header className="notificationDetailHeader">
+              <div className="notificationDetailMeta">
+                <span>
+                  {formatNotificationDate(
+                    activeItem.createdAt ?? activeItem.startsAt,
+                    locale,
+                  )}
+                </span>
+              </div>
+              <h1>{activeItem.title}</h1>
+            </header>
+            <article
+              className="notificationDetailBody"
+              key={activeItem.id}
+            >
+              <MarkdownContent value={activeItem.body} onOpenLink={handleOpenLink} />
+              {activeItem.linkUrl ? (
+                <button
+                  className="notificationDetailLink"
+                  type="button"
+                  onClick={() => void handleOpenLink(activeItem.linkUrl ?? "")}
+                >
+                  {tr("announcementOpenLink")}
+                  <ArrowRightIcon weight="bold" />
+                </button>
+              ) : null}
+              {linkError ? (
+                <p className="notificationDetailError" role="alert">
+                  {linkError}
+                </p>
+              ) : null}
+            </article>
+          </div>
+          <footer className="notificationDetailFooter">
+            <button
+              className="notificationPagerButton"
+              type="button"
+              disabled={activeIndex <= 0}
+              onClick={() => navigateTo(activeIndex - 1)}
+            >
+              <ArrowLeftIcon weight="bold" />
+              {tr("announcementPrevious")}
+            </button>
+            <button
+              className="notificationPagerButton"
+              type="button"
+              disabled={activeIndex >= items.length - 1}
+              onClick={() => navigateTo(activeIndex + 1)}
+            >
+              {tr("announcementNext")}
+              <ArrowRightIcon weight="bold" />
+            </button>
+          </footer>
+        </>
+      ) : (
+        <div className="notificationWindowEmpty">
+          <BellIcon weight="bold" />
+          <p>{tr("announcementWindowUnavailable")}</p>
+          <button
+            className="notificationPagerButton"
+            type="button"
+            onClick={closeWindow}
+          >
+            {tr("announcementClose")}
+          </button>
+        </div>
+      )}
+    </main>
+  );
+}
+
 function TrayPopup() {
-  useDisableContextMenu();
+  useCopyOnlyContextMenu();
   const [desktopSession, setDesktopSession] = useState<DesktopSession | null>(
     null,
   );
@@ -227,8 +984,6 @@ function TrayPopup() {
     tr("trayLoading");
   const accountDetail =
     desktopSession?.user.email || desktopSession?.user.username || "";
-
-  useDisableContextMenu();
 
   useEffect(() => {
     document.body.classList.add("tray-popup-body");
@@ -353,7 +1108,7 @@ function TrayPopup() {
           </div>
           <div className="trayBalance">
             <span>{tr("trayBalance")}</span>
-            <strong>{accountBalance || "—"}</strong>
+            <strong>{formatBalance(accountBalance, locale) || "—"}</strong>
           </div>
         </div>
         <div className="trayActions">
@@ -385,7 +1140,7 @@ function TrayPopup() {
 }
 
 function App() {
-  useDisableContextMenu();
+  useCopyOnlyContextMenu();
   useEffect(() => {
     function handleDevtoolsShortcut(event: KeyboardEvent) {
       const isDevtoolsShortcut =
@@ -425,6 +1180,16 @@ function App() {
   const [setupCompleted, setSetupCompleted] = useState(false);
   const [accountBalance, setAccountBalance] = useState("");
   const [balanceSyncedAt, setBalanceSyncedAt] = useState<Date | null>(null);
+  const [notifications, setNotifications] = useState<DesktopNotification[]>(
+    [],
+  );
+  const [notificationsLoading, setNotificationsLoading] = useState(false);
+  const [notificationsError, setNotificationsError] = useState("");
+  const [notificationReads, setNotificationReads] = useState<Set<number>>(
+    new Set(),
+  );
+  const [notificationPage, setNotificationPage] = useState(0);
+  const [notificationsRefreshNonce, setNotificationsRefreshNonce] = useState(0);
   const [desktopAppVersion, setDesktopAppVersion] = useState("");
   const [installProgress, setInstallProgress] =
     useState<CodexInstallProgress | null>(null);
@@ -457,8 +1222,6 @@ function App() {
     key: Parameters<typeof translate>[1],
     values?: Record<string, string | number>,
   ) => translate(locale, key, values);
-
-  useDisableContextMenu();
 
   const accountConnected = Boolean(desktopAccessToken);
   const appInstalled = Boolean(appStatus?.installed);
@@ -524,6 +1287,11 @@ function App() {
     setAPIKeyCopied(false);
     setAccountBalance("");
     setBalanceSyncedAt(null);
+    setNotifications([]);
+    setNotificationsLoading(false);
+    setNotificationsError("");
+    setNotificationReads(new Set());
+    setNotificationPage(0);
     setSetupCompleted(false);
     setConfigurationPhase("idle");
     setConfigurationError("");
@@ -566,7 +1334,7 @@ function App() {
     try {
       const [nextStatus, nextAppStatus] = await Promise.all([
         getCodexStatus(),
-        getLocalCodexAppStatus(),
+        getCodexAppStatus(),
       ]);
       setStatus(nextStatus);
       setAppStatus(nextAppStatus);
@@ -863,6 +1631,101 @@ function App() {
   }, [locale]);
 
   useEffect(() => {
+    const userID = desktopSession?.user.id;
+    if (!userID) {
+      setNotificationReads(new Set());
+      setNotificationPage(0);
+      return;
+    }
+    setNotificationReads(loadNotificationReads(userID));
+    setNotificationPage(0);
+  }, [desktopSession?.user.id]);
+
+  useEffect(() => {
+    const userID = desktopSession?.user.id;
+    if (!userID) return;
+    const notificationUserID = userID;
+    function handleNotificationReadsChanged(event: StorageEvent): void {
+      if (event.key === notificationReadStorageKey(notificationUserID)) {
+        setNotificationReads(loadNotificationReads(notificationUserID));
+      }
+    }
+    window.addEventListener("storage", handleNotificationReadsChanged);
+    return () =>
+      window.removeEventListener("storage", handleNotificationReadsChanged);
+  }, [desktopSession?.user.id]);
+
+  useEffect(() => {
+    if (!desktopAccessToken || !showHome) {
+      setNotifications([]);
+      setNotificationsLoading(false);
+      setNotificationsError("");
+      setNotificationPage(0);
+      return;
+    }
+    let active = true;
+    let syncing = false;
+
+    async function syncNotifications() {
+      if (syncing) return;
+      syncing = true;
+      setNotificationsLoading(true);
+      setNotificationsError("");
+      try {
+        let data: DesktopNotificationList;
+        try {
+          data = await getDesktopNotifications(desktopAccessToken);
+        } catch (error) {
+          if (!isAuthenticationRequired(error)) throw error;
+          const refreshed = await refreshDesktopState(desktopAccessToken);
+          if (!refreshed?.session.token) {
+            await handleSessionExpired();
+            return;
+          }
+          if (!active) return;
+          setDesktopSession(refreshed.session);
+          setDesktopAccessToken(refreshed.session.token);
+          setAPIKey(refreshed.apiKey);
+          data = await getDesktopNotifications(refreshed.session.token);
+        }
+        if (!active) return;
+        const nextItems = [...(data.items ?? [])].sort(
+          (left, right) =>
+            (left.sortOrder ?? 0) - (right.sortOrder ?? 0) ||
+            (right.id ?? 0) - (left.id ?? 0),
+        );
+        setNotifications(nextItems);
+        setNotificationPage((current) =>
+          Math.min(
+            current,
+            Math.max(Math.ceil(nextItems.length / notificationPageSize) - 1, 0),
+          ),
+        );
+      } catch (error) {
+        if (!active) return;
+        if (isAuthenticationRequired(error)) {
+          void handleSessionExpired();
+          return;
+        }
+        setNotificationsError(String(error));
+      } finally {
+        if (active) setNotificationsLoading(false);
+        syncing = false;
+      }
+    }
+
+    void syncNotifications();
+    const interval = window.setInterval(
+      () => void syncNotifications(),
+      5 * 60_000,
+    );
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [desktopAccessToken, showHome, notificationsRefreshNonce]);
+
+  useEffect(() => {
     if (!desktopAccessToken) {
       setAccountBalance("");
       return;
@@ -952,16 +1815,6 @@ function App() {
   function changeLocale(nextLocale: LocalePreference) {
     setLocalePreference(nextLocale);
     writeLocalePreference(nextLocale);
-  }
-
-  function toggleLocale() {
-    changeLocale(locale === "zh" ? "en" : "zh");
-  }
-
-  function cycleTheme() {
-    changeTheme(
-      theme === "system" ? "light" : theme === "light" ? "dark" : "system",
-    );
   }
 
   useEffect(() => {
@@ -1408,8 +2261,57 @@ function App() {
     setSelectedStep(2);
   }
 
+  function getBalanceTooltip(): string {
+    return [
+      accountBalance || tr("balanceUnavailable"),
+      tr("lastSyncedAt", {
+        time: formatFullSyncTime(balanceSyncedAt, locale, tr("notSynced")),
+      }),
+    ].join("\n");
+  }
+
+  async function openAnnouncement(notification: DesktopNotification): Promise<void> {
+    const userID = desktopSession?.user.id;
+    if (!userID) return;
+    setNotificationReads((current) => {
+      if (current.has(notification.id)) return current;
+      const next = new Set(current);
+      next.add(notification.id);
+      saveNotificationReads(userID, next);
+      return next;
+    });
+    saveNotificationWindowPayload({
+      userID,
+      activeID: notification.id,
+      items: notifications,
+    });
+    try {
+      await openNotificationWindow(notification.id);
+    } catch (error) {
+      setHomeActionError(
+        tr("announcementWindowOpenFailed", { error: String(error) }),
+      );
+    }
+  }
+
   function renderHomeContent() {
     const version = appStatus?.localVersion || tr("versionUnavailable");
+    const buildTime = formatBuildTime(locale);
+    const unreadNotificationCount = notifications.filter(
+      (notification) => !notificationReads.has(notification.id),
+    ).length;
+    const notificationPageCount = Math.max(
+      1,
+      Math.ceil(notifications.length / notificationPageSize),
+    );
+    const currentNotificationPage = Math.min(
+      notificationPage,
+      notificationPageCount - 1,
+    );
+    const visibleNotifications = notifications.slice(
+      currentNotificationPage * notificationPageSize,
+      (currentNotificationPage + 1) * notificationPageSize,
+    );
     const versionStatus = !appInstalled
       ? tr("notInstalled")
       : appStatus?.updateCheckError
@@ -1466,7 +2368,12 @@ function App() {
             <div>
               <strong>AUTO Gateway</strong>
               <div className="homeBrandVersion">
-                <small>
+                <small
+                  className="buildTimeTooltip"
+                  aria-label={tr("lastCompiledAt", { time: buildTime })}
+                  data-tooltip={tr("lastCompiledAt", { time: buildTime })}
+                  tabIndex={0}
+                >
                   {tr("desktopAppVersion", {
                     version: desktopAppVersion || "—",
                   })}
@@ -1539,16 +2446,15 @@ function App() {
             <div className="headerBalance" aria-label={tr("accountBalance")}>
               <div className="headerBalanceInfo">
                 <span>{tr("accountBalance")}</span>
-                <strong>{accountBalance || tr("balanceUnavailable")}</strong>
-                <small>
-                  {tr("lastSyncedAt", {
-                    time: formatSyncTime(
-                      balanceSyncedAt,
-                      locale,
-                      tr("notSynced"),
-                    ),
-                  })}
-                </small>
+                <strong
+                  className="balanceValue"
+                  aria-label={getBalanceTooltip()}
+                  data-tooltip={getBalanceTooltip()}
+                  tabIndex={0}
+                >
+                  {formatBalance(accountBalance, locale) ||
+                    tr("balanceUnavailable")}
+                </strong>
               </div>
               <button
                 className="headerTopUpButton"
@@ -1558,24 +2464,13 @@ function App() {
                 {tr("topUpBalance")}
               </button>
             </div>
-            <button
-              className="headerActionButton"
-              aria-label={tr("language")}
-              onClick={toggleLocale}
-            >
-              {locale === "zh" ? "EN" : "中文"}
-            </button>
-            <button
-              className="headerActionButton"
-              aria-label={tr("theme")}
-              onClick={cycleTheme}
-            >
-              {theme === "system"
-                ? tr("system")
-                : theme === "light"
-                  ? tr("light")
-                  : tr("dark")}
-            </button>
+            <HeaderControls
+              locale={locale}
+              localePreference={localePreference}
+              theme={theme}
+              onLocaleChange={changeLocale}
+              onThemeChange={changeTheme}
+            />
             <button
               className="headerActionButton headerSignOutButton"
               aria-label={tr("signOut")}
@@ -1672,16 +2567,15 @@ function App() {
               </div>
               <div className="homeMetric">
                 <span>{tr("accountBalance")}</span>
-                <strong>{accountBalance || tr("balanceUnavailable")}</strong>
-                <small>
-                  {tr("lastSyncedAt", {
-                    time: formatSyncTime(
-                      balanceSyncedAt,
-                      locale,
-                      tr("notSynced"),
-                    ),
-                  })}
-                </small>
+                <strong
+                  className="balanceValue"
+                  aria-label={getBalanceTooltip()}
+                  data-tooltip={getBalanceTooltip()}
+                  tabIndex={0}
+                >
+                  {formatBalance(accountBalance, locale) ||
+                    tr("balanceUnavailable")}
+                </strong>
                 <button onClick={() => void handleOpenConsole("billing")}>
                   {tr("topUpBalance")}
                 </button>
@@ -1727,85 +2621,202 @@ function App() {
                     : tr("openCodex")}
               </button>
             </section>
-            <section className="homeSection">
-              <h2>{tr("quickActions")}</h2>
-              <div className="quickActions">
-                <button onClick={() => void handleOpenConsole()}>
-                  <UserCircleIcon />
-                  <span>
-                    <strong>{tr("openConsole")}</strong>
-                    <small>{tr("openConsoleDescription")}</small>
-                  </span>
-                  <ArrowRightIcon />
-                </button>
-                <button
-                  onClick={() => void handleCheckCodexUpdates()}
-                  disabled={
-                    checkingCodexUpdates || installingCodex || !appInstalled
-                  }
-                >
-                  <ArrowsClockwiseIcon />
-                  <span>
-                    <strong>{tr("checkUpdates")}</strong>
-                    <small>{tr("checkUpdatesDescription")}</small>
-                  </span>
-                  <ArrowRightIcon />
-                </button>
-                <button
-                  onClick={() => void checkDesktopUpdate(true)}
-                  disabled={
-                    desktopUpdatePhase === "checking" ||
-                    desktopUpdatePhase === "downloading"
-                  }
-                >
-                  <ArrowsClockwiseIcon />
-                  <span>
-                    <strong>
-                      {desktopUpdatePhase === "checking"
-                        ? tr("desktopCheckingUpdates")
-                        : tr("desktopUpdateCheckNow")}
-                    </strong>
-                    <small>{tr("desktopUpdateCheckDescription")}</small>
-                  </span>
-                  <ArrowRightIcon />
-                </button>
-                {updateAvailable ? (
+            <section className="homeDualSection">
+              <section className="homeSectionColumn">
+                <h2>{tr("quickActions")}</h2>
+                <div className="quickActions">
+                  <button onClick={() => void handleOpenConsole()}>
+                    <UserCircleIcon />
+                    <span>
+                      <strong>{tr("openConsole")}</strong>
+                      <small>{tr("openConsoleDescription")}</small>
+                    </span>
+                    <ArrowRightIcon />
+                  </button>
                   <button
-                    onClick={() => void handleInstallCodex(true)}
-                    disabled={installingCodex}
+                    onClick={() => void handleCheckCodexUpdates()}
+                    disabled={
+                      checkingCodexUpdates || installingCodex || !appInstalled
+                    }
+                  >
+                    <ArrowsClockwiseIcon />
+                    <span>
+                      <strong>{tr("checkUpdates")}</strong>
+                      <small>{tr("checkUpdatesDescription")}</small>
+                    </span>
+                    <ArrowRightIcon />
+                  </button>
+                  <button
+                    onClick={() => void checkDesktopUpdate(true)}
+                    disabled={
+                      desktopUpdatePhase === "checking" ||
+                      desktopUpdatePhase === "downloading"
+                    }
                   >
                     <ArrowsClockwiseIcon />
                     <span>
                       <strong>
-                        {installingCodex
-                          ? tr("updatingCodex")
-                          : tr("updateNow")}
+                        {desktopUpdatePhase === "checking"
+                          ? tr("desktopCheckingUpdates")
+                          : tr("desktopUpdateCheckNow")}
                       </strong>
-                      <small>{tr("updateAvailableDescription")}</small>
+                      <small>{tr("desktopUpdateCheckDescription")}</small>
                     </span>
                     <ArrowRightIcon />
                   </button>
-                ) : null}
-                <button onClick={openSetupFromHome}>
-                  <GearIcon />
-                  <span>
-                    <strong>{tr("reconfigureCodex")}</strong>
-                    <small>{tr("reconfigureCodexDescription")}</small>
-                  </span>
-                  <ArrowRightIcon />
-                </button>
-                <button
-                  disabled={busy || backupCount === 0}
-                  onClick={() => void handleSwitchBackConfiguration()}
+                  {updateAvailable ? (
+                    <button
+                      onClick={() => void handleInstallCodex(true)}
+                      disabled={installingCodex}
+                    >
+                      <ArrowsClockwiseIcon />
+                      <span>
+                        <strong>
+                          {installingCodex
+                            ? tr("updatingCodex")
+                            : tr("updateNow")}
+                        </strong>
+                        <small>{tr("updateAvailableDescription")}</small>
+                      </span>
+                      <ArrowRightIcon />
+                    </button>
+                  ) : null}
+                  <button onClick={openSetupFromHome}>
+                    <GearIcon />
+                    <span>
+                      <strong>{tr("reconfigureCodex")}</strong>
+                      <small>{tr("reconfigureCodexDescription")}</small>
+                    </span>
+                    <ArrowRightIcon />
+                  </button>
+                  <button
+                    disabled={busy || backupCount === 0}
+                    onClick={() => void handleSwitchBackConfiguration()}
+                  >
+                    <ArrowUUpLeftIcon />
+                    <span>
+                      <strong>{tr("switchBackConfiguration")}</strong>
+                      <small>{tr("switchBackConfigurationDescription")}</small>
+                    </span>
+                    <ArrowRightIcon />
+                  </button>
+                </div>
+              </section>
+              <section className="homeSectionColumn announcementsColumn">
+                <div className="sectionHeadingRow">
+                  <h2>{tr("latestAnnouncements")}</h2>
+                  {unreadNotificationCount > 0 ? (
+                    <span className="announcementUnreadCount">
+                      {tr("announcementUnread", {
+                        count: unreadNotificationCount,
+                      })}
+                    </span>
+                  ) : null}
+                </div>
+                <div
+                  className="announcementList"
+                  aria-busy={notificationsLoading}
                 >
-                  <ArrowUUpLeftIcon />
-                  <span>
-                    <strong>{tr("switchBackConfiguration")}</strong>
-                    <small>{tr("switchBackConfigurationDescription")}</small>
-                  </span>
-                  <ArrowRightIcon />
-                </button>
-              </div>
+                  {notifications.length === 0 && notificationsLoading ? (
+                    <div className="announcementFeedback">
+                      <CircleNotchIcon className="spin" weight="bold" />
+                      <span>{tr("announcementLoading")}</span>
+                    </div>
+                  ) : null}
+                  {notifications.length === 0 &&
+                  !notificationsLoading &&
+                  !notificationsError ? (
+                    <div className="announcementFeedback">
+                      <BellIcon weight="bold" />
+                      <span>{tr("announcementEmpty")}</span>
+                    </div>
+                  ) : null}
+                  {notificationsError ? (
+                    <div className="announcementFeedback announcementError">
+                      <span>{tr("announcementLoadFailed")}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setNotificationsRefreshNonce((value) => value + 1)
+                        }
+                      >
+                        {tr("announcementRetry")}
+                      </button>
+                    </div>
+                  ) : null}
+                  {visibleNotifications.map((notification) => {
+                    const isRead = notificationReads.has(notification.id);
+                    const date = formatNotificationDate(
+                      notification.createdAt ?? notification.startsAt,
+                      locale,
+                    );
+                    return (
+                      <article
+                        className={`announcementItem${isRead ? "" : " unread"}`}
+                        key={notification.id}
+                      >
+                        <button
+                          className="announcementTrigger"
+                          type="button"
+                          onClick={() => void openAnnouncement(notification)}
+                        >
+                          <span className="announcementTriggerCopy">
+                            <span className="announcementTitleLine">
+                              {!isRead ? (
+                                <span
+                                  className="announcementUnreadDot"
+                                  aria-label={tr("announcementUnreadLabel")}
+                                />
+                              ) : null}
+                              <strong>{notification.title}</strong>
+                            </span>
+                            {date ? <small>{date}</small> : null}
+                          </span>
+                          <ArrowRightIcon weight="bold" />
+                        </button>
+                      </article>
+                    );
+                  })}
+                  {notificationPageCount > 1 ? (
+                    <div className="announcementPager">
+                      <button
+                        className="announcementPagerButton"
+                        type="button"
+                        disabled={currentNotificationPage <= 0}
+                        onClick={() =>
+                          setNotificationPage((current) =>
+                            Math.max(current - 1, 0),
+                          )
+                        }
+                      >
+                        <ArrowLeftIcon weight="bold" />
+                        {tr("announcementPreviousPage")}
+                      </button>
+                      <span>
+                        {tr("announcementPage", {
+                          current: currentNotificationPage + 1,
+                          total: notificationPageCount,
+                        })}
+                      </span>
+                      <button
+                        className="announcementPagerButton"
+                        type="button"
+                        disabled={
+                          currentNotificationPage >= notificationPageCount - 1
+                        }
+                        onClick={() =>
+                          setNotificationPage((current) =>
+                            Math.min(current + 1, notificationPageCount - 1),
+                          )
+                        }
+                      >
+                        {tr("announcementNextPage")}
+                        <ArrowRightIcon weight="bold" />
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              </section>
             </section>
             <section className="homeSection">
               <h2>{tr("recentSetup")}</h2>
@@ -2299,24 +3310,13 @@ function App() {
               </span>
             </button>
           ) : null}
-          <button
-            className="headerActionButton"
-            aria-label={tr("language")}
-            onClick={toggleLocale}
-          >
-            {locale === "zh" ? "EN" : "中文"}
-          </button>
-          <button
-            className="headerActionButton"
-            aria-label={tr("theme")}
-            onClick={cycleTheme}
-          >
-            {theme === "system"
-              ? tr("system")
-              : theme === "light"
-                ? tr("light")
-                : tr("dark")}
-          </button>
+          <HeaderControls
+            locale={locale}
+            localePreference={localePreference}
+            theme={theme}
+            onLocaleChange={changeLocale}
+            onThemeChange={changeTheme}
+          />
           {desktopSession ? (
             <button
               className="headerActionButton headerSignOutButton"
@@ -2407,5 +3407,11 @@ function App() {
 }
 
 createRoot(document.getElementById("root")!).render(
-  isTrayPopupWindow() ? <TrayPopup /> : <App />,
+  isTrayPopupWindow() ? (
+    <TrayPopup />
+  ) : readNotificationDetailID() !== null ? (
+    <NotificationDetailWindow />
+  ) : (
+    <App />
+  ),
 );
