@@ -105,6 +105,14 @@ import {
   type LocalePreference,
 } from "./i18n";
 import { applyTheme, readTheme, writeTheme, type ThemeMode } from "./theme";
+import {
+  skillLibraryClient,
+  skillLibraryIsMock,
+  type PublicSkill,
+  type SkillCategoryDto,
+  type ShareLink,
+  type Installation,
+} from "./skillLibrary";
 import "./styles.css";
 
 const defaultEndpoint = "https://api.autogateway.cc";
@@ -1306,6 +1314,27 @@ function App() {
     null,
   );
   const [exportBusy, setExportBusy] = useState(false);
+  // Phase-2 mock: skill library + my distribution.
+  const [libraryItems, setLibraryItems] = useState<PublicSkill[]>([]);
+  const [libraryCategories, setLibraryCategories] = useState<
+    SkillCategoryDto[]
+  >([]);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState("");
+  const [librarySearch, setLibrarySearch] = useState("");
+  const [libraryCategory, setLibraryCategory] = useState("all");
+  const [librarySort, setLibrarySort] = useState<
+    "popular" | "newest" | "updated"
+  >("popular");
+  const [selectedLibrarySkill, setSelectedLibrarySkill] =
+    useState<PublicSkill | null>(null);
+  const [libraryInstallNote, setLibraryInstallNote] = useState("");
+  const [distMySkills, setDistMySkills] = useState<PublicSkill[]>([]);
+  const [distShareLinks, setDistShareLinks] = useState<ShareLink[]>([]);
+  const [distInstallations, setDistInstallations] = useState<Installation[]>(
+    [],
+  );
+  const [distLoading, setDistLoading] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
   const [localePreference, setLocalePreference] = useState<LocalePreference>(
     () => readLocalePreference(),
@@ -1398,6 +1427,58 @@ function App() {
       void unlisten.then((off) => off());
     };
   }, [showInstallDialog]);
+
+  useEffect(() => {
+    if (activeView !== "skills" || skillsTab !== "library") return;
+    let active = true;
+    setLibraryLoading(true);
+    setLibraryError("");
+    Promise.all([
+      skillLibraryClient.listCategories(),
+      skillLibraryClient.listPublicSkills({
+        q: librarySearch.trim() || undefined,
+        category: libraryCategory === "all" ? undefined : libraryCategory,
+        sort: librarySort,
+      }),
+    ])
+      .then(([categories, page]) => {
+        if (!active) return;
+        setLibraryCategories(categories);
+        setLibraryItems(page.items);
+      })
+      .catch((error) => {
+        if (active) setLibraryError(String(error));
+      })
+      .finally(() => {
+        if (active) setLibraryLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, skillsTab, librarySearch, libraryCategory, librarySort]);
+
+  useEffect(() => {
+    if (activeView !== "skills" || skillsTab !== "distribution") return;
+    let active = true;
+    setDistLoading(true);
+    Promise.all([
+      skillLibraryClient.listUserSkills("owned"),
+      skillLibraryClient.listShareLinks(""),
+      skillLibraryClient.listInstallations(),
+    ])
+      .then(([mine, shares, installations]) => {
+        if (!active) return;
+        setDistMySkills(mine.items);
+        setDistShareLinks(shares.items);
+        setDistInstallations(installations.items);
+      })
+      .finally(() => {
+        if (active) setDistLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, skillsTab]);
 
   const accountConnected = Boolean(desktopAccessToken);
   const appInstalled = Boolean(appStatus?.installed);
@@ -2565,6 +2646,293 @@ function App() {
     }
   }
 
+  async function installFromLibrary(skill: PublicSkill) {
+    const version = skill.latestPublishedVersion;
+    if (!version) return;
+    try {
+      const license = await skillLibraryClient.createDownloadLicense(
+        skill.publicId,
+        version.publicId,
+      );
+      setLibraryInstallNote(
+        tr("skillLibraryInstallMock", { version: license.version }),
+      );
+    } catch (error) {
+      setLibraryInstallNote(String(error));
+    }
+  }
+
+  function renderCatalogCard(skill: PublicSkill) {
+    const open = () => {
+      setSelectedLibrarySkill(skill);
+      setLibraryInstallNote("");
+    };
+    return (
+      <article
+        className="skillCatalogCard"
+        key={skill.publicId}
+        role="button"
+        tabIndex={0}
+        onClick={open}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            open();
+          }
+        }}
+      >
+        <div className="skillCardHeader">
+          <strong>{skill.displayName}</strong>
+          {skill.latestPublishedVersion ? (
+            <span className="skillCardVersion">
+              {tr("skillVersionLabel", {
+                version: skill.latestPublishedVersion.version,
+              })}
+            </span>
+          ) : null}
+        </div>
+        <p className="skillCardDescription">{skill.description}</p>
+        <div className="skillCardMeta">
+          <span className="skillTag source">{skill.primaryCategory.name}</span>
+          {skill.tags.map((tag) => (
+            <span className="skillTag" key={tag}>
+              {tag}
+            </span>
+          ))}
+        </div>
+        <div className="skillCatalogStats">
+          <span>{tr("skillLibraryDownloads", { count: skill.downloadCount })}</span>
+          <span>{tr("skillLibraryInstalls", { count: skill.installCount })}</span>
+        </div>
+      </article>
+    );
+  }
+
+  function renderLibraryDetailModal() {
+    if (!selectedLibrarySkill) return null;
+    const skill = selectedLibrarySkill;
+    const version = skill.latestPublishedVersion;
+    return (
+      <div
+        className="skillDrawerOverlay skillModalOverlay"
+        onClick={() => setSelectedLibrarySkill(null)}
+      >
+        <div
+          className="skillModal"
+          role="dialog"
+          aria-modal="true"
+          aria-label={skill.displayName}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <header className="skillDrawerHeader">
+            <strong>{skill.displayName}</strong>
+            <button
+              className="iconButton"
+              aria-label={tr("skillDetailClose")}
+              onClick={() => setSelectedLibrarySkill(null)}
+            >
+              <XIcon weight="bold" />
+            </button>
+          </header>
+          <div className="skillModalBody">
+            <p className="skillCardDescription">{skill.description}</p>
+            <dl className="skillDetailGrid">
+              <div>
+                <dt>{tr("skillDetailSource")}</dt>
+                <dd>{skill.owner.displayName}</dd>
+              </div>
+              <div>
+                <dt>{tr("skillsFilterCategory")}</dt>
+                <dd>{skill.primaryCategory.name}</dd>
+              </div>
+              <div>
+                <dt>{tr("skillLibraryVersion")}</dt>
+                <dd>{version ? version.version : "—"}</dd>
+              </div>
+              <div>
+                <dt>{tr("skillLibraryRisk")}</dt>
+                <dd>{version ? version.scan.risk : "—"}</dd>
+              </div>
+            </dl>
+            {version?.changelog ? (
+              <section className="skillDrawerSection">
+                <h3>{tr("skillLibraryChangelog")}</h3>
+                <p className="skillMuted">{version.changelog}</p>
+              </section>
+            ) : null}
+            <div className="skillDrawerActions">
+              <button
+                className="primaryButton"
+                disabled={!version}
+                onClick={() => void installFromLibrary(skill)}
+              >
+                {tr("skillLibraryInstallLocal")}
+              </button>
+            </div>
+            {libraryInstallNote ? (
+              <section className="notice">
+                <span>{libraryInstallNote}</span>
+              </section>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderSkillLibrary() {
+    return (
+      <div className="skillLibrary">
+        {skillLibraryIsMock ? (
+          <section className="notice skillMockBanner">
+            <span>{tr("skillMockData")}</span>
+          </section>
+        ) : null}
+        <div className="skillsToolbar">
+          <label className="skillSearch">
+            <MagnifyingGlassIcon weight="bold" />
+            <input
+              type="search"
+              value={librarySearch}
+              placeholder={tr("skillsSearchPlaceholder")}
+              onChange={(event) => setLibrarySearch(event.target.value)}
+            />
+          </label>
+          <select
+            className="skillSelect"
+            aria-label={tr("skillsFilterCategory")}
+            value={libraryCategory}
+            onChange={(event) => setLibraryCategory(event.target.value)}
+          >
+            <option value="all">{tr("skillsFilterAllCategories")}</option>
+            {libraryCategories.map((category) => (
+              <option key={category.publicId} value={category.slug}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+          <select
+            className="skillSelect"
+            aria-label={tr("skillsSortLabel")}
+            value={librarySort}
+            onChange={(event) =>
+              setLibrarySort(event.target.value as typeof librarySort)
+            }
+          >
+            <option value="popular">{tr("skillLibrarySortPopular")}</option>
+            <option value="newest">{tr("skillLibrarySortNewest")}</option>
+            <option value="updated">{tr("skillLibrarySortUpdated")}</option>
+          </select>
+        </div>
+        {libraryLoading ? (
+          <div className="skillSkeleton" aria-busy="true">
+            <div className="skillSkeletonRow" />
+            <div className="skillSkeletonRow" />
+          </div>
+        ) : libraryError ? (
+          <section className="notice warning">
+            <strong>{libraryError}</strong>
+          </section>
+        ) : libraryItems.length === 0 ? (
+          <div className="skillsComingSoon">
+            <MagnifyingGlassIcon weight="duotone" />
+            <strong>{tr("skillsNoMatches")}</strong>
+          </div>
+        ) : (
+          <div className="skillCatalog">
+            {libraryItems.map(renderCatalogCard)}
+          </div>
+        )}
+        {renderLibraryDetailModal()}
+      </div>
+    );
+  }
+
+  function renderMyDistribution() {
+    return (
+      <div className="skillLibrary">
+        {skillLibraryIsMock ? (
+          <section className="notice skillMockBanner">
+            <span>{tr("skillMockData")}</span>
+          </section>
+        ) : null}
+        {distLoading ? (
+          <div className="skillSkeleton" aria-busy="true">
+            <div className="skillSkeletonRow" />
+          </div>
+        ) : (
+          <>
+            <section className="skillDrawerSection">
+              <h3>{tr("skillDistMySkills")}</h3>
+              {distMySkills.length === 0 ? (
+                <p className="skillMuted">{tr("skillTrashEmpty")}</p>
+              ) : (
+                <div className="skillList">
+                  {distMySkills.map((skill) => (
+                    <article className="skillCard" key={skill.publicId}>
+                      <div className="skillCardMain">
+                        <div className="skillCardHeader">
+                          <strong>{skill.displayName}</strong>
+                        </div>
+                        <p className="skillCardDescription">
+                          {skill.description}
+                        </p>
+                        <div className="skillCardMeta">
+                          <span className="skillTag source">
+                            {skill.visibility}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="skillCardAside">
+                        <button className="linkButton" disabled>
+                          {tr("skillDistPublish")}
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+            <section className="skillDrawerSection">
+              <h3>{tr("skillDistShareLinks")}</h3>
+              {distShareLinks.length === 0 ? (
+                <p className="skillMuted">{tr("skillTrashEmpty")}</p>
+              ) : (
+                <ul className="skillScriptList">
+                  {distShareLinks.map((link) => (
+                    <li key={link.publicId}>
+                      {link.shareUrl} ·{" "}
+                      {tr("skillDistShareUses", { count: link.useCount })}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+            <section className="skillDrawerSection">
+              <h3>{tr("skillDistInstallations")}</h3>
+              {distInstallations.length === 0 ? (
+                <p className="skillMuted">{tr("skillTrashEmpty")}</p>
+              ) : (
+                <ul className="skillFileList">
+                  {distInstallations.map((installation) => (
+                    <li key={installation.publicId}>
+                      <span className="skillFilePath">
+                        {installation.skillName} v{installation.version}
+                      </span>
+                      <span className="skillFileSize">
+                        {installation.deviceAlias}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </>
+        )}
+      </div>
+    );
+  }
+
   function skillStatusLabel(status: SkillRecord["status"]): string {
     switch (status) {
       case "enabled":
@@ -3540,8 +3908,8 @@ function App() {
         <p className="lead homeLead">{tr("skillsLead")}</p>
         <div className="skillsTabs" role="tablist">
           {tab("installed", tr("skillsTabInstalled"))}
-          {tab("library", tr("skillsTabLibrary"), true)}
-          {tab("distribution", tr("skillsTabDistribution"), true)}
+          {tab("library", tr("skillsTabLibrary"))}
+          {tab("distribution", tr("skillsTabDistribution"))}
         </div>
         {skillsTab === "installed" ? (
           <>
@@ -3655,11 +4023,10 @@ function App() {
             {renderSkillDetailDrawer()}
             {renderInstallDialog()}
           </>
+        ) : skillsTab === "library" ? (
+          renderSkillLibrary()
         ) : (
-          <div className="skillsComingSoon">
-            <PuzzlePieceIcon weight="duotone" />
-            <strong>{tr("skillsTabComingSoon")}</strong>
-          </div>
+          renderMyDistribution()
         )}
       </section>
     );

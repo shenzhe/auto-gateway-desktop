@@ -2903,6 +2903,46 @@ h1 {
   gap: 6px;
   word-break: break-all;
 }
+.skillLibrary {
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+.skillMockBanner {
+  color: var(--info);
+  background: color-mix(in oklch, var(--info) 12%, transparent);
+  border-color: color-mix(in oklch, var(--info) 30%, var(--line));
+}
+.skillCatalog {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 12px;
+}
+.skillCatalogCard {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  cursor: pointer;
+  transition:
+    border-color 0.12s ease,
+    background 0.12s ease;
+}
+.skillCatalogCard:hover,
+.skillCatalogCard:focus-visible {
+  border-color: color-mix(in oklch, var(--primary) 34%, var(--line));
+  background: color-mix(in oklch, var(--primary-soft) 30%, var(--panel));
+  outline: none;
+}
+.skillCatalogStats {
+  display: flex;
+  gap: 14px;
+  color: var(--subtle);
+  font-size: 12px;
+}
 @media (max-width: 700px) {
   .skillModal {
     width: 100%;
