@@ -62,6 +62,12 @@ import {
   restoreLatestCodexBackups,
   scanSkills,
   getSkillDetail,
+  setSkillCategory,
+  setSkillTags,
+  createCategory,
+  renameCategory,
+  archiveCategory,
+  deleteCategory,
   signOutDesktop,
   showMainWindow,
   updateTrayStatus,
@@ -76,6 +82,7 @@ import {
   type SkillScanResult,
   type SkillDetail,
   type SkillFileEntry,
+  type SkillCategory,
 } from "./desktop";
 import {
   readLocalePreference,
@@ -97,6 +104,16 @@ const notificationWindowStorageKey =
   "autogateway.desktop.notification-window.v1";
 const notificationDetailQueryKey = "notificationId";
 const notificationPageSize = 5;
+const presetCategoryKeys: Record<string, Parameters<typeof translate>[1]> = {
+  development: "skillCategoryDevelopment",
+  design: "skillCategoryDesign",
+  data: "skillCategoryData",
+  web: "skillCategoryWeb",
+  security: "skillCategorySecurity",
+  business: "skillCategoryBusiness",
+  automation: "skillCategoryAutomation",
+  uncategorized: "skillCategoryUncategorized",
+};
 const externalInstallationTimeoutMs = 5 * 60 * 1000;
 const designPreviewState = import.meta.env.DEV
   ? new URLSearchParams(window.location.search).get("preview")
@@ -1236,10 +1253,23 @@ function App() {
   const [skillSort, setSkillSort] = useState<
     "name-asc" | "name-desc" | "updated-desc"
   >("name-asc");
+  const [skillCategoryFilter, setSkillCategoryFilter] = useState("all");
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
   const [skillDetail, setSkillDetail] = useState<SkillDetail | null>(null);
   const [skillDetailLoading, setSkillDetailLoading] = useState(false);
   const [skillDetailError, setSkillDetailError] = useState("");
+  const [skillTagDraft, setSkillTagDraft] = useState("");
+  const [showCategoryManager, setShowCategoryManager] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [renamingCategoryId, setRenamingCategoryId] = useState<string | null>(
+    null,
+  );
+  const [renameCategoryValue, setRenameCategoryValue] = useState("");
+  const [deletingCategoryId, setDeletingCategoryId] = useState<string | null>(
+    null,
+  );
+  const [deleteMigrateTo, setDeleteMigrateTo] = useState("");
+  const [skillCategoryError, setSkillCategoryError] = useState("");
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
   const [localePreference, setLocalePreference] = useState<LocalePreference>(
     () => readLocalePreference(),
@@ -1297,6 +1327,10 @@ function App() {
       active = false;
     };
   }, [selectedSkillId, skillsRefreshNonce]);
+
+  useEffect(() => {
+    setSkillTagDraft(skillDetail ? skillDetail.tags.join(", ") : "");
+  }, [skillDetail]);
 
   const accountConnected = Boolean(desktopAccessToken);
   const appInstalled = Boolean(appStatus?.installed);
@@ -2392,6 +2426,32 @@ function App() {
     }
   }
 
+  function categoryLabel(category: SkillCategory): string {
+    if (category.type === "preset") {
+      const key = presetCategoryKeys[category.id];
+      return key ? tr(key) : category.name;
+    }
+    return category.name;
+  }
+
+  function categoryLabelById(id?: string | null): string {
+    const effective = id ?? "uncategorized";
+    const category = (skillScan?.categories ?? []).find(
+      (item) => item.id === effective,
+    );
+    return category ? categoryLabel(category) : tr("skillCategoryUncategorized");
+  }
+
+  async function runSkillMutation(action: () => Promise<unknown>) {
+    try {
+      await action();
+      setSkillCategoryError("");
+      setSkillsRefreshNonce((nonce) => nonce + 1);
+    } catch (error) {
+      setSkillCategoryError(String(error));
+    }
+  }
+
   function skillStatusLabel(status: SkillRecord["status"]): string {
     return status === "enabled"
       ? tr("skillStatusEnabled")
@@ -2461,6 +2521,16 @@ function App() {
             <span className="skillTag source">
               {skillSourceLabel(skill.sourceType)}
             </span>
+            {skill.categoryId ? (
+              <span className="skillTag">
+                {categoryLabelById(skill.categoryId)}
+              </span>
+            ) : null}
+            {skill.tags.map((tag) => (
+              <span className="skillTag" key={tag}>
+                {tag}
+              </span>
+            ))}
             {readOnly ? (
               <span className="skillTag readOnly">{tr("skillReadOnly")}</span>
             ) : null}
@@ -2515,6 +2585,11 @@ function App() {
         (skill) =>
           skillSourceFilter === "all" ||
           skill.sourceType === skillSourceFilter,
+      )
+      .filter(
+        (skill) =>
+          skillCategoryFilter === "all" ||
+          (skill.categoryId ?? "uncategorized") === skillCategoryFilter,
       )
       .filter(
         (skill) =>
@@ -2663,6 +2738,58 @@ function App() {
                   </dl>
                 </section>
                 <section className="skillDrawerSection">
+                  <h3>{tr("skillDetailCategory")}</h3>
+                  <select
+                    className="skillSelect"
+                    value={skillDetail.categoryId ?? "uncategorized"}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      void runSkillMutation(() =>
+                        setSkillCategory(
+                          skillDetail.id,
+                          value === "uncategorized" ? null : value,
+                        ),
+                      );
+                    }}
+                  >
+                    {(skillScan?.categories ?? [])
+                      .filter((category) => !category.archived)
+                      .map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {categoryLabel(category)}
+                        </option>
+                      ))}
+                  </select>
+                  <h3>{tr("skillDetailTags")}</h3>
+                  <div className="skillTagEditor">
+                    <input
+                      type="text"
+                      value={skillTagDraft}
+                      placeholder={tr("skillTagsPlaceholder")}
+                      onChange={(event) => setSkillTagDraft(event.target.value)}
+                    />
+                    <button
+                      className="secondaryButton"
+                      onClick={() =>
+                        void runSkillMutation(() =>
+                          setSkillTags(
+                            skillDetail.id,
+                            skillTagDraft
+                              .split(",")
+                              .map((tag) => tag.trim())
+                              .filter(Boolean),
+                          ),
+                        )
+                      }
+                    >
+                      {tr("skillTagsSave")}
+                    </button>
+                  </div>
+                  {skillCategoryError ? (
+                    <p className="skillMuted">{skillCategoryError}</p>
+                  ) : null}
+                </section>
+                <section className="skillDrawerSection">
                   <h3>{tr("skillDetailScripts")}</h3>
                   {skillDetail.scripts.length > 0 ? (
                     <>
@@ -2715,6 +2842,188 @@ function App() {
           </div>
         </aside>
       </div>
+    );
+  }
+
+  function renderCategoryManager() {
+    if (!showCategoryManager) return null;
+    const categories = skillScan?.categories ?? [];
+    const activeCategories = categories.filter((category) => !category.archived);
+    return (
+      <section className="categoryManager">
+        <div className="categoryManagerHeader">
+          <h3>{tr("skillCategoryManagerTitle")}</h3>
+          <button
+            className="iconButton"
+            aria-label={tr("skillDetailClose")}
+            onClick={() => setShowCategoryManager(false)}
+          >
+            <XIcon weight="bold" />
+          </button>
+        </div>
+        <div className="categoryCreate">
+          <input
+            type="text"
+            value={newCategoryName}
+            placeholder={tr("skillCategoryNew")}
+            onChange={(event) => setNewCategoryName(event.target.value)}
+          />
+          <button
+            className="secondaryButton"
+            disabled={!newCategoryName.trim()}
+            onClick={() =>
+              void runSkillMutation(async () => {
+                await createCategory(newCategoryName.trim());
+                setNewCategoryName("");
+              })
+            }
+          >
+            {tr("skillCategoryAdd")}
+          </button>
+        </div>
+        {skillCategoryError ? (
+          <p className="skillMuted">{skillCategoryError}</p>
+        ) : null}
+        <ul className="categoryList">
+          {categories.map((category) => {
+            const isPreset = category.type === "preset";
+            const renaming = renamingCategoryId === category.id;
+            const deleting = deletingCategoryId === category.id;
+            return (
+              <li
+                key={category.id}
+                className={category.archived ? "archived" : ""}
+              >
+                <div className="categoryRow">
+                  {renaming ? (
+                    <>
+                      <input
+                        type="text"
+                        value={renameCategoryValue}
+                        onChange={(event) =>
+                          setRenameCategoryValue(event.target.value)
+                        }
+                      />
+                      <button
+                        className="secondaryButton"
+                        disabled={!renameCategoryValue.trim()}
+                        onClick={() =>
+                          void runSkillMutation(async () => {
+                            await renameCategory(
+                              category.id,
+                              renameCategoryValue.trim(),
+                            );
+                            setRenamingCategoryId(null);
+                          })
+                        }
+                      >
+                        {tr("skillCategorySave")}
+                      </button>
+                      <button
+                        className="linkButton"
+                        onClick={() => setRenamingCategoryId(null)}
+                      >
+                        {tr("skillCategoryCancel")}
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="categoryName">
+                        {categoryLabel(category)}
+                      </span>
+                      <span className="skillTag">
+                        {isPreset
+                          ? tr("skillCategoryPresetBadge")
+                          : tr("skillCategoryCustomBadge")}
+                      </span>
+                      {category.archived ? (
+                        <span className="skillTag readOnly">
+                          {tr("skillCategoryArchivedBadge")}
+                        </span>
+                      ) : null}
+                      {!isPreset ? (
+                        <div className="categoryActions">
+                          <button
+                            className="linkButton"
+                            onClick={() => {
+                              setRenamingCategoryId(category.id);
+                              setRenameCategoryValue(category.name);
+                            }}
+                          >
+                            {tr("skillCategoryRename")}
+                          </button>
+                          <button
+                            className="linkButton"
+                            onClick={() =>
+                              void runSkillMutation(() =>
+                                archiveCategory(category.id, !category.archived),
+                              )
+                            }
+                          >
+                            {category.archived
+                              ? tr("skillCategoryUnarchive")
+                              : tr("skillCategoryArchive")}
+                          </button>
+                          <button
+                            className="linkButton danger"
+                            onClick={() => {
+                              setDeletingCategoryId(category.id);
+                              setDeleteMigrateTo("");
+                            }}
+                          >
+                            {tr("skillCategoryDelete")}
+                          </button>
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+                {deleting ? (
+                  <div className="categoryDelete">
+                    <span>{tr("skillCategoryDeleteMigrate")}</span>
+                    <select
+                      className="skillSelect"
+                      value={deleteMigrateTo}
+                      onChange={(event) =>
+                        setDeleteMigrateTo(event.target.value)
+                      }
+                    >
+                      <option value="">{tr("skillCategoryUncategorized")}</option>
+                      {activeCategories
+                        .filter((item) => item.id !== category.id)
+                        .map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {categoryLabel(item)}
+                          </option>
+                        ))}
+                    </select>
+                    <button
+                      className="secondaryButton"
+                      onClick={() =>
+                        void runSkillMutation(async () => {
+                          await deleteCategory(
+                            category.id,
+                            deleteMigrateTo || null,
+                          );
+                          setDeletingCategoryId(null);
+                        })
+                      }
+                    >
+                      {tr("skillCategoryDeleteConfirm")}
+                    </button>
+                    <button
+                      className="linkButton"
+                      onClick={() => setDeletingCategoryId(null)}
+                    >
+                      {tr("skillCategoryCancel")}
+                    </button>
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      </section>
     );
   }
 
@@ -2805,6 +3114,21 @@ function App() {
               </select>
               <select
                 className="skillSelect"
+                aria-label={tr("skillsFilterCategory")}
+                value={skillCategoryFilter}
+                onChange={(event) => setSkillCategoryFilter(event.target.value)}
+              >
+                <option value="all">{tr("skillsFilterAllCategories")}</option>
+                {(skillScan?.categories ?? [])
+                  .filter((category) => !category.archived)
+                  .map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {categoryLabel(category)}
+                    </option>
+                  ))}
+              </select>
+              <select
+                className="skillSelect"
                 aria-label={tr("skillsSortLabel")}
                 value={skillSort}
                 onChange={(event) =>
@@ -2817,6 +3141,12 @@ function App() {
               </select>
               <button
                 className="secondaryButton"
+                onClick={() => setShowCategoryManager((open) => !open)}
+              >
+                {tr("skillManageCategories")}
+              </button>
+              <button
+                className="secondaryButton"
                 disabled={skillsLoading}
                 onClick={() => setSkillsRefreshNonce((nonce) => nonce + 1)}
               >
@@ -2824,6 +3154,7 @@ function App() {
                 {tr("skillsRescan")}
               </button>
             </div>
+            {renderCategoryManager()}
             {renderInstalledSkills()}
             {renderSkillDetailDrawer()}
           </>

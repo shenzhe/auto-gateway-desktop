@@ -152,9 +152,20 @@ export type SkillScanFailure = {
   reason: string;
 };
 
+export type SkillCategoryType = "preset" | "custom";
+
+export type SkillCategory = {
+  id: string;
+  name: string;
+  type: SkillCategoryType;
+  order: number;
+  archived: boolean;
+};
+
 export type SkillScanResult = {
   skills: SkillRecord[];
   failedSources: SkillScanFailure[];
+  categories: SkillCategory[];
   scannedAt: string;
 };
 
@@ -192,6 +203,47 @@ export function scanSkills(): Promise<SkillScanResult> {
 
 export function getSkillDetail(id: string): Promise<SkillDetail> {
   return invoke<SkillDetail>("get_skill_detail", { id });
+}
+
+export function setSkillCategory(
+  id: string,
+  categoryId: string | null,
+): Promise<void> {
+  return invoke<void>("set_skill_category", { id, categoryId });
+}
+
+export function setSkillsCategory(
+  ids: string[],
+  categoryId: string | null,
+): Promise<void> {
+  return invoke<void>("set_skills_category", { ids, categoryId });
+}
+
+export function setSkillTags(id: string, tags: string[]): Promise<void> {
+  return invoke<void>("set_skill_tags", { id, tags });
+}
+
+export function createCategory(name: string): Promise<SkillCategory> {
+  return invoke<SkillCategory>("create_category", { name });
+}
+
+export function renameCategory(id: string, name: string): Promise<void> {
+  return invoke<void>("rename_category", { id, name });
+}
+
+export function reorderCategories(orderedIds: string[]): Promise<void> {
+  return invoke<void>("reorder_categories", { orderedIds });
+}
+
+export function archiveCategory(id: string, archived: boolean): Promise<void> {
+  return invoke<void>("archive_category", { id, archived });
+}
+
+export function deleteCategory(
+  id: string,
+  migrateTo: string | null,
+): Promise<void> {
+  return invoke<void>("delete_category", { id, migrateTo });
 }
 
 export function getCodexAppStatus(): Promise<CodexAppStatus> {

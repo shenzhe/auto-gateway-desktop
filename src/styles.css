@@ -2722,6 +2722,106 @@ h1 {
   font-size: 12px;
   white-space: nowrap;
 }
+.skillTagEditor {
+  display: flex;
+  gap: 8px;
+}
+.skillTagEditor input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--control-bg);
+  color: var(--text);
+  font-size: 13px;
+}
+.linkButton {
+  border: 0;
+  background: transparent;
+  color: var(--primary);
+  font-size: 13px;
+  font-weight: 620;
+  padding: 2px 4px;
+}
+.linkButton.danger {
+  color: var(--danger);
+}
+.categoryManager {
+  display: grid;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.categoryManagerHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.categoryManagerHeader h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.categoryCreate {
+  display: flex;
+  gap: 8px;
+}
+.categoryCreate input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--control-bg);
+  color: var(--text);
+  font-size: 13px;
+}
+.categoryList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+.categoryList li {
+  display: grid;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+}
+.categoryList li.archived {
+  opacity: 0.6;
+}
+.categoryRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.categoryName {
+  font-weight: 640;
+  font-size: 14px;
+}
+.categoryActions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+.categoryDelete {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  font-size: 13px;
+  color: var(--muted);
+}
+.categoryDelete input,
+.skillInstallPath {
+  min-width: 0;
+}
 @media (max-width: 700px) {
   .skillOverview {
     grid-template-columns: repeat(2, 1fr);

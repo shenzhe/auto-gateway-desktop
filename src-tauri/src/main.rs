@@ -21,7 +21,10 @@ use desktop_auth::{
     save_desktop_api_key, save_desktop_session, DesktopAccountSummary, DesktopBootstrapKey,
     DesktopNotificationList, DesktopSession, StoredDesktopState,
 };
-use skills::{get_skill_detail, scan_skills};
+use skills::{
+    archive_category, create_category, delete_category, get_skill_detail, rename_category,
+    reorder_categories, scan_skills, set_skill_category, set_skill_tags, set_skills_category,
+};
 use futures_util::StreamExt;
 use std::{
     fs::{self, File},
@@ -714,6 +717,14 @@ fn main() {
             download_and_open_desktop_installer,
             scan_skills,
             get_skill_detail,
+            set_skill_category,
+            set_skills_category,
+            set_skill_tags,
+            create_category,
+            rename_category,
+            reorder_categories,
+            archive_category,
+            delete_category,
             open_devtools
         ])
         .build(tauri::generate_context!())

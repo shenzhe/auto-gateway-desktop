@@ -1,9 +1,11 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::Manager;
+use uuid::Uuid;
 
 const SKILL_MANIFEST_FILE: &str = "SKILL.md";
 const SYSTEM_SKILLS_DIR: &str = ".system";
@@ -109,6 +111,7 @@ pub struct ScanFailure {
 pub struct SkillScanResult {
     pub skills: Vec<SkillRecord>,
     pub failed_sources: Vec<ScanFailure>,
+    pub categories: Vec<SkillCategory>,
     pub scanned_at: String,
 }
 
@@ -350,6 +353,7 @@ pub fn scan_skills_in(dir: &Path) -> SkillScanResult {
     let mut result = SkillScanResult {
         skills: Vec::new(),
         failed_sources: Vec::new(),
+        categories: Vec::new(),
         scanned_at: now_millis(),
     };
 
@@ -418,10 +422,24 @@ pub fn scan_skills_in(dir: &Path) -> SkillScanResult {
 /// Scan the current user's Codex skills directory. Returns an empty result when
 /// the directory does not exist (Codex not installed or no skills yet) rather
 /// than surfacing an error to the UI.
-#[tauri::command]
-pub fn scan_skills(_app: tauri::AppHandle) -> Result<SkillScanResult, String> {
+/// Scan the skills directory and merge in AUTO Gateway index data (stable ids,
+/// categories, tags), persisting the index when new skills are discovered.
+fn reconciled_scan(app: &tauri::AppHandle) -> Result<SkillScanResult, String> {
     let dir = default_skills_dir()?;
-    Ok(scan_skills_in(&dir))
+    let index_path = skill_index_path(app)?;
+    let mut index = load_index_at(&index_path);
+    let mut result = scan_skills_in(&dir);
+    let changed = reconcile_index(&mut index, &mut result);
+    if changed {
+        save_index_at(&index_path, &index)?;
+    }
+    result.categories = index.categories.clone();
+    Ok(result)
+}
+
+#[tauri::command]
+pub fn scan_skills(app: tauri::AppHandle) -> Result<SkillScanResult, String> {
+    reconciled_scan(&app)
 }
 
 fn classify_file_kind(relative_path: &str) -> SkillFileKind {
@@ -573,15 +591,9 @@ fn frontmatter_body(markdown: &str) -> Option<String> {
     }
 }
 
-/// Build the full detail for one skill, located by its scan id so the backend
-/// stays authoritative over the install path (no client-supplied paths).
-pub fn skill_detail_for(dir: &Path, id: &str) -> Result<SkillDetail, String> {
-    let mut record = scan_skills_in(dir)
-        .skills
-        .into_iter()
-        .find(|skill| skill.id == id)
-        .ok_or_else(|| "the requested skill was not found".to_string())?;
-
+/// Build full detail (file walk + checksum + body) for an already-resolved
+/// record. The record's install_path is treated as authoritative.
+fn build_skill_detail(mut record: SkillRecord) -> SkillDetail {
     let root = PathBuf::from(&record.install_path);
     let (files, total_size, truncated) = walk_skill_files(&root);
     let file_count = files.len();
@@ -595,7 +607,7 @@ pub fn skill_detail_for(dir: &Path, id: &str) -> Result<SkillDetail, String> {
         .ok()
         .and_then(|manifest| frontmatter_body(&manifest));
 
-    Ok(SkillDetail {
+    SkillDetail {
         record,
         files,
         scripts,
@@ -603,13 +615,483 @@ pub fn skill_detail_for(dir: &Path, id: &str) -> Result<SkillDetail, String> {
         total_size_bytes: total_size,
         file_count,
         truncated,
-    })
+    }
+}
+
+/// Detail located by scan id (path-derived), without an index. Test-only.
+#[cfg(test)]
+pub fn skill_detail_for(dir: &Path, id: &str) -> Result<SkillDetail, String> {
+    let record = scan_skills_in(dir)
+        .skills
+        .into_iter()
+        .find(|skill| skill.id == id)
+        .ok_or_else(|| "the requested skill was not found".to_string())?;
+    Ok(build_skill_detail(record))
 }
 
 #[tauri::command]
-pub fn get_skill_detail(_app: tauri::AppHandle, id: String) -> Result<SkillDetail, String> {
-    let dir = default_skills_dir()?;
-    skill_detail_for(&dir, &id)
+pub fn get_skill_detail(app: tauri::AppHandle, id: String) -> Result<SkillDetail, String> {
+    let record = reconciled_scan(&app)?
+        .skills
+        .into_iter()
+        .find(|skill| skill.id == id)
+        .ok_or_else(|| "the requested skill was not found".to_string())?;
+    Ok(build_skill_detail(record))
+}
+
+// ---------------------------------------------------------------------------
+// AUTO Gateway index (stable ids, categories, tags) — stored in app data dir,
+// NEVER written into SKILL.md.
+// ---------------------------------------------------------------------------
+
+const SKILL_INDEX_FILE: &str = "skills-index.json";
+const SKILL_INDEX_VERSION: u32 = 1;
+const UNCATEGORIZED_ID: &str = "uncategorized";
+const MAX_CATEGORY_NAME_LEN: usize = 40;
+const MAX_TAGS_PER_SKILL: usize = 20;
+const MAX_TAG_LEN: usize = 40;
+
+// Preset primary categories (stable id, English fallback name). The frontend
+// localizes preset names by id; custom categories use their stored name.
+const PRESET_CATEGORIES: &[(&str, &str)] = &[
+    ("development", "Development & Engineering"),
+    ("design", "Design & Creative"),
+    ("data", "Data & Documents"),
+    ("web", "Web & Marketing"),
+    ("security", "Security & Quality"),
+    ("business", "Business & Collaboration"),
+    ("automation", "Automation & Media"),
+    (UNCATEGORIZED_ID, "Uncategorized"),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CategoryType {
+    Preset,
+    Custom,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillCategory {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub category_type: CategoryType,
+    pub order: i64,
+    #[serde(default)]
+    pub archived: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexEntry {
+    pub id: String,
+    pub install_path: String,
+    pub name: String,
+    #[serde(default)]
+    pub category_id: Option<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub source_type: Option<String>,
+    // Recorded when a skill is moved to quarantine (M3), to restore it later.
+    #[serde(default)]
+    pub original_relative_path: Option<String>,
+    #[serde(default)]
+    pub installed_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillIndex {
+    pub version: u32,
+    #[serde(default)]
+    pub entries: BTreeMap<String, IndexEntry>,
+    #[serde(default)]
+    pub categories: Vec<SkillCategory>,
+}
+
+impl Default for SkillIndex {
+    fn default() -> Self {
+        let mut index = SkillIndex {
+            version: SKILL_INDEX_VERSION,
+            entries: BTreeMap::new(),
+            categories: Vec::new(),
+        };
+        ensure_presets(&mut index);
+        index
+    }
+}
+
+/// Make sure every preset category is present (adds any missing on upgrade) and
+/// keep categories ordered.
+fn ensure_presets(index: &mut SkillIndex) {
+    for (order, (id, name)) in PRESET_CATEGORIES.iter().enumerate() {
+        if !index.categories.iter().any(|category| category.id == *id) {
+            index.categories.push(SkillCategory {
+                id: (*id).to_string(),
+                name: (*name).to_string(),
+                category_type: CategoryType::Preset,
+                order: order as i64,
+                archived: false,
+            });
+        }
+    }
+    index.categories.sort_by_key(|category| category.order);
+}
+
+fn source_type_str(source: SourceType) -> String {
+    match source {
+        SourceType::User => "user",
+        SourceType::System => "system",
+        SourceType::Plugin => "plugin",
+        SourceType::External => "external",
+        SourceType::Autogateway => "autogateway",
+        SourceType::Team => "team",
+    }
+    .to_string()
+}
+
+fn category_exists(index: &SkillIndex, id: &str) -> bool {
+    index.categories.iter().any(|category| category.id == id)
+}
+
+fn is_protected_category(index: &SkillIndex, id: &str) -> bool {
+    id == UNCATEGORIZED_ID
+        || index
+            .categories
+            .iter()
+            .any(|category| category.id == id && category.category_type == CategoryType::Preset)
+}
+
+fn normalize_tags(tags: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for tag in tags {
+        let trimmed = tag.trim().to_string();
+        if trimmed.is_empty() || trimmed.len() > MAX_TAG_LEN {
+            continue;
+        }
+        if seen.insert(trimmed.clone()) {
+            normalized.push(trimmed);
+        }
+        if normalized.len() >= MAX_TAGS_PER_SKILL {
+            break;
+        }
+    }
+    normalized
+}
+
+fn skills_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("resolve application data directory: {error}"))?;
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("create application data directory: {error}"))?;
+    Ok(directory)
+}
+
+fn skill_index_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(skills_data_dir(app)?.join(SKILL_INDEX_FILE))
+}
+
+/// Load the index from disk. Missing → default (seeded). Corrupt → the bad file
+/// is preserved as `<name>.corrupt.<ts>` and a fresh index is returned.
+fn load_index_at(path: &Path) -> SkillIndex {
+    let mut index = match fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str::<SkillIndex>(&text) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                let corrupt = path.with_extension(format!("corrupt.{}", now_millis()));
+                let _ = fs::rename(path, &corrupt);
+                SkillIndex::default()
+            }
+        },
+        Err(_) => SkillIndex::default(),
+    };
+    ensure_presets(&mut index);
+    index
+}
+
+/// Persist the index: back up the previous version, then write atomically.
+fn save_index_at(path: &Path, index: &SkillIndex) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "resolve the skills index directory".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("create the skills index directory: {error}"))?;
+    if path.exists() {
+        let backup = path.with_extension("json.bak");
+        let _ = fs::copy(path, &backup);
+    }
+    let serialized =
+        serde_json::to_string_pretty(index).map_err(|error| format!("serialize the skills index: {error}"))?;
+    let temporary = parent.join(format!(".{SKILL_INDEX_FILE}.{}.tmp", Uuid::new_v4()));
+    fs::write(&temporary, serialized.as_bytes())
+        .map_err(|error| format!("write the skills index: {error}"))?;
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        let _ = fs::remove_file(path);
+    }
+    fs::rename(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        format!("save the skills index: {error}")
+    })
+}
+
+/// Attach stable ids, categories, and tags from the index to scanned records,
+/// creating index entries for newly discovered skills. Returns whether the
+/// index changed and must be persisted. Matches by install path, then by name
+/// (so an externally renamed folder keeps its id/category), never reusing an
+/// entry already claimed this scan.
+fn reconcile_index(index: &mut SkillIndex, result: &mut SkillScanResult) -> bool {
+    let mut changed = false;
+    let mut used: HashSet<String> = HashSet::new();
+    for record in &mut result.skills {
+        let matched = index
+            .entries
+            .iter()
+            .find(|(id, entry)| {
+                !used.contains(id.as_str()) && entry.install_path == record.install_path
+            })
+            .map(|(id, _)| id.clone())
+            .or_else(|| {
+                index
+                    .entries
+                    .iter()
+                    .find(|(id, entry)| {
+                        !used.contains(id.as_str()) && entry.name == record.name
+                    })
+                    .map(|(id, _)| id.clone())
+            });
+        let id = match matched {
+            Some(id) => {
+                if let Some(entry) = index.entries.get_mut(&id) {
+                    if entry.install_path != record.install_path {
+                        entry.install_path = record.install_path.clone();
+                        changed = true;
+                    }
+                    if entry.name != record.name {
+                        entry.name = record.name.clone();
+                        changed = true;
+                    }
+                    entry.source_type = Some(source_type_str(record.source_type));
+                    record.category_id = entry.category_id.clone();
+                    record.tags = entry.tags.clone();
+                }
+                id
+            }
+            None => {
+                let id = Uuid::new_v4().to_string();
+                index.entries.insert(
+                    id.clone(),
+                    IndexEntry {
+                        id: id.clone(),
+                        install_path: record.install_path.clone(),
+                        name: record.name.clone(),
+                        category_id: None,
+                        tags: Vec::new(),
+                        source_type: Some(source_type_str(record.source_type)),
+                        original_relative_path: None,
+                        installed_at: record.installed_at.clone(),
+                    },
+                );
+                changed = true;
+                id
+            }
+        };
+        used.insert(id.clone());
+        record.id = id;
+    }
+    changed
+}
+
+#[tauri::command]
+pub fn set_skill_category(
+    app: tauri::AppHandle,
+    id: String,
+    category_id: Option<String>,
+) -> Result<(), String> {
+    let path = skill_index_path(&app)?;
+    let mut index = load_index_at(&path);
+    if let Some(category) = &category_id {
+        if !category_exists(&index, category) {
+            return Err("the category does not exist".to_string());
+        }
+    }
+    let entry = index
+        .entries
+        .get_mut(&id)
+        .ok_or_else(|| "the requested skill was not found".to_string())?;
+    entry.category_id = category_id;
+    save_index_at(&path, &index)
+}
+
+#[tauri::command]
+pub fn set_skills_category(
+    app: tauri::AppHandle,
+    ids: Vec<String>,
+    category_id: Option<String>,
+) -> Result<(), String> {
+    let path = skill_index_path(&app)?;
+    let mut index = load_index_at(&path);
+    if let Some(category) = &category_id {
+        if !category_exists(&index, category) {
+            return Err("the category does not exist".to_string());
+        }
+    }
+    for id in ids {
+        if let Some(entry) = index.entries.get_mut(&id) {
+            entry.category_id = category_id.clone();
+        }
+    }
+    save_index_at(&path, &index)
+}
+
+#[tauri::command]
+pub fn set_skill_tags(app: tauri::AppHandle, id: String, tags: Vec<String>) -> Result<(), String> {
+    let path = skill_index_path(&app)?;
+    let mut index = load_index_at(&path);
+    let entry = index
+        .entries
+        .get_mut(&id)
+        .ok_or_else(|| "the requested skill was not found".to_string())?;
+    entry.tags = normalize_tags(tags);
+    save_index_at(&path, &index)
+}
+
+#[tauri::command]
+pub fn create_category(app: tauri::AppHandle, name: String) -> Result<SkillCategory, String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("the category name is required".to_string());
+    }
+    if trimmed.len() > MAX_CATEGORY_NAME_LEN {
+        return Err("the category name is too long".to_string());
+    }
+    let path = skill_index_path(&app)?;
+    let mut index = load_index_at(&path);
+    let order = index
+        .categories
+        .iter()
+        .map(|category| category.order)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let category = SkillCategory {
+        id: format!("custom-{}", Uuid::new_v4()),
+        name: trimmed,
+        category_type: CategoryType::Custom,
+        order,
+        archived: false,
+    };
+    index.categories.push(category.clone());
+    save_index_at(&path, &index)?;
+    Ok(category)
+}
+
+#[tauri::command]
+pub fn rename_category(app: tauri::AppHandle, id: String, name: String) -> Result<(), String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("the category name is required".to_string());
+    }
+    if trimmed.len() > MAX_CATEGORY_NAME_LEN {
+        return Err("the category name is too long".to_string());
+    }
+    let path = skill_index_path(&app)?;
+    let mut index = load_index_at(&path);
+    if is_protected_category(&index, &id) {
+        return Err("preset categories cannot be renamed".to_string());
+    }
+    let category = index
+        .categories
+        .iter_mut()
+        .find(|category| category.id == id)
+        .ok_or_else(|| "the category does not exist".to_string())?;
+    category.name = trimmed;
+    save_index_at(&path, &index)
+}
+
+#[tauri::command]
+pub fn reorder_categories(app: tauri::AppHandle, ordered_ids: Vec<String>) -> Result<(), String> {
+    let path = skill_index_path(&app)?;
+    let mut index = load_index_at(&path);
+    for (order, id) in ordered_ids.iter().enumerate() {
+        if let Some(category) = index.categories.iter_mut().find(|category| &category.id == id) {
+            category.order = order as i64;
+        }
+    }
+    index.categories.sort_by_key(|category| category.order);
+    save_index_at(&path, &index)
+}
+
+#[tauri::command]
+pub fn archive_category(
+    app: tauri::AppHandle,
+    id: String,
+    archived: bool,
+) -> Result<(), String> {
+    let path = skill_index_path(&app)?;
+    let mut index = load_index_at(&path);
+    if is_protected_category(&index, &id) {
+        return Err("preset categories cannot be archived".to_string());
+    }
+    let category = index
+        .categories
+        .iter_mut()
+        .find(|category| category.id == id)
+        .ok_or_else(|| "the category does not exist".to_string())?;
+    category.archived = archived;
+    save_index_at(&path, &index)
+}
+
+/// Pure core of category deletion (testable without an app handle): reassigns
+/// affected entries to `migrate_to` (or clears them) and removes the category.
+fn delete_category_in(
+    index: &mut SkillIndex,
+    id: &str,
+    migrate_to: Option<String>,
+) -> Result<(), String> {
+    if is_protected_category(index, id) {
+        return Err("preset categories cannot be deleted".to_string());
+    }
+    if !category_exists(index, id) {
+        return Err("the category does not exist".to_string());
+    }
+    let target = match migrate_to {
+        Some(target) if target == id => {
+            return Err("cannot migrate a category into itself".to_string());
+        }
+        Some(target) => {
+            if !category_exists(index, &target) {
+                return Err("the migration target category does not exist".to_string());
+            }
+            Some(target)
+        }
+        None => None,
+    };
+    for entry in index.entries.values_mut() {
+        if entry.category_id.as_deref() == Some(id) {
+            entry.category_id = target.clone();
+        }
+    }
+    index.categories.retain(|category| category.id != id);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn delete_category(
+    app: tauri::AppHandle,
+    id: String,
+    migrate_to: Option<String>,
+) -> Result<(), String> {
+    let path = skill_index_path(&app)?;
+    let mut index = load_index_at(&path);
+    delete_category_in(&mut index, &id, migrate_to)?;
+    save_index_at(&path, &index)
 }
 
 #[cfg(test)]
@@ -783,5 +1265,87 @@ mod tests {
         let root = temp_root("detail-missing");
         assert!(skill_detail_for(&root, "deadbeefdeadbeef").is_err());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn index_round_trips_and_seeds_and_recovers_from_corruption() {
+        let root = temp_root("index");
+        let path = root.join(SKILL_INDEX_FILE);
+        let index = load_index_at(&path);
+        assert!(index.categories.iter().any(|c| c.id == "development"));
+        assert!(index.categories.iter().any(|c| c.id == UNCATEGORIZED_ID));
+        assert_eq!(index.categories.len(), PRESET_CATEGORIES.len());
+        save_index_at(&path, &index).expect("save");
+        assert_eq!(
+            load_index_at(&path).categories.len(),
+            PRESET_CATEGORIES.len()
+        );
+
+        // Corrupt content is quarantined and a fresh seeded index returned.
+        fs::write(&path, b"{ not json").expect("corrupt");
+        let recovered = load_index_at(&path);
+        assert_eq!(recovered.categories.len(), PRESET_CATEGORIES.len());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reconcile_assigns_stable_ids_and_attaches_metadata() {
+        let dir = temp_root("reconcile");
+        write_skill(
+            &dir,
+            "release-notes",
+            "---\nname: release-notes\ndescription: d.\n---\n",
+        );
+        let mut index = SkillIndex::default();
+
+        let mut first = scan_skills_in(&dir);
+        assert!(reconcile_index(&mut index, &mut first));
+        let id = first.skills[0].id.clone();
+
+        // Assign a category, then rescan: id stays stable and metadata attaches.
+        let entry_id = index.entries.keys().next().unwrap().clone();
+        index.entries.get_mut(&entry_id).unwrap().category_id = Some("development".into());
+        let mut second = scan_skills_in(&dir);
+        assert!(!reconcile_index(&mut index, &mut second));
+        assert_eq!(second.skills[0].id, id);
+        assert_eq!(second.skills[0].category_id.as_deref(), Some("development"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn delete_category_migrates_entries_and_protects_presets() {
+        let mut index = SkillIndex::default();
+        index.categories.push(SkillCategory {
+            id: "custom-x".into(),
+            name: "X".into(),
+            category_type: CategoryType::Custom,
+            order: 99,
+            archived: false,
+        });
+        index.entries.insert(
+            "e1".into(),
+            IndexEntry {
+                id: "e1".into(),
+                install_path: "/p".into(),
+                name: "n".into(),
+                category_id: Some("custom-x".into()),
+                tags: vec![],
+                source_type: None,
+                original_relative_path: None,
+                installed_at: None,
+            },
+        );
+
+        // Presets are protected.
+        assert!(delete_category_in(&mut index, "development", None).is_err());
+
+        // Delete custom with migration → entry reassigned.
+        delete_category_in(&mut index, "custom-x", Some("development".into())).expect("delete");
+        assert!(!category_exists(&index, "custom-x"));
+        assert_eq!(
+            index.entries["e1"].category_id.as_deref(),
+            Some("development")
+        );
     }
 }
