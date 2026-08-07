@@ -92,4 +92,4 @@ jobs:
         shell: pwsh
         run: |
           npm ci
-          npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+          npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'

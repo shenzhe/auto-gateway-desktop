@@ -41,6 +41,50 @@ The script produces these files in `release`:
 - Windows x64 and ARM64 NSIS installers with updater signatures;
 - one Windows unified installer that selects the native payload at install time.
 
+The macOS artifacts are codesigned with a Developer ID and notarized by Apple.
+Native Windows builds use Azure Artifact Signing for Authenticode signatures,
+including the Tauri application binary, NSIS installer, uninstaller, and the
+architecture-selecting unified installer. The Tauri updater signature remains
+separate and is still required for update integrity. See the user-facing
+troubleshooting guide —
+[English](docs/windows-smartscreen.en.md) /
+[简体中文](docs/windows-smartscreen.zh.md) — for what users experience and how
+to verify a downloaded installer.
+
+## Windows Artifact Signing
+
+The Windows signing configuration is loaded automatically from
+`src-tauri/tauri.windows.conf.json`. It invokes the official Windows SignTool
+integration for Azure Artifact Signing after Tauri finishes patching the
+binaries. A native Windows build therefore requires the Artifact Signing
+Client Tools, .NET 8, and an Azure identity with the `Artifact Signing
+Certificate Profile Signer` role.
+
+Install the client tools and sign in locally:
+
+```powershell
+winget install -e --id Microsoft.Azure.ArtifactSigningClientTools
+az login
+```
+
+Create `configs/artifact-signing.metadata.json` from the example file, then
+set the repository root and metadata path before building:
+
+```powershell
+$env:AUTOGATEWAY_ROOT = (Get-Location).Path
+$env:AZURE_ARTIFACT_SIGNING_METADATA_FILE = Join-Path $env:AUTOGATEWAY_ROOT 'configs/artifact-signing.metadata.json'
+npm run release:build -- windows
+```
+
+The signing wrapper can also read
+`AZURE_ARTIFACT_SIGNING_ENDPOINT`, `AZURE_ARTIFACT_SIGNING_ACCOUNT`, and
+`AZURE_ARTIFACT_SIGNING_PROFILE` instead of a metadata file. If the dlib is
+not found in the standard installation locations, set
+`AZURE_ARTIFACT_SIGNING_DLIB_PATH` to the x64
+`Azure.CodeSigning.Dlib.dll`. Windows builds made on macOS/Linux remain
+unsigned because Artifact Signing's SignTool integration runs on Windows;
+use a native Windows machine or the release workflow for signed artifacts.
+
 On macOS/Linux, Windows builds use `cargo-xwin` and a local NSIS installation.
 `cargo-xwin` supplies the Windows CRT and SDK through its local cache, while
 `clang-cl` and `lld-link` provide the compiler and linker. Install the tools once:
@@ -130,8 +174,8 @@ The release job publishes four native updater artifacts and two unified download
 `.github/workflows/desktop-release.yml` creates a distribution release without relying on a developer workstation:
 
 1. The macOS matrix imports the existing `Developer ID Application: WANG JING (UFC4M35743)` certificate, signs, notarizes, staples, and packages both Apple Silicon and Intel apps for the updater. A separate job creates one notarized Universal DMG for downloads.
-2. The Windows matrix builds x64 and ARM64 NSIS installers. A unified installer embeds both and selects the native payload on the user's machine.
-3. The publish job requires all native and unified artifacts, uploads them to R2, and only then writes `downloads/desktop/latest.json`. The unified NSIS bootstrapper is packaged on Ubuntu, so publishing does not depend on a second Windows runner being available.
+2. The Windows matrix signs the x64 and ARM64 NSIS installers with Azure Artifact Signing. A separate Windows job signs the unified installer after it embeds both payloads and selects the native installer on the user's machine.
+3. The publish job requires all native and unified artifacts, uploads them to R2, and only then writes `downloads/desktop/latest.json`. The unified NSIS bootstrapper is packaged and signed on Windows so every public Windows installer has an Authenticode signature.
 
 Create the following repository secrets before dispatching the workflow. Secrets must be set in GitHub; never commit certificates, private keys, or R2 credentials.
 
@@ -144,12 +188,22 @@ Create the following repository secrets before dispatching the workflow. Secrets
 | `APPLE_NOTARY_ISSUER_ID`             | App Store Connect issuer ID.                                                        |
 | `TAURI_SIGNING_PRIVATE_KEY`          | Existing Tauri updater private key contents.                                        |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Password for the Tauri updater private key.                                         |
+| `AZURE_CLIENT_ID`                    | Microsoft Entra application or managed identity client ID for OIDC.                 |
+| `AZURE_TENANT_ID`                    | Microsoft Entra tenant ID.                                                          |
+| `AZURE_SUBSCRIPTION_ID`               | Azure subscription containing the Artifact Signing account.                         |
 | `R2_ENDPOINT`                        | S3-compatible Cloudflare R2 endpoint.                                               |
 | `R2_BUCKET`                          | R2 bucket name.                                                                     |
 | `R2_ACCESS_KEY_ID`                   | R2 API token access key ID with object read/write permission.                       |
 | `R2_SECRET_ACCESS_KEY`               | R2 API token secret access key.                                                     |
 
 Also create the repository variable `R2_PUBLIC_BASE_URL`, for example `https://cdn.autogateway.cc`.
+Create the `release` environment and repository variables
+`AZURE_ARTIFACT_SIGNING_ENDPOINT`, `AZURE_ARTIFACT_SIGNING_ACCOUNT`, and
+`AZURE_ARTIFACT_SIGNING_PROFILE`. Configure the Microsoft Entra federated
+credential to trust this repository's GitHub Actions `release` environment,
+and assign the `Artifact Signing Certificate Profile Signer` role to that
+identity at the certificate-profile scope. The workflow uses OIDC; it does
+not store a client secret or certificate private key for Windows signing.
 
 To authorize the current signing identity for CI, export it once on a trusted Mac as a password-protected `.p12`, base64-encode the file, and save the result as `APPLE_CERTIFICATE_BASE64`. Create a narrowly scoped App Store Connect API key with access to notarization, base64-encode its `.p8` file, and save it as `APPLE_NOTARY_KEY_BASE64`. The workflow does not use the local login keychain after those secrets are configured.
 

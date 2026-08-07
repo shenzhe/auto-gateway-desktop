@@ -10,8 +10,6 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
-#[cfg(target_os = "windows")]
-use std::io::Read;
 use std::io::Write;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -24,6 +22,7 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+use url::Url;
 
 #[cfg(target_os = "macos")]
 const MACOS_DOWNLOAD_URL: &str = "https://persistent.oaistatic.com/codex-app-prod/ChatGPT.dmg";
@@ -31,12 +30,13 @@ const MACOS_DOWNLOAD_URL: &str = "https://persistent.oaistatic.com/codex-app-pro
 const PREFERRED_DIRECT_DOWNLOAD_URL: &str = "https://codexapp.agentsmirror.com/latest/mac-arm64";
 #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
 const PREFERRED_DIRECT_DOWNLOAD_URL: &str = "https://codexapp.agentsmirror.com/latest/mac-intel";
-#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-const PREFERRED_DIRECT_DOWNLOAD_URL: &str = "https://codexapp.agentsmirror.com/latest/win-arm64";
-#[cfg(all(target_os = "windows", not(target_arch = "aarch64")))]
-const PREFERRED_DIRECT_DOWNLOAD_URL: &str = "https://codexapp.agentsmirror.com/latest/win-x64";
 const CODEX_VERSION_API_URL: &str = "https://api.autogateway.cc/public/api/desktop/codex-version";
-#[cfg(target_os = "windows")]
+const TRUSTED_WINDOWS_DOWNLOAD_HOSTS: &[&str] = &[
+    "codexapp.agentsmirror.com",
+    "codexapp-r2.agentsmirror.com",
+    "cdn.autogateway.cc",
+    "get.microsoft.com",
+];
 const WINDOWS_STORE_PRODUCT_ID: &str = "9PLM9XGG6VKS";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -100,8 +100,6 @@ struct LocalInstallation {
 enum InstallerResult {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     Complete,
-    #[cfg(target_os = "windows")]
-    AwaitingExternalInstallation,
 }
 
 #[derive(Deserialize)]
@@ -297,23 +295,7 @@ pub async fn install(
     }
 
     let installer_result = installer_result.expect("installer result should be available");
-
-    #[cfg(not(target_os = "windows"))]
     let _ = installer_result;
-
-    #[cfg(target_os = "windows")]
-    if matches!(
-        installer_result,
-        InstallerResult::AwaitingExternalInstallation
-    ) {
-        return Ok(CodexInstallResult {
-            installed: false,
-            path: None,
-            message: "The official ChatGPT installer has opened. Finish the installation there; this page will continue automatically.".to_string(),
-            awaiting_installation: true,
-            can_retry_cached_installer: completed_installer_available(),
-        });
-    }
 
     emit_install_progress(app, "verifying", 0, None);
     let status = status().await;
@@ -427,6 +409,10 @@ async fn download_installer_from_url(
         .map_err(|error| format!("download the ChatGPT installer: {error}"))?
         .error_for_status()
         .map_err(|error| format!("download the ChatGPT installer: {error}"))?;
+    #[cfg(target_os = "windows")]
+    if !is_trusted_windows_download_url(response.url().as_str()) {
+        return Err("the ChatGPT installer redirected to an untrusted download source".to_string());
+    }
     let append = existing_bytes > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
     let starting_bytes = append.then_some(existing_bytes).unwrap_or(0);
     let total_bytes = response
@@ -595,6 +581,12 @@ async fn probe_download_source(index: usize, url: String) -> Result<DownloadProb
         .map_err(|error| format!("connect to {url}: {error}"))?
         .error_for_status()
         .map_err(|error| format!("connect to {url}: {error}"))?;
+    #[cfg(target_os = "windows")]
+    if !is_trusted_windows_download_url(response.url().as_str()) {
+        return Err(
+            "the ChatGPT installer probe redirected to an untrusted download source".to_string(),
+        );
+    }
     let mut stream = response.bytes_stream();
     let mut sampled_bytes = 0_usize;
     while let Some(chunk) = stream.next().await {
@@ -828,15 +820,19 @@ fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String
 
 #[cfg(target_os = "windows")]
 fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String> {
+    windows_download_urls(latest)
+}
+
+fn windows_download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String> {
     let mut urls = Vec::with_capacity(4);
-    append_url(&mut urls, Some(PREFERRED_DIRECT_DOWNLOAD_URL));
     if let Some(latest) = latest {
-        append_artifact_urls(&mut urls, latest, native_architecture());
-        append_url(&mut urls, latest.download_url.as_deref());
+        append_trusted_windows_artifact_urls(&mut urls, latest, native_architecture());
+        append_trusted_windows_download_url(&mut urls, latest.download_url.as_deref());
+        append_trusted_windows_download_url(&mut urls, latest.fallback_url.as_deref());
     }
     if urls.is_empty() {
         return Err(
-            "the mirror and R2 ChatGPT installers are unavailable; opening Microsoft Store instead"
+            "trusted ChatGPT MSIX sources are unavailable; opening Microsoft Store instead"
                 .to_string(),
         );
     }
@@ -848,6 +844,7 @@ fn download_urls(_latest: Option<&PlatformVersion>) -> Result<Vec<String>, Strin
     Err("This desktop build supports macOS and Windows only.".to_string())
 }
 
+#[cfg(target_os = "macos")]
 fn append_artifact_urls(urls: &mut Vec<String>, release: &PlatformVersion, architecture: &str) {
     let Some(artifact) = release.artifacts.get(architecture) else {
         return;
@@ -857,6 +854,7 @@ fn append_artifact_urls(urls: &mut Vec<String>, release: &PlatformVersion, archi
     append_url(urls, artifact.fallback_url.as_deref());
 }
 
+#[cfg(target_os = "macos")]
 fn append_url(urls: &mut Vec<String>, candidate: Option<&str>) {
     let Some(candidate) = candidate.map(str::trim).filter(|url| !url.is_empty()) else {
         return;
@@ -864,6 +862,59 @@ fn append_url(urls: &mut Vec<String>, candidate: Option<&str>) {
     if !urls.iter().any(|url| url == candidate) {
         urls.push(candidate.to_string());
     }
+}
+
+fn append_trusted_windows_artifact_urls(
+    urls: &mut Vec<String>,
+    release: &PlatformVersion,
+    architecture: &str,
+) {
+    let Some(artifact) = release.artifacts.get(architecture) else {
+        return;
+    };
+    append_trusted_windows_download_url(urls, artifact.direct_url.as_deref());
+    append_trusted_windows_download_url(urls, artifact.download_url.as_deref());
+    append_trusted_windows_download_url(urls, artifact.fallback_url.as_deref());
+}
+
+fn append_trusted_windows_download_url(urls: &mut Vec<String>, candidate: Option<&str>) {
+    let Some(candidate) = candidate.map(str::trim).filter(|url| !url.is_empty()) else {
+        return;
+    };
+    if is_trusted_windows_download_url(candidate) && !urls.iter().any(|url| url == candidate) {
+        urls.push(candidate.to_string());
+    }
+}
+
+fn is_trusted_windows_download_url(candidate: &str) -> bool {
+    let Ok(url) = Url::parse(candidate) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !TRUSTED_WINDOWS_DOWNLOAD_HOSTS.contains(&host)
+    {
+        return false;
+    }
+
+    let path = url.path();
+    let normalized_path = path.to_ascii_lowercase();
+    if matches!(
+        host,
+        "codexapp.agentsmirror.com" | "codexapp-r2.agentsmirror.com"
+    ) {
+        return normalized_path == format!("/latest/win-{}", native_architecture())
+            || normalized_path.ends_with(".msix");
+    }
+    if host == "cdn.autogateway.cc" {
+        return normalized_path.ends_with(".msix");
+    }
+    host == "get.microsoft.com" && path == format!("/installer/download/{WINDOWS_STORE_PRODUCT_ID}")
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -979,19 +1030,8 @@ fn download_extension(_download_urls: &[String]) -> &'static str {
 }
 
 #[cfg(target_os = "windows")]
-fn download_extension(download_urls: &[String]) -> &'static str {
-    let uses_msix = download_urls.iter().any(|url| {
-        url.split_once('?')
-            .map(|(path, _)| path)
-            .unwrap_or(url.as_str())
-            .to_ascii_lowercase()
-            .ends_with(".msix")
-    });
-    if uses_msix || download_urls.iter().any(|url| url.contains("/latest/win")) {
-        "msix"
-    } else {
-        "exe"
-    }
+fn download_extension(_download_urls: &[String]) -> &'static str {
+    "msix"
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -1304,21 +1344,8 @@ fn install_downloaded_app(
     download_path: &Path,
     _preferred_destination: Option<&Path>,
 ) -> Result<InstallerResult, String> {
-    if download_path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("msix"))
-    {
-        install_windows_msix(download_path)?;
-        return Ok(InstallerResult::Complete);
-    }
-
-    validate_windows_installer(download_path)?;
-    Command::new(download_path)
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|error| format!("run the official ChatGPT installer: {error}"))?;
-    Ok(InstallerResult::AwaitingExternalInstallation)
+    install_windows_msix(download_path)?;
+    Ok(InstallerResult::Complete)
 }
 
 #[cfg(target_os = "windows")]
@@ -1401,21 +1428,6 @@ fn run_windows_command_with_timeout(
     }
 }
 
-#[cfg(target_os = "windows")]
-fn validate_windows_installer(download_path: &Path) -> Result<(), String> {
-    let mut file = fs::File::open(download_path)
-        .map_err(|error| format!("inspect the official ChatGPT installer: {error}"))?;
-    let mut header = [0_u8; 2];
-    if file.read_exact(&mut header).is_ok() && header == *b"MZ" {
-        return Ok(());
-    }
-    let _ = fs::remove_file(download_path);
-    Err(
-        "the official download service did not return a valid Windows installer; try again later"
-            .to_string(),
-    )
-}
-
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn install_downloaded_app(
     _download_path: &Path,
@@ -1462,7 +1474,10 @@ fn missing_message() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::compare_versions;
+    use super::{
+        compare_versions, is_trusted_windows_download_url, native_architecture,
+        windows_download_urls, PlatformVersion,
+    };
     use std::cmp::Ordering;
 
     #[test]
@@ -1494,22 +1509,49 @@ mod tests {
         assert_eq!(urls[2], "https://official.example.test/ChatGPT.dmg");
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
-    fn windows_prefers_the_direct_mirror_before_r2() {
-        let release: super::PlatformVersion = serde_json::from_str(
-            r#"{"version":"26.730.8199.0","downloadUrl":"https://cdn.example.test/OpenAI.Codex_26.730.8199.0_x64__2p2nqsd0c76g0.Msix","fallbackUrl":"https://official.example.test/ChatGPT-Installer.exe"}"#,
-        )
+    fn windows_keeps_trusted_mirror_and_r2_candidates_for_speed_ranking() {
+        let architecture = native_architecture();
+        let mirror = format!("https://codexapp.agentsmirror.com/latest/win-{architecture}");
+        let r2 = "https://cdn.autogateway.cc/downloads/codex/OpenAI.Codex_26.730.8199.0.msix";
+        let microsoft =
+            "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi";
+        let release: PlatformVersion = serde_json::from_str(&format!(
+            r#"{{"version":"26.730.8199.0","artifacts":{{"{architecture}":{{"directUrl":"{mirror}","downloadUrl":"{r2}","fallbackUrl":"{microsoft}"}}}},"downloadUrl":"{r2}","fallbackUrl":"{microsoft}"}}"#,
+        ))
         .expect("decode version service response");
-        let urls = super::download_urls(Some(&release)).expect("build installer candidates");
-        assert_eq!(
-            urls,
-            [
-                super::PREFERRED_DIRECT_DOWNLOAD_URL,
-                "https://cdn.example.test/OpenAI.Codex_26.730.8199.0_x64__2p2nqsd0c76g0.Msix"
-            ]
+        let urls = windows_download_urls(Some(&release)).expect("build installer candidates");
+        assert_eq!(urls, [mirror, r2.to_string(), microsoft.to_string(),]);
+    }
+
+    #[test]
+    fn windows_download_sources_reject_untrusted_or_executable_urls() {
+        let mirror = format!(
+            "https://codexapp.agentsmirror.com/latest/win-{}",
+            native_architecture()
         );
-        assert_eq!(super::download_extension(&urls), "msix");
+        assert!(is_trusted_windows_download_url(&mirror));
+        assert!(is_trusted_windows_download_url(
+            "https://cdn.autogateway.cc/downloads/codex/OpenAI.Codex.msix"
+        ));
+        let redirected_mirror =
+            mirror.replace("codexapp.agentsmirror.com", "codexapp-r2.agentsmirror.com");
+        assert!(is_trusted_windows_download_url(&redirected_mirror));
+        assert!(is_trusted_windows_download_url(
+            "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi"
+        ));
+        assert!(!is_trusted_windows_download_url(
+            "https://cdn.autogateway.cc/downloads/codex/ChatGPT-Installer.exe"
+        ));
+        assert!(!is_trusted_windows_download_url(
+            "https://untrusted.example/OpenAI.Codex.msix"
+        ));
+        assert!(!is_trusted_windows_download_url(
+            "https://get.microsoft.com/installer/download/not-the-chatgpt-product"
+        ));
+        assert!(!is_trusted_windows_download_url(
+            "http://codexapp.agentsmirror.com/latest/win-x64"
+        ));
     }
 
     #[cfg(target_os = "macos")]

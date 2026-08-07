@@ -187,6 +187,14 @@ export function openNotificationBrowser(url: string): Promise<void> {
   return invoke<void>("open_notification_browser", { url });
 }
 
+export function downloadAndOpenDesktopInstaller(
+  installerUrl: string,
+): Promise<string> {
+  return invoke<string>("download_and_open_desktop_installer", {
+    installerUrl,
+  });
+}
+
 export function updateTrayStatus(
   username: string,
   balance: string,

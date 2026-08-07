@@ -37,6 +37,7 @@ import {
   clearDesktopSession,
   clearStoredDesktopAPIKey,
   configureCodex,
+  downloadAndOpenDesktopInstaller,
   exchangeDesktopAuthorization,
   getCodexAppStatus,
   getCodexStatus,
@@ -1205,6 +1206,7 @@ function App() {
   >(null);
   const [desktopUpdateError, setDesktopUpdateError] = useState("");
   const [desktopInstallerUrl, setDesktopInstallerUrl] = useState("");
+  const [openingDesktopInstaller, setOpeningDesktopInstaller] = useState(false);
   const [homeActionError, setHomeActionError] = useState("");
   const [codexOpenPhase, setCodexOpenPhase] =
     useState<CodexOpenPhase>("closed");
@@ -2099,11 +2101,15 @@ function App() {
       return;
     }
     if (!window.confirm(tr("desktopUpdateManualConfirm"))) return;
+    setOpeningDesktopInstaller(true);
     try {
-      await openUrl(installerUrl);
-      setMessage(tr("desktopUpdateManualOpened"));
+      setMessage(tr("desktopUpdateManualOpening"));
+      const installerPath = await downloadAndOpenDesktopInstaller(installerUrl);
+      setMessage(tr("desktopUpdateManualOpened", { path: installerPath }));
     } catch (error) {
       setMessage(tr("desktopUpdateManualOpenFailed", { error: String(error) }));
+    } finally {
+      setOpeningDesktopInstaller(false);
     }
   }
 
@@ -2525,12 +2531,21 @@ function App() {
               <section className="notice warning desktopUpdateNotice">
                 <strong>{tr("desktopUpdateManualTitle")}</strong>
                 <span>{tr("desktopUpdateManualDescription")}</span>
+                {desktopUpdateError ? (
+                  <small className="desktopUpdateErrorDetail">
+                    {tr("desktopUpdateFailureDetail", {
+                      error: desktopUpdateError,
+                    })}
+                  </small>
+                ) : null}
                 <button
                   className="secondaryButton"
-                  disabled={!desktopInstallerUrl}
+                  disabled={!desktopInstallerUrl || openingDesktopInstaller}
                   onClick={() => void openManualDesktopInstaller(desktopUpdate)}
                 >
-                  {tr("desktopUpdateManualOpen")}
+                  {openingDesktopInstaller
+                    ? tr("desktopUpdateManualOpening")
+                    : tr("desktopUpdateManualOpen")}
                 </button>
               </section>
             ) : null}

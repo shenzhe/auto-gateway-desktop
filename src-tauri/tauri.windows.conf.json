@@ -1,0 +1,18 @@
+{
+  "bundle": {
+    "windows": {
+      "signCommand": {
+        "cmd": "powershell.exe",
+        "args": [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-ExecutionPolicy",
+          "Bypass",
+          "-Command",
+          "& (Join-Path $env:AUTOGATEWAY_ROOT 'scripts/sign-windows-artifact.ps1') -FilePath '%1'"
+        ]
+      }
+    }
+  }
+}

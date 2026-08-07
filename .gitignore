@@ -7,6 +7,11 @@ src-tauri/target/
 !.env.example
 configs/r2.env
 configs/apple-notary.env
+configs/artifact-signing.metadata.json
 configs/*.p8
 *.key
 *.key.pub
+
+# Local agent session files
+.codex/
+.zcode/

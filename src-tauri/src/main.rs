@@ -20,6 +20,14 @@ use desktop_auth::{
     save_desktop_api_key, save_desktop_session, DesktopAccountSummary, DesktopBootstrapKey,
     DesktopNotificationList, DesktopSession, StoredDesktopState,
 };
+use futures_util::StreamExt;
+use std::{
+    fs::{self, File},
+    io::Write,
+    path::Path,
+    process::Command,
+    time::Duration,
+};
 use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Rect, Size, WebviewUrl,
@@ -30,6 +38,180 @@ use url::Url;
 const DISABLE_CONTEXT_MENU_SCRIPT: &str = r#"
     document.addEventListener('contextmenu', (event) => event.preventDefault());
 "#;
+const DESKTOP_INSTALLER_HOST: &str = "cdn.autogateway.cc";
+const DESKTOP_INSTALLER_PATH_PREFIX: &str = "/downloads/desktop/";
+const MAX_DESKTOP_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
+
+fn desktop_installer_filename(url: &Url) -> Result<String, String> {
+    if url.scheme() != "https"
+        || url.host_str() != Some(DESKTOP_INSTALLER_HOST)
+        || !url.path().starts_with(DESKTOP_INSTALLER_PATH_PREFIX)
+    {
+        return Err("the installer URL is not a trusted AUTO Gateway download".to_string());
+    }
+
+    let filename = url
+        .path_segments()
+        .and_then(|mut segments| segments.next_back())
+        .filter(|filename| !filename.is_empty())
+        .ok_or_else(|| "the installer URL does not include a file name".to_string())?;
+    if !filename.chars().all(|character| {
+        character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | '%')
+    }) {
+        return Err("the installer URL includes an unsupported file name".to_string());
+    }
+
+    let expected_extension = if cfg!(target_os = "macos") {
+        "dmg"
+    } else if cfg!(target_os = "windows") {
+        "exe"
+    } else {
+        return Err(
+            "desktop installer downloads are supported on macOS and Windows only".to_string(),
+        );
+    };
+    if !filename
+        .rsplit_once('.')
+        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case(expected_extension))
+    {
+        return Err(format!(
+            "the installer must be a .{expected_extension} file"
+        ));
+    }
+
+    Ok(filename.to_string())
+}
+
+fn open_local_desktop_installer(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("open the downloaded installer: {error}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer.exe")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("open the downloaded installer: {error}"))?;
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = path;
+        return Err(
+            "desktop installer downloads are supported on macOS and Windows only".to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod desktop_installer_tests {
+    use super::desktop_installer_filename;
+    use url::Url;
+
+    #[test]
+    fn accepts_the_signed_macos_installer_download() {
+        let url = Url::parse(
+            "https://cdn.autogateway.cc/downloads/desktop/AUTO%20Gateway%20Desktop_0.1.39_universal.dmg",
+        )
+        .unwrap();
+
+        assert_eq!(
+            desktop_installer_filename(&url).unwrap(),
+            "AUTO%20Gateway%20Desktop_0.1.39_universal.dmg"
+        );
+    }
+
+    #[test]
+    fn rejects_an_untrusted_installer_download() {
+        let url = Url::parse("https://example.com/downloads/desktop/update.dmg").unwrap();
+
+        assert!(desktop_installer_filename(&url).is_err());
+    }
+}
+
+#[tauri::command]
+async fn download_and_open_desktop_installer(
+    app: AppHandle,
+    installer_url: String,
+) -> Result<String, String> {
+    let url = Url::parse(installer_url.trim())
+        .map_err(|error| format!("parse the installer URL: {error}"))?;
+    let filename = desktop_installer_filename(&url)?;
+    let downloads_dir = app
+        .path()
+        .download_dir()
+        .map_err(|error| format!("find the Downloads folder: {error}"))?;
+    fs::create_dir_all(&downloads_dir)
+        .map_err(|error| format!("create the Downloads folder: {error}"))?;
+
+    let destination = downloads_dir.join(&filename);
+    let partial_destination = downloads_dir.join(format!(".{filename}.part"));
+    let client = reqwest::Client::builder()
+        .user_agent(http_client::desktop_user_agent())
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("create the installer download client: {error}"))?;
+
+    let download_result = async {
+        let response = client
+            .get(url)
+            .send()
+            .await
+            .map_err(|error| format!("download the installer: {error}"))?
+            .error_for_status()
+            .map_err(|error| format!("download the installer: {error}"))?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_DESKTOP_INSTALLER_BYTES)
+        {
+            return Err(
+                "the installer file is larger than the supported download limit".to_string(),
+            );
+        }
+
+        let mut file = File::create(&partial_destination)
+            .map_err(|error| format!("create the installer download: {error}"))?;
+        let mut downloaded_bytes = 0_u64;
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| format!("read the installer download: {error}"))?;
+            downloaded_bytes = downloaded_bytes.saturating_add(chunk.len() as u64);
+            if downloaded_bytes > MAX_DESKTOP_INSTALLER_BYTES {
+                return Err(
+                    "the installer file is larger than the supported download limit".to_string(),
+                );
+            }
+            file.write_all(&chunk)
+                .map_err(|error| format!("save the installer download: {error}"))?;
+        }
+        if downloaded_bytes == 0 {
+            return Err("the installer download was empty".to_string());
+        }
+        file.sync_all()
+            .map_err(|error| format!("finish saving the installer download: {error}"))?;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = download_result {
+        let _ = fs::remove_file(&partial_destination);
+        return Err(error);
+    }
+
+    if destination.exists() {
+        fs::remove_file(&destination)
+            .map_err(|error| format!("replace the previous installer download: {error}"))?;
+    }
+    fs::rename(&partial_destination, &destination)
+        .map_err(|error| format!("finish the installer download: {error}"))?;
+    open_local_desktop_installer(&destination)?;
+    Ok(destination.display().to_string())
+}
 
 #[tauri::command]
 fn get_codex_status() -> Result<CodexStatus, String> {
@@ -527,6 +709,7 @@ fn main() {
             open_console,
             open_notification_window,
             open_notification_browser,
+            download_and_open_desktop_installer,
             open_devtools
         ])
         .build(tauri::generate_context!())

@@ -230,11 +230,13 @@ const dictionaries = {
     desktopUpdateManualConfirm:
       "The automatic update failed twice. Open the latest installer and overwrite the current AUTO Gateway Desktop installation?",
     desktopUpdateManualOpened:
-      "The installer has been opened. Run it and choose overwrite or install to update AUTO Gateway Desktop.",
+      "The installer was downloaded to {path} and opened. Run it and choose overwrite or install to update AUTO Gateway Desktop.",
+    desktopUpdateManualOpening: "Downloading and opening the installer…",
     desktopUpdateManualOpen: "Open installer",
     desktopUpdateManualUnavailable:
       "The installer URL is unavailable. Check for updates again and retry.",
     desktopUpdateManualOpenFailed: "Unable to open the installer: {error}",
+    desktopUpdateFailureDetail: "Update error: {error}",
     desktopUpdateCheckNow: "Check Desktop updates",
     desktopUpdateCheckDescription:
       "Check the signed AUTO Gateway Desktop release now.",
@@ -506,11 +508,13 @@ const dictionaries = {
     desktopUpdateManualConfirm:
       "自动更新连续失败两次。要打开最新安装包并覆盖安装当前 AUTO Gateway Desktop 吗？",
     desktopUpdateManualOpened:
-      "安装包已打开，请运行安装程序并选择覆盖或安装，以更新 AUTO Gateway Desktop。",
+      "安装包已下载到 {path} 并打开，请运行安装程序并选择覆盖或安装，以更新 AUTO Gateway Desktop。",
+    desktopUpdateManualOpening: "正在下载安装包并打开…",
     desktopUpdateManualOpen: "打开安装包",
     desktopUpdateManualUnavailable:
       "暂时无法获取安装包地址，请重新检查更新后重试。",
     desktopUpdateManualOpenFailed: "无法打开安装包：{error}",
+    desktopUpdateFailureDetail: "更新错误：{error}",
     desktopUpdateCheckNow: "检查桌面应用更新",
     desktopUpdateCheckDescription:
       "立即检查已签名的 AUTO Gateway Desktop 新版本。",

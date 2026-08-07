@@ -665,6 +665,10 @@ h1 {
   cursor: not-allowed;
   opacity: 0.5;
 }
+.desktopUpdateErrorDetail {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
 .inlineStatus {
   display: flex;
   align-items: center;

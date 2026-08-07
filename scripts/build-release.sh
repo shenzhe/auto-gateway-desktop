@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/build-release.sh [macos|windows|all] [options]
 
-Build the signed desktop release artifacts locally. The default is a full
+Build the desktop release artifacts locally. The default is a full
 release for the current host, including both macOS architectures, both
 Windows architectures, and the architecture-selecting Windows installer.
 
@@ -24,6 +24,11 @@ Options:
 Required for signed artifacts:
   TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD, or
   TAURI_SIGNING_PRIVATE_KEY_FILE and TAURI_SIGNING_PRIVATE_KEY_PASSWORD.
+
+Native Windows Authenticode signing also requires Artifact Signing Client Tools,
+an Azure login, and either AZURE_ARTIFACT_SIGNING_METADATA_FILE or the
+AZURE_ARTIFACT_SIGNING_ENDPOINT, AZURE_ARTIFACT_SIGNING_ACCOUNT, and
+AZURE_ARTIFACT_SIGNING_PROFILE variables.
 
 Required for --notarize:
   APPLE_NOTARY_KEY_BASE64 or NOTARY_KEY_PATH, APPLE_NOTARY_KEY_ID,
@@ -234,6 +239,11 @@ case "$(uname -s)" in
   Darwin) host_is_macos=true ;;
   MINGW*|MSYS*|CYGWIN*) host_is_windows=true ;;
 esac
+if [[ "$host_is_windows" == true && -n "$(command -v cygpath 2>/dev/null || true)" ]]; then
+  export AUTOGATEWAY_ROOT="$(cygpath -w "$root_dir")"
+else
+  export AUTOGATEWAY_ROOT="$root_dir"
+fi
 
 require_command() {
   command -v "$1" >/dev/null || {
@@ -369,7 +379,13 @@ build_windows_target() {
   # A prior build can leave installers for older versions in this directory.
   # Remove only this release's expected paths so a failed build cannot reuse it.
   rm -f -- "$source" "$source.sig"
-  npm run tauri build -- --target "$target" --bundles nsis
+  local signing_config_args=()
+  if [[ "$host_is_windows" != true ]]; then
+    # Artifact Signing uses Windows SignTool and the Windows dlib. Cross-built
+    # artifacts remain unsigned and must be signed on a native Windows node.
+    signing_config_args=(--config '{"bundle":{"windows":{"signCommand":null}}}')
+  fi
+  npm run tauri build -- --target "$target" --bundles nsis "${signing_config_args[@]}"
   mkdir -p "$release_dir"
   [[ -s "$source" ]] || {
     echo "Windows installer was not produced at the expected current-version path: $source" >&2
@@ -401,12 +417,32 @@ build_windows_unified() {
     "-DAPP_VERSION=$version" \
     scripts/windows-unified-installer.nsi
   [[ -s "$output" ]] || { echo "Unified Windows installer was not produced." >&2; exit 1; }
+  if [[ "$host_is_windows" == true ]]; then
+    require_command powershell
+    powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+      -File scripts/sign-windows-artifact.ps1 -FilePath "$output"
+    powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass \
+      -File scripts/verify-windows-signatures.ps1 -Files "$output"
+  fi
 }
 
 build_windows() {
   if [[ "$host_is_windows" != true && "$host_is_macos" != true ]]; then
     echo "Windows artifacts require a Windows host or cargo-xwin on macOS/Linux." >&2
     exit 1
+  fi
+  if [[ "$host_is_windows" == true ]]; then
+    require_command powershell
+    metadata_file="${AZURE_ARTIFACT_SIGNING_METADATA_FILE:-$root_dir/configs/artifact-signing.metadata.json}"
+    if [[ -f "$metadata_file" ]]; then
+      if [[ -n "$(command -v cygpath 2>/dev/null || true)" && ! "$metadata_file" =~ ^[A-Za-z]:\\ ]]; then
+        metadata_file="$(cygpath -w "$metadata_file")"
+      fi
+      export AZURE_ARTIFACT_SIGNING_METADATA_FILE="$metadata_file"
+    elif [[ -z "${AZURE_ARTIFACT_SIGNING_ENDPOINT:-}" || -z "${AZURE_ARTIFACT_SIGNING_ACCOUNT:-}" || -z "${AZURE_ARTIFACT_SIGNING_PROFILE:-}" ]]; then
+      echo "Configure Artifact Signing metadata or AZURE_ARTIFACT_SIGNING_ENDPOINT, AZURE_ARTIFACT_SIGNING_ACCOUNT, and AZURE_ARTIFACT_SIGNING_PROFILE before a native Windows build." >&2
+      exit 1
+    fi
   fi
   build_windows_target aarch64-pc-windows-msvc arm64
   build_windows_target x86_64-pc-windows-msvc x64
