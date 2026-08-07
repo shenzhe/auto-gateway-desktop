@@ -2190,7 +2190,11 @@ function App() {
   }
 
   async function handleRestoreBackups() {
-    if (!window.confirm(tr("restoreConfirm"))) return;
+    if (backupCount === 0) {
+      setMessage(tr("restoreUnavailable"));
+      return;
+    }
+    if (!(await window.confirm(tr("restoreConfirm")))) return;
     setBusy(true);
     try {
       await restoreLatestCodexBackups();
@@ -2204,7 +2208,11 @@ function App() {
   }
 
   async function handleSwitchBackConfiguration() {
-    if (!window.confirm(tr("switchBackConfirm"))) return;
+    if (backupCount === 0) {
+      setMessage(tr("restoreUnavailable"));
+      return;
+    }
+    if (!(await window.confirm(tr("switchBackConfirm")))) return;
     setBusy(true);
     try {
       await restoreLatestCodexBackups();
@@ -2705,7 +2713,7 @@ function App() {
                     <ArrowRightIcon />
                   </button>
                   <button
-                    disabled={busy || backupCount === 0}
+                    disabled={busy}
                     onClick={() => void handleSwitchBackConfiguration()}
                   >
                     <ArrowUUpLeftIcon />
@@ -3400,7 +3408,7 @@ function App() {
               </div>
               <button
                 className="secondaryButton"
-                disabled={busy || backupCount === 0}
+                disabled={busy}
                 onClick={() => void handleRestoreBackups()}
               >
                 {tr("restoreLatest")}

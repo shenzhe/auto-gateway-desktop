@@ -45,11 +45,17 @@ endpoint="${R2_ENDPOINT%/}"
 base_url="${R2_PUBLIC_BASE_URL%/}"
 prefix="downloads/desktop"
 
+object_name() {
+  local filename
+  filename="$(basename "$1")"
+  printf '%s' "${filename// /-}"
+}
+
 upload() {
   local file="$1"
   local content_type="$2"
   local cache_control="$3"
-  local name="${4:-$(basename "$file")}"
+  local name="${4:-$(object_name "$file")}"
   aws s3 cp "$file" "s3://$R2_BUCKET/$prefix/$name" \
     --endpoint-url "$endpoint" \
     --no-progress \
@@ -87,19 +93,19 @@ sha256() {
     "$windows_x64_installer" "$windows_x64_signature" \
     "$windows_arm64_installer" "$windows_arm64_signature" \
     "$mac_universal_dmg" "$windows_unified_installer"; do
-    printf '%s  %s\n' "$(sha256 "$artifact")" "$(basename "$artifact")"
+    printf '%s  %s\n' "$(sha256 "$artifact")" "$(object_name "$artifact")"
   done
 } > "$checksums_path"
 upload "$checksums_path" "text/plain; charset=utf-8" "public, max-age=31536000, immutable"
 upload "$checksums_path" "text/plain; charset=utf-8" "no-cache" "checksums.txt"
 
 manifest_path="$RELEASE_DIR/latest.json"
-mac_arm64_url="$base_url/$prefix/$(basename "$mac_arm64_updater" | sed 's/ /%20/g')"
-mac_x64_url="$base_url/$prefix/$(basename "$mac_x64_updater" | sed 's/ /%20/g')"
-windows_x64_url="$base_url/$prefix/$(basename "$windows_x64_installer" | sed 's/ /%20/g')"
-windows_arm64_url="$base_url/$prefix/$(basename "$windows_arm64_installer" | sed 's/ /%20/g')"
-mac_universal_url="$base_url/$prefix/$(basename "$mac_universal_dmg" | sed 's/ /%20/g')"
-windows_unified_url="$base_url/$prefix/$(basename "$windows_unified_installer" | sed 's/ /%20/g')"
+mac_arm64_url="$base_url/$prefix/$(object_name "$mac_arm64_updater")"
+mac_x64_url="$base_url/$prefix/$(object_name "$mac_x64_updater")"
+windows_x64_url="$base_url/$prefix/$(object_name "$windows_x64_installer")"
+windows_arm64_url="$base_url/$prefix/$(object_name "$windows_arm64_installer")"
+mac_universal_url="$base_url/$prefix/$(object_name "$mac_universal_dmg")"
+windows_unified_url="$base_url/$prefix/$(object_name "$windows_unified_installer")"
 
 jq -n \
   --arg version "$VERSION" \

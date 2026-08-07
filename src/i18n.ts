@@ -99,6 +99,8 @@ const dictionaries = {
     restored:
       "Restored the latest backup. Fully quit and reopen ChatGPT/Codex.",
     restoreFailed: "Configuration restore failed: {error}",
+    restoreUnavailable:
+      "No Codex backup is available yet. AUTO Gateway can only restore files it saved before configuration.",
     switchBackConfiguration: "Switch back to the previous configuration",
     switchBackConfigurationDescription:
       "Restore the Codex settings and credentials saved before AUTO Gateway was applied.",
@@ -387,6 +389,8 @@ const dictionaries = {
     restoreConfirm: "要恢复最新的 Codex 配置备份吗？这会替换当前本地配置文件。",
     restored: "已恢复最新备份。请完全退出并重新打开 ChatGPT/Codex。",
     restoreFailed: "配置恢复失败：{error}",
+    restoreUnavailable:
+      "尚未找到可恢复的 Codex 备份。AUTO Gateway 只能恢复应用配置前自动保存的文件。",
     switchBackConfiguration: "切换回原来的配置",
     switchBackConfigurationDescription:
       "恢复应用 AUTO Gateway 之前保存的 Codex 设置和凭据。",
