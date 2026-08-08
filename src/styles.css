@@ -25,6 +25,9 @@
   --control-bg: oklch(99.2% 0.005 68);
   --control-border: var(--line);
   --on-primary: oklch(99% 0.006 68);
+  --tooltip-bg: oklch(20% 0.024 54);
+  --tooltip-text: oklch(98% 0.006 68);
+  --tooltip-border: oklch(35% 0.028 54);
   --shadow: 0 18px 42px color-mix(in oklch, var(--text) 10%, transparent);
   --shadow-soft:
     0 1px 2px color-mix(in oklch, var(--text) 5%, transparent),
@@ -65,6 +68,9 @@
   --control-bg: oklch(21.5% 0.016 56);
   --control-border: oklch(42% 0.024 58);
   --on-primary: oklch(18% 0.018 56);
+  --tooltip-bg: oklch(12% 0.017 56);
+  --tooltip-text: oklch(97% 0.008 68);
+  --tooltip-border: oklch(43% 0.026 58);
   --shadow: 0 18px 48px color-mix(in oklch, black 22%, transparent);
   --shadow-soft:
     0 1px 2px color-mix(in oklch, black 18%, transparent),
@@ -493,10 +499,10 @@ select:focus-visible {
   width: max-content;
   max-width: min(320px, calc(100vw - 32px));
   padding: 8px 10px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--tooltip-border);
   border-radius: 8px;
-  color: var(--on-primary);
-  background: var(--nav);
+  color: var(--tooltip-text);
+  background: var(--tooltip-bg);
   box-shadow: var(--shadow-soft);
   content: attr(data-tooltip);
   font-size: 11px;
@@ -527,10 +533,10 @@ select:focus-visible {
   width: max-content;
   max-width: min(320px, calc(100vw - 32px));
   padding: 8px 10px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--tooltip-border);
   border-radius: 8px;
-  color: var(--on-primary);
-  background: var(--nav);
+  color: var(--tooltip-text);
+  background: var(--tooltip-bg);
   box-shadow: var(--shadow-soft);
   content: attr(data-tooltip);
   font-size: 11px;
@@ -2295,4 +2301,50 @@ h1 {
   .recentSetup span {
     grid-column: 2;
   }
+}
+
+/* In-app confirmation dialog (replaces window.confirm, which the Tauri
+   webview suppresses). Rendered via a portal so it floats over every view. */
+.confirmOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in oklch, var(--text) 32%, transparent);
+  backdrop-filter: blur(2px);
+  animation: confirmFadeIn 0.14s ease-out;
+}
+@keyframes confirmFadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.confirmDialog {
+  width: 100%;
+  max-width: 420px;
+  padding: 24px;
+  border-radius: 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  display: grid;
+  gap: 18px;
+}
+.confirmMessage {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+.confirmActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }

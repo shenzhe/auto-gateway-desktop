@@ -113,6 +113,8 @@ const dictionaries = {
     sessionExpired:
       "Your sign-in has expired. Connect your account again to continue.",
     signOut: "Sign out",
+    confirm: "Confirm",
+    cancel: "Cancel",
     signOutConfirm:
       "Sign out of AUTO Gateway on this device? Your Codex configuration will not be changed.",
     signedOut: "You have been signed out. Connect an account to continue.",
@@ -401,6 +403,8 @@ const dictionaries = {
     signInRequired: "请先登录 AUTO Gateway，再打开用户控制台。",
     sessionExpired: "登录状态已失效，请重新连接账户后继续。",
     signOut: "退出登录",
+    confirm: "确认",
+    cancel: "取消",
     signOutConfirm:
       "要退出此设备上的 AUTO Gateway 登录吗？Codex 配置不会被修改。",
     signedOut: "已退出登录，请重新连接账户。",

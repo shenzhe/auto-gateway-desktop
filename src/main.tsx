@@ -31,6 +31,7 @@ import {
 } from "@phosphor-icons/react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import { createPortal } from "react-dom";
 import {
   bootstrapDesktopKey,
   closeDesktopSignIn,
@@ -1072,7 +1073,7 @@ function TrayPopup() {
   }
 
   async function signOut() {
-    if (!window.confirm(tr("signOutConfirm"))) return;
+    if (!(await confirm(tr("signOutConfirm")))) return;
     try {
       await signOutDesktop();
       setDesktopSession(null);
@@ -1140,6 +1141,51 @@ function TrayPopup() {
   );
 }
 
+function ConfirmDialog({
+  message,
+  confirmLabel,
+  cancelLabel,
+  onResolve,
+}: {
+  message: string;
+  confirmLabel: string;
+  cancelLabel: string;
+  onResolve: (accepted: boolean) => void;
+}) {
+  return createPortal(
+    <div
+      className="confirmOverlay"
+      role="dialog"
+      aria-modal="true"
+      aria-live="assertive"
+    >
+      <div className="confirmDialog">
+        <p className="confirmMessage">{message}</p>
+        <div className="confirmActions">
+          <button
+            type="button"
+            className="secondaryButton"
+            onClick={() => onResolve(false)}
+          >
+            {cancelLabel}
+          </button>
+          <button
+            type="button"
+            className="primaryButton"
+            // Autofocus the destructive action's confirm button so keyboard
+            // users can review the message first via shift-tab.
+            autoFocus
+            onClick={() => onResolve(true)}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
 function App() {
   useCopyOnlyContextMenu();
   useEffect(() => {
@@ -1165,6 +1211,14 @@ function App() {
   );
   const [endpoint, setEndpoint] = useState(defaultEndpoint);
   const [message, setMessage] = useState("");
+  // Tauri's webview suppresses window.confirm() (it returns false without
+  // showing a dialog), so destructive actions route through this in-app
+  // confirmation dialog instead. See confirm() below.
+  const [confirmState, setConfirmState] = useState<{
+    message: string;
+    resolve: (accepted: boolean) => void;
+  } | null>(null);
+  const confirmResolverRef = useRef<((accepted: boolean) => void) | null>(null);
   const [busy, setBusy] = useState(false);
   const [restoringSession, setRestoringSession] = useState(true);
   const [installingCodex, setInstallingCodex] = useState(false);
@@ -1320,7 +1374,7 @@ function App() {
 
   async function handleSignOut() {
     if (busy || installingCodex || restoringSession) return;
-    if (!window.confirm(tr("signOutConfirm"))) return;
+    if (!(await confirm(tr("signOutConfirm")))) return;
     setBusy(true);
     try {
       await signOutDesktop();
@@ -1330,6 +1384,19 @@ function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function confirm(message: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      confirmResolverRef.current = resolve;
+      setConfirmState({ message, resolve });
+    });
+  }
+
+  function resolveConfirm(accepted: boolean) {
+    confirmResolverRef.current?.(accepted);
+    confirmResolverRef.current = null;
+    setConfirmState(null);
   }
 
   async function refreshStatus(updateMessage = true) {
@@ -2100,7 +2167,7 @@ function App() {
       setMessage(tr("desktopUpdateManualUnavailable"));
       return;
     }
-    if (!window.confirm(tr("desktopUpdateManualConfirm"))) return;
+    if (!(await confirm(tr("desktopUpdateManualConfirm")))) return;
     setOpeningDesktopInstaller(true);
     try {
       setMessage(tr("desktopUpdateManualOpening"));
@@ -2194,7 +2261,7 @@ function App() {
       setMessage(tr("restoreUnavailable"));
       return;
     }
-    if (!(await window.confirm(tr("restoreConfirm")))) return;
+    if (!(await confirm(tr("restoreConfirm")))) return;
     setBusy(true);
     try {
       await restoreLatestCodexBackups();
@@ -2212,7 +2279,7 @@ function App() {
       setMessage(tr("restoreUnavailable"));
       return;
     }
-    if (!(await window.confirm(tr("switchBackConfirm")))) return;
+    if (!(await confirm(tr("switchBackConfirm")))) return;
     setBusy(true);
     try {
       await restoreLatestCodexBackups();
@@ -2375,6 +2442,7 @@ function App() {
             ? tr("invalidProviderDescription")
             : tr("workspaceCheckingDescription");
     return (
+      <>
       <main className="homeShell">
         <aside className="homeRail">
           <div className="homeBrand">
@@ -2866,6 +2934,15 @@ function App() {
           </section>
         </section>
       </main>
+      {confirmState ? (
+        <ConfirmDialog
+          message={confirmState.message}
+          confirmLabel={tr("confirm")}
+          cancelLabel={tr("cancel")}
+          onResolve={resolveConfirm}
+        />
+      ) : null}
+      </>
     );
   }
 
@@ -3251,6 +3328,7 @@ function App() {
   if (showHome) return renderHomeContent();
 
   return (
+    <>
     <main className="appShell">
       <aside className="wizardRail">
         <nav className="stepNav" aria-label={tr("setupSteps")}>
@@ -3426,6 +3504,15 @@ function App() {
         )}
       </section>
     </main>
+    {confirmState ? (
+      <ConfirmDialog
+        message={confirmState.message}
+        confirmLabel={tr("confirm")}
+        cancelLabel={tr("cancel")}
+        onResolve={resolveConfirm}
+      />
+    ) : null}
+    </>
   );
 }
 
