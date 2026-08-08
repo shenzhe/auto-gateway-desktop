@@ -109,8 +109,248 @@ export type DesktopNotificationList = {
   unreadCount?: number;
 };
 
+export type SkillSourceType =
+  | "user"
+  | "system"
+  | "plugin"
+  | "external"
+  | "autogateway"
+  | "team";
+
+export type SkillOwnership = "user-managed" | "source-managed" | "read-only";
+
+export type SkillStatus =
+  | "enabled"
+  | "disabled"
+  | "error"
+  | "source-unavailable";
+
+export type SkillTrustLevel =
+  | "system"
+  | "verified"
+  | "known-source"
+  | "unverified";
+
+export type SkillRecord = {
+  id: string;
+  name: string;
+  description: string;
+  sourceType: SkillSourceType;
+  sourceUri?: string;
+  installPath: string;
+  scope: string;
+  ownership: SkillOwnership;
+  status: SkillStatus;
+  version?: string;
+  checksum?: string;
+  categoryId?: string;
+  tags: string[];
+  trustLevel: SkillTrustLevel;
+  installedAt?: string;
+  updatedAt?: string;
+  lastScannedAt: string;
+};
+
+export type SkillScanFailure = {
+  path: string;
+  reason: string;
+};
+
+export type SkillCategoryType = "preset" | "custom";
+
+export type SkillCategory = {
+  id: string;
+  name: string;
+  type: SkillCategoryType;
+  order: number;
+  archived: boolean;
+};
+
+export type SkillScanResult = {
+  skills: SkillRecord[];
+  failedSources: SkillScanFailure[];
+  categories: SkillCategory[];
+  scannedAt: string;
+};
+
+export type SkillFileKind =
+  | "markdown"
+  | "script"
+  | "reference"
+  | "asset"
+  | "agent"
+  | "other";
+
+export type SkillFileEntry = {
+  relativePath: string;
+  sizeBytes: number;
+  isExecutable: boolean;
+  kind: SkillFileKind;
+};
+
+export type SkillDetail = SkillRecord & {
+  files: SkillFileEntry[];
+  scripts: string[];
+  markdownBody?: string;
+  totalSizeBytes: number;
+  fileCount: number;
+  truncated: boolean;
+};
+
+export type RecoverableSkill = {
+  id: string;
+  name: string;
+  removedAt?: string;
+};
+
+export type SkillRiskFinding = {
+  code: string;
+  severity: string;
+  path?: string;
+  message: string;
+};
+
+export type SkillInstallSourceKind = "dir" | "zip" | "git";
+
+export type SkillInstallProgress = {
+  stage:
+    | "resolving"
+    | "downloading"
+    | "extracting"
+    | "installing"
+    | "complete";
+  downloadedBytes: number;
+  totalBytes?: number;
+  percent?: number;
+};
+
+export type SkillInstallPreview = {
+  name: string;
+  description: string;
+  version?: string;
+  targetName: string;
+  targetPath: string;
+  fileCount: number;
+  totalSizeBytes: number;
+  scripts: string[];
+  conflict: boolean;
+  warnings: SkillRiskFinding[];
+};
+
 export function getCodexStatus(): Promise<CodexStatus> {
   return invoke<CodexStatus>("get_codex_status");
+}
+
+export function scanSkills(): Promise<SkillScanResult> {
+  return invoke<SkillScanResult>("scan_skills");
+}
+
+export function getSkillDetail(id: string): Promise<SkillDetail> {
+  return invoke<SkillDetail>("get_skill_detail", { id });
+}
+
+export function setSkillCategory(
+  id: string,
+  categoryId: string | null,
+): Promise<void> {
+  return invoke<void>("set_skill_category", { id, categoryId });
+}
+
+export function setSkillsCategory(
+  ids: string[],
+  categoryId: string | null,
+): Promise<void> {
+  return invoke<void>("set_skills_category", { ids, categoryId });
+}
+
+export function setSkillTags(id: string, tags: string[]): Promise<void> {
+  return invoke<void>("set_skill_tags", { id, tags });
+}
+
+export function createCategory(name: string): Promise<SkillCategory> {
+  return invoke<SkillCategory>("create_category", { name });
+}
+
+export function renameCategory(id: string, name: string): Promise<void> {
+  return invoke<void>("rename_category", { id, name });
+}
+
+export function reorderCategories(orderedIds: string[]): Promise<void> {
+  return invoke<void>("reorder_categories", { orderedIds });
+}
+
+export function archiveCategory(id: string, archived: boolean): Promise<void> {
+  return invoke<void>("archive_category", { id, archived });
+}
+
+export function deleteCategory(
+  id: string,
+  migrateTo: string | null,
+): Promise<void> {
+  return invoke<void>("delete_category", { id, migrateTo });
+}
+
+export function enableSkill(id: string): Promise<void> {
+  return invoke<void>("enable_skill", { id });
+}
+
+export function disableSkill(id: string): Promise<void> {
+  return invoke<void>("disable_skill", { id });
+}
+
+export function removeSkill(id: string): Promise<void> {
+  return invoke<void>("remove_skill", { id });
+}
+
+export function restoreSkill(id: string): Promise<void> {
+  return invoke<void>("restore_skill", { id });
+}
+
+export function listRecoverableSkills(): Promise<RecoverableSkill[]> {
+  return invoke<RecoverableSkill[]>("list_recoverable_skills");
+}
+
+export type SkillInstallSkip = { name: string; reason: string };
+
+export type SkillInstallSummary = {
+  installed: string[];
+  skipped: SkillInstallSkip[];
+  failed: SkillInstallSkip[];
+};
+
+export function validateSkillSource(
+  kind: SkillInstallSourceKind,
+  location: string,
+): Promise<SkillInstallPreview[]> {
+  return invoke<SkillInstallPreview[]>("validate_skill_source", {
+    kind,
+    location,
+  });
+}
+
+export function installSkill(
+  kind: SkillInstallSourceKind,
+  location: string,
+  replace: boolean,
+  names: string[],
+): Promise<SkillInstallSummary> {
+  return invoke<SkillInstallSummary>("install_skill", {
+    kind,
+    location,
+    replace,
+    names,
+  });
+}
+
+export type SkillExportResult = {
+  zipPath: string;
+  sha256: string;
+  sizeBytes: number;
+  warnings: SkillRiskFinding[];
+};
+
+export function exportSkill(id: string): Promise<SkillExportResult> {
+  return invoke<SkillExportResult>("export_skill", { id });
 }
 
 export function getCodexAppStatus(): Promise<CodexAppStatus> {

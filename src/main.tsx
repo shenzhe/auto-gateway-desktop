@@ -1,4 +1,5 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { exit, relaunch } from "@tauri-apps/plugin-process";
 import { check, type Update } from "@tauri-apps/plugin-updater";
@@ -21,9 +22,12 @@ import {
   GearIcon,
   HouseIcon,
   ChatCircleTextIcon,
+  MagnifyingGlassIcon,
   MoonIcon,
+  PuzzlePieceIcon,
   QuestionIcon,
   SignOutIcon,
+  XIcon,
   SunIcon,
   TranslateIcon,
   UserCircleIcon,
@@ -58,6 +62,22 @@ import {
   refreshDesktopState,
   restoreDesktopState,
   restoreLatestCodexBackups,
+  scanSkills,
+  getSkillDetail,
+  setSkillCategory,
+  setSkillTags,
+  createCategory,
+  renameCategory,
+  archiveCategory,
+  deleteCategory,
+  enableSkill,
+  disableSkill,
+  removeSkill,
+  restoreSkill,
+  listRecoverableSkills,
+  validateSkillSource,
+  installSkill,
+  exportSkill,
   signOutDesktop,
   showMainWindow,
   updateTrayStatus,
@@ -68,6 +88,17 @@ import {
   type DesktopNotification,
   type DesktopNotificationList,
   type DesktopSession,
+  type SkillRecord,
+  type SkillScanResult,
+  type SkillDetail,
+  type SkillFileEntry,
+  type SkillCategory,
+  type RecoverableSkill,
+  type SkillInstallPreview,
+  type SkillInstallSourceKind,
+  type SkillInstallProgress,
+  type SkillInstallSummary,
+  type SkillExportResult,
 } from "./desktop";
 import {
   readLocalePreference,
@@ -77,6 +108,15 @@ import {
   type LocalePreference,
 } from "./i18n";
 import { applyTheme, readTheme, writeTheme, type ThemeMode } from "./theme";
+import { trackSkillEvent } from "./analytics";
+import {
+  skillLibraryClient,
+  skillLibraryIsMock,
+  type PublicSkill,
+  type SkillCategoryDto,
+  type ShareLink,
+  type Installation,
+} from "./skillLibrary";
 import "./styles.css";
 
 const defaultEndpoint = "https://api.autogateway.cc";
@@ -89,6 +129,16 @@ const notificationWindowStorageKey =
   "autogateway.desktop.notification-window.v1";
 const notificationDetailQueryKey = "notificationId";
 const notificationPageSize = 5;
+const presetCategoryKeys: Record<string, Parameters<typeof translate>[1]> = {
+  development: "skillCategoryDevelopment",
+  design: "skillCategoryDesign",
+  data: "skillCategoryData",
+  web: "skillCategoryWeb",
+  security: "skillCategorySecurity",
+  business: "skillCategoryBusiness",
+  automation: "skillCategoryAutomation",
+  uncategorized: "skillCategoryUncategorized",
+};
 const externalInstallationTimeoutMs = 5 * 60 * 1000;
 const designPreviewState = import.meta.env.DEV
   ? new URLSearchParams(window.location.search).get("preview")
@@ -1266,6 +1316,89 @@ function App() {
     useState<CodexOpenPhase>("closed");
   const [selectedStep, setSelectedStep] = useState<WizardStep>(1);
   const [showSettings, setShowSettings] = useState(false);
+  const [activeView, setActiveView] = useState<"home" | "skills">("home");
+  const [skillsTab, setSkillsTab] = useState<
+    "installed" | "library" | "distribution"
+  >("installed");
+  const [skillScan, setSkillScan] = useState<SkillScanResult | null>(null);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsError, setSkillsError] = useState("");
+  const [skillsRefreshNonce, setSkillsRefreshNonce] = useState(0);
+  const [skillSearch, setSkillSearch] = useState("");
+  const [skillSourceFilter, setSkillSourceFilter] = useState<
+    "all" | SkillRecord["sourceType"]
+  >("all");
+  const [skillSort, setSkillSort] = useState<
+    "name-asc" | "name-desc" | "updated-desc"
+  >("name-asc");
+  const [skillCategoryFilter, setSkillCategoryFilter] = useState("all");
+  const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
+  const [skillDetail, setSkillDetail] = useState<SkillDetail | null>(null);
+  const [skillDetailLoading, setSkillDetailLoading] = useState(false);
+  const [skillDetailError, setSkillDetailError] = useState("");
+  const [skillTagDraft, setSkillTagDraft] = useState("");
+  const [showCategoryManager, setShowCategoryManager] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState("");
+  const [renamingCategoryId, setRenamingCategoryId] = useState<string | null>(
+    null,
+  );
+  const [renameCategoryValue, setRenameCategoryValue] = useState("");
+  const [deletingCategoryId, setDeletingCategoryId] = useState<string | null>(
+    null,
+  );
+  const [deleteMigrateTo, setDeleteMigrateTo] = useState("");
+  const [skillCategoryError, setSkillCategoryError] = useState("");
+  const [pendingReloadIds, setPendingReloadIds] = useState<Set<string>>(
+    new Set(),
+  );
+  const [removeConfirmId, setRemoveConfirmId] = useState<string | null>(null);
+  const [showTrash, setShowTrash] = useState(false);
+  const [recoverableSkills, setRecoverableSkills] = useState<
+    RecoverableSkill[]
+  >([]);
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [showInstallDialog, setShowInstallDialog] = useState(false);
+  const [installKind, setInstallKind] =
+    useState<SkillInstallSourceKind>("dir");
+  const [installLocation, setInstallLocation] = useState("");
+  const [installPlan, setInstallPlan] = useState<SkillInstallPreview[] | null>(
+    null,
+  );
+  const [selectedInstallNames, setSelectedInstallNames] = useState<Set<string>>(
+    new Set(),
+  );
+  const [installReplace, setInstallReplace] = useState(false);
+  const [installSummary, setInstallSummary] =
+    useState<SkillInstallSummary | null>(null);
+  const [installBusy, setInstallBusy] = useState(false);
+  const [installError, setInstallError] = useState("");
+  const [skillInstallProgress, setSkillInstallProgress] =
+    useState<SkillInstallProgress | null>(null);
+  const [exportResult, setExportResult] = useState<SkillExportResult | null>(
+    null,
+  );
+  const [exportBusy, setExportBusy] = useState(false);
+  // Phase-2 mock: skill library + my distribution.
+  const [libraryItems, setLibraryItems] = useState<PublicSkill[]>([]);
+  const [libraryCategories, setLibraryCategories] = useState<
+    SkillCategoryDto[]
+  >([]);
+  const [libraryLoading, setLibraryLoading] = useState(false);
+  const [libraryError, setLibraryError] = useState("");
+  const [librarySearch, setLibrarySearch] = useState("");
+  const [libraryCategory, setLibraryCategory] = useState("all");
+  const [librarySort, setLibrarySort] = useState<
+    "popular" | "newest" | "updated"
+  >("popular");
+  const [selectedLibrarySkill, setSelectedLibrarySkill] =
+    useState<PublicSkill | null>(null);
+  const [libraryInstallNote, setLibraryInstallNote] = useState("");
+  const [distMySkills, setDistMySkills] = useState<PublicSkill[]>([]);
+  const [distShareLinks, setDistShareLinks] = useState<ShareLink[]>([]);
+  const [distInstallations, setDistInstallations] = useState<Installation[]>(
+    [],
+  );
+  const [distLoading, setDistLoading] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
   const [localePreference, setLocalePreference] = useState<LocalePreference>(
     () => readLocalePreference(),
@@ -1278,6 +1411,148 @@ function App() {
     key: Parameters<typeof translate>[1],
     values?: Record<string, string | number>,
   ) => translate(locale, key, values);
+
+  useEffect(() => {
+    if (activeView !== "skills") return;
+    let active = true;
+    const started = performance.now();
+    setSkillsLoading(true);
+    setSkillsError("");
+    scanSkills()
+      .then((result) => {
+        if (!active) return;
+        setSkillScan(result);
+        trackSkillEvent("skill_scan_completed", {
+          result: "ok",
+          count: result.skills.length,
+          failedCount: result.failedSources.length,
+          durationMs: Math.round(performance.now() - started),
+        });
+      })
+      .catch((error) => {
+        if (!active) return;
+        setSkillsError(String(error));
+        trackSkillEvent("skill_scan_completed", { result: "error" });
+      })
+      .finally(() => {
+        if (active) setSkillsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, skillsRefreshNonce]);
+
+  useEffect(() => {
+    if (!selectedSkillId) {
+      setSkillDetail(null);
+      setSkillDetailError("");
+      return;
+    }
+    let active = true;
+    setSkillDetailLoading(true);
+    setSkillDetailError("");
+    setSkillDetail(null);
+    getSkillDetail(selectedSkillId)
+      .then((detail) => {
+        if (active) setSkillDetail(detail);
+      })
+      .catch((error) => {
+        if (active) setSkillDetailError(String(error));
+      })
+      .finally(() => {
+        if (active) setSkillDetailLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedSkillId, skillsRefreshNonce]);
+
+  useEffect(() => {
+    setSkillTagDraft(skillDetail ? skillDetail.tags.join(", ") : "");
+    setExportResult(null);
+  }, [skillDetail]);
+
+  useEffect(() => {
+    if (activeView !== "skills" || !showTrash) return;
+    let active = true;
+    setTrashLoading(true);
+    listRecoverableSkills()
+      .then((items) => {
+        if (active) setRecoverableSkills(items);
+      })
+      .catch(() => {
+        if (active) setRecoverableSkills([]);
+      })
+      .finally(() => {
+        if (active) setTrashLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, showTrash, skillsRefreshNonce]);
+
+  useEffect(() => {
+    if (!showInstallDialog) return;
+    const unlisten = listen<SkillInstallProgress>(
+      "skill-install-progress",
+      ({ payload }) => setSkillInstallProgress(payload),
+    );
+    return () => {
+      void unlisten.then((off) => off());
+    };
+  }, [showInstallDialog]);
+
+  useEffect(() => {
+    if (activeView !== "skills" || skillsTab !== "library") return;
+    let active = true;
+    setLibraryLoading(true);
+    setLibraryError("");
+    Promise.all([
+      skillLibraryClient.listCategories(),
+      skillLibraryClient.listPublicSkills({
+        q: librarySearch.trim() || undefined,
+        category: libraryCategory === "all" ? undefined : libraryCategory,
+        sort: librarySort,
+      }),
+    ])
+      .then(([categories, page]) => {
+        if (!active) return;
+        setLibraryCategories(categories);
+        setLibraryItems(page.items);
+      })
+      .catch((error) => {
+        if (active) setLibraryError(String(error));
+      })
+      .finally(() => {
+        if (active) setLibraryLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, skillsTab, librarySearch, libraryCategory, librarySort]);
+
+  useEffect(() => {
+    if (activeView !== "skills" || skillsTab !== "distribution") return;
+    let active = true;
+    setDistLoading(true);
+    Promise.all([
+      skillLibraryClient.listUserSkills("owned"),
+      skillLibraryClient.listShareLinks(""),
+      skillLibraryClient.listInstallations(),
+    ])
+      .then(([mine, shares, installations]) => {
+        if (!active) return;
+        setDistMySkills(mine.items);
+        setDistShareLinks(shares.items);
+        setDistInstallations(installations.items);
+      })
+      .finally(() => {
+        if (active) setDistLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [activeView, skillsTab]);
 
   const accountConnected = Boolean(desktopAccessToken);
   const appInstalled = Boolean(appStatus?.installed);
@@ -2375,6 +2650,1663 @@ function App() {
     }
   }
 
+  function skillSourceLabel(source: SkillRecord["sourceType"]): string {
+    switch (source) {
+      case "user":
+        return tr("skillSourceUser");
+      case "system":
+        return tr("skillSourceSystem");
+      case "plugin":
+        return tr("skillSourcePlugin");
+      case "external":
+        return tr("skillSourceExternal");
+      case "autogateway":
+        return tr("skillSourceAutogateway");
+      case "team":
+        return tr("skillSourceTeam");
+      default:
+        return source;
+    }
+  }
+
+  function categoryLabel(category: SkillCategory): string {
+    if (category.type === "preset") {
+      const key = presetCategoryKeys[category.id];
+      return key ? tr(key) : category.name;
+    }
+    return category.name;
+  }
+
+  function categoryLabelById(id?: string | null): string {
+    const effective = id ?? "uncategorized";
+    const category = (skillScan?.categories ?? []).find(
+      (item) => item.id === effective,
+    );
+    return category ? categoryLabel(category) : tr("skillCategoryUncategorized");
+  }
+
+  async function runSkillMutation(action: () => Promise<unknown>) {
+    try {
+      await action();
+      setSkillCategoryError("");
+      setSkillsRefreshNonce((nonce) => nonce + 1);
+      trackSkillEvent("skill_category_changed", { result: "ok" });
+    } catch (error) {
+      setSkillCategoryError(String(error));
+    }
+  }
+
+  async function toggleSkill(id: string, enable: boolean) {
+    try {
+      await (enable ? enableSkill(id) : disableSkill(id));
+      setSkillCategoryError("");
+      setPendingReloadIds((previous) => new Set(previous).add(id));
+      setSkillsRefreshNonce((nonce) => nonce + 1);
+      trackSkillEvent("skill_status_changed", {
+        result: enable ? "enabled" : "disabled",
+      });
+    } catch (error) {
+      setSkillCategoryError(String(error));
+    }
+  }
+
+  async function confirmRemoveSkill(id: string) {
+    try {
+      await removeSkill(id);
+      setSkillCategoryError("");
+      setRemoveConfirmId(null);
+      setSelectedSkillId(null);
+      setSkillsRefreshNonce((nonce) => nonce + 1);
+    } catch (error) {
+      setSkillCategoryError(String(error));
+    }
+  }
+
+  async function restoreSkillAction(id: string) {
+    try {
+      await restoreSkill(id);
+      setSkillCategoryError("");
+      setSkillsRefreshNonce((nonce) => nonce + 1);
+      trackSkillEvent("skill_recovery_completed", { result: "ok" });
+    } catch (error) {
+      setSkillCategoryError(String(error));
+    }
+  }
+
+  async function exportCurrentSkill(id: string) {
+    setExportBusy(true);
+    setSkillCategoryError("");
+    setExportResult(null);
+    try {
+      setExportResult(await exportSkill(id));
+      trackSkillEvent("skill_export_completed", { result: "ok" });
+    } catch (error) {
+      setSkillCategoryError(String(error));
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  async function installFromLibrary(skill: PublicSkill) {
+    const version = skill.latestPublishedVersion;
+    if (!version) return;
+    try {
+      const license = await skillLibraryClient.createDownloadLicense(
+        skill.publicId,
+        version.publicId,
+      );
+      setLibraryInstallNote(
+        tr("skillLibraryInstallMock", { version: license.version }),
+      );
+    } catch (error) {
+      setLibraryInstallNote(String(error));
+    }
+  }
+
+  function renderCatalogCard(skill: PublicSkill) {
+    const open = () => {
+      setSelectedLibrarySkill(skill);
+      setLibraryInstallNote("");
+    };
+    return (
+      <article
+        className="skillCatalogCard"
+        key={skill.publicId}
+        role="button"
+        tabIndex={0}
+        onClick={open}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            open();
+          }
+        }}
+      >
+        <div className="skillCardHeader">
+          <strong>{skill.displayName}</strong>
+          {skill.latestPublishedVersion ? (
+            <span className="skillCardVersion">
+              {tr("skillVersionLabel", {
+                version: skill.latestPublishedVersion.version,
+              })}
+            </span>
+          ) : null}
+        </div>
+        <p className="skillCardDescription">{skill.description}</p>
+        <div className="skillCardMeta">
+          <span className="skillTag source">{skill.primaryCategory.name}</span>
+          {skill.tags.map((tag) => (
+            <span className="skillTag" key={tag}>
+              {tag}
+            </span>
+          ))}
+        </div>
+        <div className="skillCatalogStats">
+          <span>{tr("skillLibraryDownloads", { count: skill.downloadCount })}</span>
+          <span>{tr("skillLibraryInstalls", { count: skill.installCount })}</span>
+        </div>
+      </article>
+    );
+  }
+
+  function renderLibraryDetailModal() {
+    if (!selectedLibrarySkill) return null;
+    const skill = selectedLibrarySkill;
+    const version = skill.latestPublishedVersion;
+    return (
+      <div
+        className="skillDrawerOverlay skillModalOverlay"
+        onClick={() => setSelectedLibrarySkill(null)}
+      >
+        <div
+          className="skillModal"
+          role="dialog"
+          aria-modal="true"
+          aria-label={skill.displayName}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <header className="skillDrawerHeader">
+            <strong>{skill.displayName}</strong>
+            <button
+              className="iconButton"
+              aria-label={tr("skillDetailClose")}
+              onClick={() => setSelectedLibrarySkill(null)}
+            >
+              <XIcon weight="bold" />
+            </button>
+          </header>
+          <div className="skillModalBody">
+            <p className="skillCardDescription">{skill.description}</p>
+            <dl className="skillDetailGrid">
+              <div>
+                <dt>{tr("skillDetailSource")}</dt>
+                <dd>{skill.owner.displayName}</dd>
+              </div>
+              <div>
+                <dt>{tr("skillsFilterCategory")}</dt>
+                <dd>{skill.primaryCategory.name}</dd>
+              </div>
+              <div>
+                <dt>{tr("skillLibraryVersion")}</dt>
+                <dd>{version ? version.version : "—"}</dd>
+              </div>
+              <div>
+                <dt>{tr("skillLibraryRisk")}</dt>
+                <dd>{version ? version.scan.risk : "—"}</dd>
+              </div>
+            </dl>
+            {version?.changelog ? (
+              <section className="skillDrawerSection">
+                <h3>{tr("skillLibraryChangelog")}</h3>
+                <p className="skillMuted">{version.changelog}</p>
+              </section>
+            ) : null}
+            <div className="skillDrawerActions">
+              <button
+                className="primaryButton"
+                disabled={!version}
+                onClick={() => void installFromLibrary(skill)}
+              >
+                {tr("skillLibraryInstallLocal")}
+              </button>
+            </div>
+            {libraryInstallNote ? (
+              <section className="notice">
+                <span>{libraryInstallNote}</span>
+              </section>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderSkillLibrary() {
+    return (
+      <div className="skillLibrary">
+        {skillLibraryIsMock ? (
+          <section className="notice skillMockBanner">
+            <span>{tr("skillMockData")}</span>
+          </section>
+        ) : null}
+        <div className="skillsToolbar">
+          <label className="skillSearch">
+            <MagnifyingGlassIcon weight="bold" />
+            <input
+              type="search"
+              value={librarySearch}
+              placeholder={tr("skillsSearchPlaceholder")}
+              onChange={(event) => setLibrarySearch(event.target.value)}
+            />
+          </label>
+          <select
+            className="skillSelect"
+            aria-label={tr("skillsFilterCategory")}
+            value={libraryCategory}
+            onChange={(event) => setLibraryCategory(event.target.value)}
+          >
+            <option value="all">{tr("skillsFilterAllCategories")}</option>
+            {libraryCategories.map((category) => (
+              <option key={category.publicId} value={category.slug}>
+                {category.name}
+              </option>
+            ))}
+          </select>
+          <select
+            className="skillSelect"
+            aria-label={tr("skillsSortLabel")}
+            value={librarySort}
+            onChange={(event) =>
+              setLibrarySort(event.target.value as typeof librarySort)
+            }
+          >
+            <option value="popular">{tr("skillLibrarySortPopular")}</option>
+            <option value="newest">{tr("skillLibrarySortNewest")}</option>
+            <option value="updated">{tr("skillLibrarySortUpdated")}</option>
+          </select>
+        </div>
+        {libraryLoading ? (
+          <div className="skillSkeleton" aria-busy="true">
+            <div className="skillSkeletonRow" />
+            <div className="skillSkeletonRow" />
+          </div>
+        ) : libraryError ? (
+          <section className="notice warning">
+            <strong>{libraryError}</strong>
+          </section>
+        ) : libraryItems.length === 0 ? (
+          <div className="skillsComingSoon">
+            <MagnifyingGlassIcon weight="duotone" />
+            <strong>{tr("skillsNoMatches")}</strong>
+          </div>
+        ) : (
+          <div className="skillCatalog">
+            {libraryItems.map(renderCatalogCard)}
+          </div>
+        )}
+        {renderLibraryDetailModal()}
+      </div>
+    );
+  }
+
+  function renderMyDistribution() {
+    return (
+      <div className="skillLibrary">
+        {skillLibraryIsMock ? (
+          <section className="notice skillMockBanner">
+            <span>{tr("skillMockData")}</span>
+          </section>
+        ) : null}
+        {distLoading ? (
+          <div className="skillSkeleton" aria-busy="true">
+            <div className="skillSkeletonRow" />
+          </div>
+        ) : (
+          <>
+            <section className="skillDrawerSection">
+              <h3>{tr("skillDistMySkills")}</h3>
+              {distMySkills.length === 0 ? (
+                <p className="skillMuted">{tr("skillTrashEmpty")}</p>
+              ) : (
+                <div className="skillList">
+                  {distMySkills.map((skill) => (
+                    <article className="skillCard" key={skill.publicId}>
+                      <div className="skillCardMain">
+                        <div className="skillCardHeader">
+                          <strong>{skill.displayName}</strong>
+                        </div>
+                        <p className="skillCardDescription">
+                          {skill.description}
+                        </p>
+                        <div className="skillCardMeta">
+                          <span className="skillTag source">
+                            {skill.visibility}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="skillCardAside">
+                        <button className="linkButton" disabled>
+                          {tr("skillDistPublish")}
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              )}
+            </section>
+            <section className="skillDrawerSection">
+              <h3>{tr("skillDistShareLinks")}</h3>
+              {distShareLinks.length === 0 ? (
+                <p className="skillMuted">{tr("skillTrashEmpty")}</p>
+              ) : (
+                <ul className="skillScriptList">
+                  {distShareLinks.map((link) => (
+                    <li key={link.publicId}>
+                      {link.shareUrl} ·{" "}
+                      {tr("skillDistShareUses", { count: link.useCount })}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+            <section className="skillDrawerSection">
+              <h3>{tr("skillDistInstallations")}</h3>
+              {distInstallations.length === 0 ? (
+                <p className="skillMuted">{tr("skillTrashEmpty")}</p>
+              ) : (
+                <ul className="skillFileList">
+                  {distInstallations.map((installation) => (
+                    <li key={installation.publicId}>
+                      <span className="skillFilePath">
+                        {installation.skillName} v{installation.version}
+                      </span>
+                      <span className="skillFileSize">
+                        {installation.deviceAlias}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  function skillStatusLabel(status: SkillRecord["status"]): string {
+    switch (status) {
+      case "enabled":
+        return tr("skillStatusEnabled");
+      case "disabled":
+        return tr("skillStatusDisabled");
+      case "error":
+        return tr("skillStatusError");
+      default:
+        return tr("skillStatusSourceUnavailable");
+    }
+  }
+
+  function fileKindLabel(kind: SkillFileEntry["kind"]): string {
+    switch (kind) {
+      case "markdown":
+        return tr("skillFileKindMarkdown");
+      case "script":
+        return tr("skillFileKindScript");
+      case "reference":
+        return tr("skillFileKindReference");
+      case "asset":
+        return tr("skillFileKindAsset");
+      case "agent":
+        return tr("skillFileKindAgent");
+      default:
+        return tr("skillFileKindOther");
+    }
+  }
+
+  function formatSkillTime(value?: string): string {
+    if (!value) return "—";
+    const ms = Number(value);
+    if (!Number.isFinite(ms) || ms <= 0) return "—";
+    return new Date(ms).toLocaleString(locale === "zh" ? "zh-CN" : "en-US");
+  }
+
+  function renderSkillCard(skill: SkillRecord) {
+    const readOnly = skill.ownership !== "user-managed";
+    const statusClass =
+      skill.status === "enabled"
+        ? "enabled"
+        : skill.status === "disabled"
+          ? "disabled"
+          : skill.status === "error"
+            ? "error"
+            : "";
+    return (
+      <article
+        className={`skillCard ${selectedSkillId === skill.id ? "selected" : ""}`.trim()}
+        key={skill.id}
+        role="button"
+        tabIndex={0}
+        aria-label={skill.name}
+        onClick={() => setSelectedSkillId(skill.id)}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setSelectedSkillId(skill.id);
+          }
+        }}
+      >
+        <div className="skillCardMain">
+          <div className="skillCardHeader">
+            <strong>{skill.name}</strong>
+            {skill.version ? (
+              <span className="skillCardVersion">
+                {tr("skillVersionLabel", { version: skill.version })}
+              </span>
+            ) : null}
+          </div>
+          <p className="skillCardDescription">{skill.description}</p>
+          <div className="skillCardMeta">
+            <span className="skillTag source">
+              {skillSourceLabel(skill.sourceType)}
+            </span>
+            {skill.categoryId ? (
+              <span className="skillTag">
+                {categoryLabelById(skill.categoryId)}
+              </span>
+            ) : null}
+            {skill.tags.map((tag) => (
+              <span className="skillTag" key={tag}>
+                {tag}
+              </span>
+            ))}
+            {readOnly ? (
+              <span className="skillTag readOnly">{tr("skillReadOnly")}</span>
+            ) : null}
+          </div>
+        </div>
+        <div className="skillCardAside">
+          <span className={`skillStatusBadge ${statusClass}`.trim()}>
+            {skillStatusLabel(skill.status)}
+          </span>
+          {pendingReloadIds.has(skill.id) ? (
+            <span className="skillTag pending">{tr("skillPendingReload")}</span>
+          ) : null}
+          {skill.ownership === "user-managed" ? (
+            <button
+              className="linkButton"
+              onClick={(event) => {
+                event.stopPropagation();
+                void toggleSkill(skill.id, skill.status !== "enabled");
+              }}
+            >
+              {skill.status === "enabled"
+                ? tr("skillDisable")
+                : tr("skillEnable")}
+            </button>
+          ) : null}
+        </div>
+      </article>
+    );
+  }
+
+  function renderInstalledSkills() {
+    if (skillsLoading && !skillScan) {
+      return (
+        <div className="skillSkeleton" aria-busy="true">
+          <div className="skillSkeletonRow" />
+          <div className="skillSkeletonRow" />
+          <div className="skillSkeletonRow" />
+        </div>
+      );
+    }
+    if (skillsError) {
+      return (
+        <section className="notice warning">
+          <strong>{tr("skillsScanError", { error: skillsError })}</strong>
+          <button
+            className="secondaryButton"
+            onClick={() => setSkillsRefreshNonce((nonce) => nonce + 1)}
+          >
+            {tr("skillsRescan")}
+          </button>
+        </section>
+      );
+    }
+    const skills = skillScan?.skills ?? [];
+    const failures = skillScan?.failedSources ?? [];
+    if (skills.length === 0) {
+      return (
+        <div className="skillsComingSoon">
+          <PuzzlePieceIcon weight="duotone" />
+          <strong>{tr("skillsEmptyTitle")}</strong>
+          <span>{tr("skillsEmptyBody")}</span>
+        </div>
+      );
+    }
+    const query = skillSearch.trim().toLowerCase();
+    const visible = skills
+      .filter(
+        (skill) =>
+          skillSourceFilter === "all" ||
+          skill.sourceType === skillSourceFilter,
+      )
+      .filter(
+        (skill) =>
+          skillCategoryFilter === "all" ||
+          (skill.categoryId ?? "uncategorized") === skillCategoryFilter,
+      )
+      .filter(
+        (skill) =>
+          !query ||
+          skill.name.toLowerCase().includes(query) ||
+          skill.description.toLowerCase().includes(query),
+      )
+      .sort((a, b) => {
+        if (skillSort === "name-asc") return a.name.localeCompare(b.name);
+        if (skillSort === "name-desc") return b.name.localeCompare(a.name);
+        return Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0);
+      });
+    return (
+      <>
+        {failures.length > 0 ? (
+          <section className="notice warning skillsNotice">
+            <strong>
+              {tr("skillsPartialFailure", { count: failures.length })}
+            </strong>
+            <details>
+              <summary>{tr("skillsPartialFailureToggle")}</summary>
+              <ul>
+                {failures.map((failure) => (
+                  <li key={failure.path}>
+                    {failure.path}: {failure.reason}
+                  </li>
+                ))}
+              </ul>
+            </details>
+          </section>
+        ) : null}
+        {visible.length === 0 ? (
+          <div className="skillsComingSoon">
+            <MagnifyingGlassIcon weight="duotone" />
+            <strong>{tr("skillsNoMatches")}</strong>
+          </div>
+        ) : (
+          <div className="skillList">{visible.map(renderSkillCard)}</div>
+        )}
+      </>
+    );
+  }
+
+  function renderSkillDetailDrawer() {
+    if (!selectedSkillId) return null;
+    return (
+      <div
+        className="skillDrawerOverlay"
+        onClick={() => setSelectedSkillId(null)}
+      >
+        <aside
+          className="skillDrawer"
+          role="dialog"
+          aria-modal="true"
+          aria-label={skillDetail?.name ?? tr("skillsTabInstalled")}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <header className="skillDrawerHeader">
+            <div className="skillCardHeader">
+              <strong>{skillDetail?.name ?? "…"}</strong>
+              {skillDetail?.version ? (
+                <span className="skillCardVersion">
+                  {tr("skillVersionLabel", { version: skillDetail.version })}
+                </span>
+              ) : null}
+            </div>
+            <button
+              className="iconButton"
+              aria-label={tr("skillDetailClose")}
+              onClick={() => setSelectedSkillId(null)}
+            >
+              <XIcon weight="bold" />
+            </button>
+          </header>
+          <div className="skillDrawerBody">
+            {skillDetailLoading ? (
+              <div className="skillSkeleton" aria-busy="true">
+                <div className="skillSkeletonRow" />
+                <div className="skillSkeletonRow" />
+              </div>
+            ) : skillDetailError ? (
+              <section className="notice warning">
+                <strong>
+                  {tr("skillDetailError", { error: skillDetailError })}
+                </strong>
+              </section>
+            ) : skillDetail ? (
+              <>
+                {skillDetail.ownership !== "user-managed" ? (
+                  <section className="notice skillReadOnlyNote">
+                    <WarningIcon weight="bold" />
+                    <span>{tr("skillDetailReadOnlyNote")}</span>
+                  </section>
+                ) : (
+                  <div className="skillDrawerActions">
+                    <button
+                      className="secondaryButton"
+                      onClick={() =>
+                        void toggleSkill(
+                          skillDetail.id,
+                          skillDetail.status !== "enabled",
+                        )
+                      }
+                    >
+                      {skillDetail.status === "enabled"
+                        ? tr("skillDisable")
+                        : tr("skillEnable")}
+                    </button>
+                    {removeConfirmId === skillDetail.id ? (
+                      <>
+                        <span className="skillMuted">
+                          {tr("skillRemoveConfirm")}
+                        </span>
+                        <button
+                          className="linkButton danger"
+                          onClick={() => void confirmRemoveSkill(skillDetail.id)}
+                        >
+                          {tr("skillRemoveConfirmYes")}
+                        </button>
+                        <button
+                          className="linkButton"
+                          onClick={() => setRemoveConfirmId(null)}
+                        >
+                          {tr("skillCategoryCancel")}
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="linkButton danger"
+                        onClick={() => setRemoveConfirmId(skillDetail.id)}
+                      >
+                        {tr("skillRemove")}
+                      </button>
+                    )}
+                    <button
+                      className="linkButton"
+                      disabled={exportBusy}
+                      onClick={() => void exportCurrentSkill(skillDetail.id)}
+                    >
+                      {tr("skillExport")}
+                    </button>
+                  </div>
+                )}
+                {pendingReloadIds.has(skillDetail.id) ? (
+                  <section className="notice skillPendingNote">
+                    <span>{tr("skillPendingReloadNote")}</span>
+                  </section>
+                ) : null}
+                {exportResult ? (
+                  <section className="notice skillExportResult">
+                    <strong>{tr("skillExportDone")}</strong>
+                    <div className="skillInstallPath">
+                      {exportResult.zipPath}
+                    </div>
+                    <div className="skillChecksum">
+                      SHA-256: {exportResult.sha256}
+                    </div>
+                    <button
+                      className="linkButton"
+                      onClick={() =>
+                        void navigator.clipboard?.writeText(exportResult.sha256)
+                      }
+                    >
+                      {tr("skillExportCopyChecksum")}
+                    </button>
+                    {exportResult.warnings.length > 0 ? (
+                      <ul className="skillScriptList">
+                        {exportResult.warnings.map((warning, index) => (
+                          <li key={`${warning.code}-${index}`}>
+                            {warning.path
+                              ? `${warning.path}: ${warning.message}`
+                              : warning.message}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </section>
+                ) : null}
+                {skillDetail.markdownBody ? (
+                  <section className="skillDrawerSection">
+                    <h3>{tr("skillDetailDescription")}</h3>
+                    <MarkdownContent
+                      value={skillDetail.markdownBody}
+                      onOpenLink={(url) => void openUrl(url)}
+                    />
+                  </section>
+                ) : (
+                  <p className="skillCardDescription">
+                    {skillDetail.description}
+                  </p>
+                )}
+                <section className="skillDrawerSection">
+                  <dl className="skillDetailGrid">
+                    <div>
+                      <dt>{tr("skillDetailSource")}</dt>
+                      <dd>{skillSourceLabel(skillDetail.sourceType)}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailStatus")}</dt>
+                      <dd>{skillStatusLabel(skillDetail.status)}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailFileCount")}</dt>
+                      <dd>{skillDetail.fileCount}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailSize")}</dt>
+                      <dd>{formatDataSize(skillDetail.totalSizeBytes)}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailInstalledAt")}</dt>
+                      <dd>{formatSkillTime(skillDetail.installedAt)}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailUpdatedAt")}</dt>
+                      <dd>{formatSkillTime(skillDetail.updatedAt)}</dd>
+                    </div>
+                    <div className="skillDetailWide">
+                      <dt>{tr("skillDetailChecksum")}</dt>
+                      <dd className="skillChecksum">
+                        {skillDetail.checksum ?? tr("skillDetailChecksumNA")}
+                      </dd>
+                    </div>
+                    <div className="skillDetailWide">
+                      <dt>{tr("skillDetailInstallPath")}</dt>
+                      <dd className="skillInstallPath">
+                        {skillDetail.installPath}
+                      </dd>
+                    </div>
+                  </dl>
+                </section>
+                <section className="skillDrawerSection">
+                  <h3>{tr("skillDetailCategory")}</h3>
+                  <select
+                    className="skillSelect"
+                    value={skillDetail.categoryId ?? "uncategorized"}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      void runSkillMutation(() =>
+                        setSkillCategory(
+                          skillDetail.id,
+                          value === "uncategorized" ? null : value,
+                        ),
+                      );
+                    }}
+                  >
+                    {(skillScan?.categories ?? [])
+                      .filter((category) => !category.archived)
+                      .map((category) => (
+                        <option key={category.id} value={category.id}>
+                          {categoryLabel(category)}
+                        </option>
+                      ))}
+                  </select>
+                  <h3>{tr("skillDetailTags")}</h3>
+                  <div className="skillTagEditor">
+                    <input
+                      type="text"
+                      value={skillTagDraft}
+                      placeholder={tr("skillTagsPlaceholder")}
+                      onChange={(event) => setSkillTagDraft(event.target.value)}
+                    />
+                    <button
+                      className="secondaryButton"
+                      onClick={() =>
+                        void runSkillMutation(() =>
+                          setSkillTags(
+                            skillDetail.id,
+                            skillTagDraft
+                              .split(",")
+                              .map((tag) => tag.trim())
+                              .filter(Boolean),
+                          ),
+                        )
+                      }
+                    >
+                      {tr("skillTagsSave")}
+                    </button>
+                  </div>
+                  {skillCategoryError ? (
+                    <p className="skillMuted">{skillCategoryError}</p>
+                  ) : null}
+                </section>
+                <section className="skillDrawerSection">
+                  <h3>{tr("skillDetailScripts")}</h3>
+                  {skillDetail.scripts.length > 0 ? (
+                    <>
+                      <section className="notice warning skillScriptsWarning">
+                        <WarningIcon weight="bold" />
+                        <span>
+                          {tr("skillDetailScriptsWarning", {
+                            count: skillDetail.scripts.length,
+                          })}
+                        </span>
+                      </section>
+                      <ul className="skillScriptList">
+                        {skillDetail.scripts.map((script) => (
+                          <li key={script}>{script}</li>
+                        ))}
+                      </ul>
+                    </>
+                  ) : (
+                    <p className="skillMuted">{tr("skillDetailNoScripts")}</p>
+                  )}
+                </section>
+                <section className="skillDrawerSection">
+                  <h3>{tr("skillDetailFiles")}</h3>
+                  {skillDetail.truncated ? (
+                    <p className="skillMuted">{tr("skillDetailTruncated")}</p>
+                  ) : null}
+                  <ul className="skillFileList">
+                    {skillDetail.files.map((file) => (
+                      <li key={file.relativePath}>
+                        <span className={`skillFileKind ${file.kind}`}>
+                          {fileKindLabel(file.kind)}
+                        </span>
+                        <span className="skillFilePath">
+                          {file.relativePath}
+                        </span>
+                        {file.isExecutable ? (
+                          <span className="skillTag readOnly">
+                            {tr("skillFileExecutable")}
+                          </span>
+                        ) : null}
+                        <span className="skillFileSize">
+                          {formatDataSize(file.sizeBytes)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              </>
+            ) : null}
+          </div>
+        </aside>
+      </div>
+    );
+  }
+
+  function renderCategoryManager() {
+    if (!showCategoryManager) return null;
+    const categories = skillScan?.categories ?? [];
+    const activeCategories = categories.filter((category) => !category.archived);
+    return (
+      <section className="categoryManager">
+        <div className="categoryManagerHeader">
+          <h3>{tr("skillCategoryManagerTitle")}</h3>
+          <button
+            className="iconButton"
+            aria-label={tr("skillDetailClose")}
+            onClick={() => setShowCategoryManager(false)}
+          >
+            <XIcon weight="bold" />
+          </button>
+        </div>
+        <div className="categoryCreate">
+          <input
+            type="text"
+            value={newCategoryName}
+            placeholder={tr("skillCategoryNew")}
+            onChange={(event) => setNewCategoryName(event.target.value)}
+          />
+          <button
+            className="secondaryButton"
+            disabled={!newCategoryName.trim()}
+            onClick={() =>
+              void runSkillMutation(async () => {
+                await createCategory(newCategoryName.trim());
+                setNewCategoryName("");
+              })
+            }
+          >
+            {tr("skillCategoryAdd")}
+          </button>
+        </div>
+        {skillCategoryError ? (
+          <p className="skillMuted">{skillCategoryError}</p>
+        ) : null}
+        <ul className="categoryList">
+          {categories.map((category) => {
+            const isPreset = category.type === "preset";
+            const renaming = renamingCategoryId === category.id;
+            const deleting = deletingCategoryId === category.id;
+            return (
+              <li
+                key={category.id}
+                className={category.archived ? "archived" : ""}
+              >
+                <div className="categoryRow">
+                  {renaming ? (
+                    <>
+                      <input
+                        type="text"
+                        value={renameCategoryValue}
+                        onChange={(event) =>
+                          setRenameCategoryValue(event.target.value)
+                        }
+                      />
+                      <button
+                        className="secondaryButton"
+                        disabled={!renameCategoryValue.trim()}
+                        onClick={() =>
+                          void runSkillMutation(async () => {
+                            await renameCategory(
+                              category.id,
+                              renameCategoryValue.trim(),
+                            );
+                            setRenamingCategoryId(null);
+                          })
+                        }
+                      >
+                        {tr("skillCategorySave")}
+                      </button>
+                      <button
+                        className="linkButton"
+                        onClick={() => setRenamingCategoryId(null)}
+                      >
+                        {tr("skillCategoryCancel")}
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="categoryName">
+                        {categoryLabel(category)}
+                      </span>
+                      <span className="skillTag">
+                        {isPreset
+                          ? tr("skillCategoryPresetBadge")
+                          : tr("skillCategoryCustomBadge")}
+                      </span>
+                      {category.archived ? (
+                        <span className="skillTag readOnly">
+                          {tr("skillCategoryArchivedBadge")}
+                        </span>
+                      ) : null}
+                      {!isPreset ? (
+                        <div className="categoryActions">
+                          <button
+                            className="linkButton"
+                            onClick={() => {
+                              setRenamingCategoryId(category.id);
+                              setRenameCategoryValue(category.name);
+                            }}
+                          >
+                            {tr("skillCategoryRename")}
+                          </button>
+                          <button
+                            className="linkButton"
+                            onClick={() =>
+                              void runSkillMutation(() =>
+                                archiveCategory(category.id, !category.archived),
+                              )
+                            }
+                          >
+                            {category.archived
+                              ? tr("skillCategoryUnarchive")
+                              : tr("skillCategoryArchive")}
+                          </button>
+                          <button
+                            className="linkButton danger"
+                            onClick={() => {
+                              setDeletingCategoryId(category.id);
+                              setDeleteMigrateTo("");
+                            }}
+                          >
+                            {tr("skillCategoryDelete")}
+                          </button>
+                        </div>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+                {deleting ? (
+                  <div className="categoryDelete">
+                    <span>{tr("skillCategoryDeleteMigrate")}</span>
+                    <select
+                      className="skillSelect"
+                      value={deleteMigrateTo}
+                      onChange={(event) =>
+                        setDeleteMigrateTo(event.target.value)
+                      }
+                    >
+                      <option value="">{tr("skillCategoryUncategorized")}</option>
+                      {activeCategories
+                        .filter((item) => item.id !== category.id)
+                        .map((item) => (
+                          <option key={item.id} value={item.id}>
+                            {categoryLabel(item)}
+                          </option>
+                        ))}
+                    </select>
+                    <button
+                      className="secondaryButton"
+                      onClick={() =>
+                        void runSkillMutation(async () => {
+                          await deleteCategory(
+                            category.id,
+                            deleteMigrateTo || null,
+                          );
+                          setDeletingCategoryId(null);
+                        })
+                      }
+                    >
+                      {tr("skillCategoryDeleteConfirm")}
+                    </button>
+                    <button
+                      className="linkButton"
+                      onClick={() => setDeletingCategoryId(null)}
+                    >
+                      {tr("skillCategoryCancel")}
+                    </button>
+                  </div>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      </section>
+    );
+  }
+
+  function resetInstallResults() {
+    setInstallPlan(null);
+    setSelectedInstallNames(new Set());
+    setInstallReplace(false);
+    setInstallSummary(null);
+    setSkillInstallProgress(null);
+    setInstallError("");
+  }
+
+  function openInstallDialog() {
+    setInstallKind("dir");
+    setInstallLocation("");
+    resetInstallResults();
+    setShowInstallDialog(true);
+  }
+
+  async function pickInstallSource() {
+    try {
+      const selected = await openFileDialog(
+        installKind === "dir"
+          ? { directory: true }
+          : { filters: [{ name: "Zip", extensions: ["zip"] }] },
+      );
+      if (typeof selected === "string") {
+        setInstallLocation(selected);
+        resetInstallResults();
+      }
+    } catch (error) {
+      setInstallError(String(error));
+    }
+  }
+
+  async function previewInstall() {
+    if (!installLocation.trim()) return;
+    setInstallBusy(true);
+    resetInstallResults();
+    try {
+      const plan = await validateSkillSource(installKind, installLocation.trim());
+      setInstallPlan(plan);
+      setSelectedInstallNames(new Set(plan.map((item) => item.targetName)));
+    } catch (error) {
+      setInstallError(String(error));
+    } finally {
+      setInstallBusy(false);
+    }
+  }
+
+  async function doInstall() {
+    if (!installPlan || installPlan.length === 0) return;
+    const single = installPlan.length === 1;
+    const names = single
+      ? []
+      : installPlan
+          .map((item) => item.targetName)
+          .filter((name) => selectedInstallNames.has(name));
+    if (!single && names.length === 0) return;
+    const replace = single ? installPlan[0].conflict : installReplace;
+    setInstallBusy(true);
+    setInstallError("");
+    setSkillInstallProgress(null);
+    trackSkillEvent("skill_install_started", { kind: installKind });
+    try {
+      const summary = await installSkill(
+        installKind,
+        installLocation.trim(),
+        replace,
+        names,
+      );
+      setSkillsRefreshNonce((nonce) => nonce + 1);
+      trackSkillEvent("skill_install_completed", {
+        kind: installKind,
+        result: "ok",
+        count: summary.installed.length,
+      });
+      if (
+        single &&
+        summary.installed.length === 1 &&
+        summary.skipped.length === 0 &&
+        summary.failed.length === 0
+      ) {
+        setShowInstallDialog(false);
+      } else {
+        setInstallSummary(summary);
+      }
+    } catch (error) {
+      setInstallError(String(error));
+      trackSkillEvent("skill_install_failed", {
+        kind: installKind,
+        result: "error",
+      });
+    } finally {
+      setInstallBusy(false);
+    }
+  }
+
+  function renderInstallDialog() {
+    if (!showInstallDialog) return null;
+    const singlePreview =
+      installPlan && installPlan.length === 1 ? installPlan[0] : null;
+    const collection =
+      installPlan && installPlan.length > 1 ? installPlan : null;
+    return (
+      <div
+        className="skillDrawerOverlay skillModalOverlay"
+        onClick={() => setShowInstallDialog(false)}
+      >
+        <div
+          className="skillModal"
+          role="dialog"
+          aria-modal="true"
+          aria-label={tr("skillInstallTitle")}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <header className="skillDrawerHeader">
+            <strong>{tr("skillInstallTitle")}</strong>
+            <button
+              className="iconButton"
+              aria-label={tr("skillDetailClose")}
+              onClick={() => setShowInstallDialog(false)}
+            >
+              <XIcon weight="bold" />
+            </button>
+          </header>
+          <div className="skillModalBody">
+            <div className="skillInstallSource">
+              <select
+                className="skillSelect"
+                value={installKind}
+                onChange={(event) => {
+                  setInstallKind(event.target.value as SkillInstallSourceKind);
+                  resetInstallResults();
+                }}
+              >
+                <option value="dir">{tr("skillInstallFromDir")}</option>
+                <option value="zip">{tr("skillInstallFromZip")}</option>
+                <option value="git">{tr("skillInstallFromGit")}</option>
+              </select>
+              <input
+                type="text"
+                className="skillInstallInput"
+                value={installLocation}
+                placeholder={
+                  installKind === "dir"
+                    ? tr("skillInstallDirPlaceholder")
+                    : installKind === "zip"
+                      ? tr("skillInstallZipPlaceholder")
+                      : tr("skillInstallGitPlaceholder")
+                }
+                onChange={(event) => {
+                  setInstallLocation(event.target.value);
+                  resetInstallResults();
+                }}
+              />
+              {installKind !== "git" ? (
+                <button
+                  className="secondaryButton"
+                  onClick={() => void pickInstallSource()}
+                >
+                  {tr("skillInstallBrowse")}
+                </button>
+              ) : null}
+              <button
+                className="secondaryButton"
+                disabled={!installLocation.trim() || installBusy}
+                onClick={() => void previewInstall()}
+              >
+                {tr("skillInstallPreview")}
+              </button>
+            </div>
+            {installError ? (
+              <section className="notice warning">
+                <strong>{installError}</strong>
+              </section>
+            ) : null}
+            {installBusy && skillInstallProgress ? (
+              <div className="skillInstallProgress">
+                <span>
+                  {tr(
+                    `skillInstallStage_${skillInstallProgress.stage}` as Parameters<
+                      typeof tr
+                    >[0],
+                  )}
+                  {typeof skillInstallProgress.percent === "number" &&
+                  skillInstallProgress.stage === "downloading"
+                    ? ` ${skillInstallProgress.percent}%`
+                    : ""}
+                </span>
+                <div className="skillProgressTrack">
+                  <div
+                    className="skillProgressBar"
+                    style={{
+                      width: `${
+                        skillInstallProgress.stage === "complete"
+                          ? 100
+                          : (skillInstallProgress.percent ?? 20)
+                      }%`,
+                    }}
+                  />
+                </div>
+              </div>
+            ) : null}
+            {installSummary ? (
+              <>
+                <section className="notice">
+                  <strong>
+                    {tr("skillInstallSummary", {
+                      installed: installSummary.installed.length,
+                      skipped: installSummary.skipped.length,
+                      failed: installSummary.failed.length,
+                    })}
+                  </strong>
+                  {installSummary.failed.length > 0 ? (
+                    <ul className="skillScriptList">
+                      {installSummary.failed.map((item) => (
+                        <li key={item.name}>
+                          {item.name}: {item.reason}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </section>
+                <div className="skillDrawerActions">
+                  <button
+                    className="primaryButton"
+                    onClick={() => setShowInstallDialog(false)}
+                  >
+                    {tr("skillInstallClose")}
+                  </button>
+                </div>
+              </>
+            ) : singlePreview ? (
+              <>
+                <div className="skillDrawerSection">
+                  <div className="skillCardHeader">
+                    <strong>{singlePreview.name}</strong>
+                    {singlePreview.version ? (
+                      <span className="skillCardVersion">
+                        {tr("skillVersionLabel", {
+                          version: singlePreview.version,
+                        })}
+                      </span>
+                    ) : null}
+                  </div>
+                  <p className="skillCardDescription">
+                    {singlePreview.description}
+                  </p>
+                  <dl className="skillDetailGrid">
+                    <div className="skillDetailWide">
+                      <dt>{tr("skillInstallTarget")}</dt>
+                      <dd className="skillInstallPath">
+                        {singlePreview.targetPath}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailFileCount")}</dt>
+                      <dd>{singlePreview.fileCount}</dd>
+                    </div>
+                    <div>
+                      <dt>{tr("skillDetailSize")}</dt>
+                      <dd>{formatDataSize(singlePreview.totalSizeBytes)}</dd>
+                    </div>
+                  </dl>
+                </div>
+                {singlePreview.warnings.length > 0 ? (
+                  <section className="notice warning">
+                    <strong>{tr("skillInstallRisks")}</strong>
+                    <ul className="skillScriptList">
+                      {singlePreview.warnings.map((warning, index) => (
+                        <li key={`${warning.code}-${index}`}>
+                          {warning.path
+                            ? `${warning.path}: ${warning.message}`
+                            : warning.message}
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
+                ) : null}
+                {singlePreview.conflict ? (
+                  <section className="notice warning">
+                    <strong>{tr("skillInstallConflict")}</strong>
+                  </section>
+                ) : null}
+                <div className="skillDrawerActions">
+                  <button
+                    className="primaryButton"
+                    disabled={installBusy}
+                    onClick={() => void doInstall()}
+                  >
+                    {singlePreview.conflict
+                      ? tr("skillInstallReplace")
+                      : tr("skillInstallConfirm")}
+                  </button>
+                  <button
+                    className="linkButton"
+                    onClick={() => setShowInstallDialog(false)}
+                  >
+                    {tr("skillCategoryCancel")}
+                  </button>
+                </div>
+              </>
+            ) : collection ? (
+              <>
+                <div className="skillsToolbar">
+                  <span className="skillsCount">
+                    {tr("skillInstallFound", { count: collection.length })}
+                  </span>
+                  <label className="skillInlineCheck">
+                    <input
+                      type="checkbox"
+                      checked={selectedInstallNames.size === collection.length}
+                      onChange={(event) =>
+                        setSelectedInstallNames(
+                          event.target.checked
+                            ? new Set(collection.map((item) => item.targetName))
+                            : new Set(),
+                        )
+                      }
+                    />
+                    {tr("skillInstallSelectAll")}
+                  </label>
+                  <label className="skillInlineCheck">
+                    <input
+                      type="checkbox"
+                      checked={installReplace}
+                      onChange={(event) =>
+                        setInstallReplace(event.target.checked)
+                      }
+                    />
+                    {tr("skillInstallReplaceExisting")}
+                  </label>
+                </div>
+                <ul className="skillPlanList">
+                  {collection.map((item) => (
+                    <li key={item.targetName}>
+                      <label className="skillInlineCheck">
+                        <input
+                          type="checkbox"
+                          checked={selectedInstallNames.has(item.targetName)}
+                          onChange={(event) =>
+                            setSelectedInstallNames((previous) => {
+                              const next = new Set(previous);
+                              if (event.target.checked) {
+                                next.add(item.targetName);
+                              } else {
+                                next.delete(item.targetName);
+                              }
+                              return next;
+                            })
+                          }
+                        />
+                        <span className="skillPlanName">{item.name}</span>
+                      </label>
+                      <span className="skillFileSize">
+                        {formatDataSize(item.totalSizeBytes)}
+                      </span>
+                      {item.conflict ? (
+                        <span className="skillTag pending">
+                          {tr("skillInstallExists")}
+                        </span>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+                <div className="skillDrawerActions">
+                  <button
+                    className="primaryButton"
+                    disabled={installBusy || selectedInstallNames.size === 0}
+                    onClick={() => void doInstall()}
+                  >
+                    {tr("skillInstallSelected", {
+                      count: selectedInstallNames.size,
+                    })}
+                  </button>
+                  <button
+                    className="linkButton"
+                    onClick={() => setShowInstallDialog(false)}
+                  >
+                    {tr("skillCategoryCancel")}
+                  </button>
+                </div>
+              </>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  function renderTrashPanel() {
+    if (!showTrash) return null;
+    return (
+      <section className="categoryManager">
+        <div className="categoryManagerHeader">
+          <h3>{tr("skillTrashTitle")}</h3>
+          <button
+            className="iconButton"
+            aria-label={tr("skillDetailClose")}
+            onClick={() => setShowTrash(false)}
+          >
+            <XIcon weight="bold" />
+          </button>
+        </div>
+        {trashLoading ? (
+          <p className="skillMuted">{tr("skillsScanning")}</p>
+        ) : recoverableSkills.length === 0 ? (
+          <p className="skillMuted">{tr("skillTrashEmpty")}</p>
+        ) : (
+          <ul className="categoryList">
+            {recoverableSkills.map((item) => (
+              <li key={item.id}>
+                <div className="categoryRow">
+                  <span className="categoryName">{item.name}</span>
+                  <div className="categoryActions">
+                    <button
+                      className="linkButton"
+                      onClick={() => void restoreSkillAction(item.id)}
+                    >
+                      {tr("skillRestore")}
+                    </button>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    );
+  }
+
+  function renderSkillsContent() {
+    const skills = skillScan?.skills ?? [];
+    const failureCount = skillScan?.failedSources.length ?? 0;
+    const overview = {
+      total: skills.length,
+      enabled: skills.filter((skill) => skill.status === "enabled").length,
+      system: skills.filter((skill) => skill.sourceType === "system").length,
+      issues:
+        failureCount +
+        skills.filter((skill) => skill.status === "error").length,
+    };
+    const tab = (
+      key: "installed" | "library" | "distribution",
+      label: string,
+      comingSoon = false,
+    ) => (
+      <button
+        role="tab"
+        className={`skillsTab ${skillsTab === key ? "selected" : ""}`.trim()}
+        aria-selected={skillsTab === key}
+        onClick={() => {
+          setSkillsTab(key);
+          if (key !== "installed") setSelectedSkillId(null);
+        }}
+      >
+        {label}
+        {comingSoon ? (
+          <span className="skillsTabBadge">{tr("skillsTabComingSoon")}</span>
+        ) : null}
+      </button>
+    );
+    return (
+      <section className="homeContent skillsView">
+        <p className="sectionKicker">{tr("workspace")}</p>
+        <h1>{tr("skillsTitle")}</h1>
+        <p className="lead homeLead">{tr("skillsLead")}</p>
+        <div className="skillsTabs" role="tablist">
+          {tab("installed", tr("skillsTabInstalled"))}
+          {tab("library", tr("skillsTabLibrary"))}
+          {tab("distribution", tr("skillsTabDistribution"))}
+        </div>
+        {skillsTab === "installed" ? (
+          <>
+            <div className="skillOverview">
+              <div className="skillMetric">
+                <strong>{overview.total}</strong>
+                <span>{tr("skillsOverviewTotal")}</span>
+              </div>
+              <div className="skillMetric">
+                <strong>{overview.enabled}</strong>
+                <span>{tr("skillsOverviewEnabled")}</span>
+              </div>
+              <div className="skillMetric">
+                <strong>{overview.system}</strong>
+                <span>{tr("skillsOverviewSystem")}</span>
+              </div>
+              <div className="skillMetric">
+                <strong>{overview.issues}</strong>
+                <span>{tr("skillsOverviewIssues")}</span>
+              </div>
+            </div>
+            <div className="skillsToolbar">
+              <label className="skillSearch">
+                <MagnifyingGlassIcon weight="bold" />
+                <input
+                  type="search"
+                  value={skillSearch}
+                  placeholder={tr("skillsSearchPlaceholder")}
+                  onChange={(event) => setSkillSearch(event.target.value)}
+                />
+              </label>
+              <select
+                className="skillSelect"
+                aria-label={tr("skillsFilterSource")}
+                value={skillSourceFilter}
+                onChange={(event) =>
+                  setSkillSourceFilter(
+                    event.target.value as typeof skillSourceFilter,
+                  )
+                }
+              >
+                <option value="all">{tr("skillsFilterAllSources")}</option>
+                <option value="user">{tr("skillSourceUser")}</option>
+                <option value="system">{tr("skillSourceSystem")}</option>
+              </select>
+              <select
+                className="skillSelect"
+                aria-label={tr("skillsFilterCategory")}
+                value={skillCategoryFilter}
+                onChange={(event) => setSkillCategoryFilter(event.target.value)}
+              >
+                <option value="all">{tr("skillsFilterAllCategories")}</option>
+                {(skillScan?.categories ?? [])
+                  .filter((category) => !category.archived)
+                  .map((category) => (
+                    <option key={category.id} value={category.id}>
+                      {categoryLabel(category)}
+                    </option>
+                  ))}
+              </select>
+              <select
+                className="skillSelect"
+                aria-label={tr("skillsSortLabel")}
+                value={skillSort}
+                onChange={(event) =>
+                  setSkillSort(event.target.value as typeof skillSort)
+                }
+              >
+                <option value="name-asc">{tr("skillsSortNameAsc")}</option>
+                <option value="name-desc">{tr("skillsSortNameDesc")}</option>
+                <option value="updated-desc">{tr("skillsSortUpdated")}</option>
+              </select>
+              <button
+                className="primaryButton"
+                onClick={() => openInstallDialog()}
+              >
+                {tr("skillInstall")}
+              </button>
+              <button
+                className="secondaryButton"
+                onClick={() => setShowCategoryManager((open) => !open)}
+              >
+                {tr("skillManageCategories")}
+              </button>
+              <button
+                className="secondaryButton"
+                onClick={() => setShowTrash((open) => !open)}
+              >
+                {tr("skillTrashTitle")}
+              </button>
+              <button
+                className="secondaryButton"
+                disabled={skillsLoading}
+                onClick={() => {
+                  setPendingReloadIds(new Set());
+                  setSkillsRefreshNonce((nonce) => nonce + 1);
+                }}
+              >
+                <ArrowsClockwiseIcon weight="bold" />
+                {tr("skillsRescan")}
+              </button>
+            </div>
+            {skillCategoryError ? (
+              <section className="notice warning">
+                <strong>{skillCategoryError}</strong>
+              </section>
+            ) : null}
+            {renderCategoryManager()}
+            {renderTrashPanel()}
+            {renderInstalledSkills()}
+            {renderSkillDetailDrawer()}
+            {renderInstallDialog()}
+          </>
+        ) : skillsTab === "library" ? (
+          renderSkillLibrary()
+        ) : (
+          renderMyDistribution()
+        )}
+      </section>
+    );
+  }
+
   function renderHomeContent() {
     const version = appStatus?.localVersion || tr("versionUnavailable");
     const buildTime = formatBuildTime(locale);
@@ -2477,13 +4409,30 @@ function App() {
             </div>
           </div>
           <nav className="homeNav" aria-label={tr("homeNavigation")}>
-            <button className="selected">
+            <button
+              className={activeView === "home" ? "selected" : ""}
+              aria-current={activeView === "home" ? "page" : undefined}
+              onClick={() => setActiveView("home")}
+            >
               <HouseIcon weight="bold" />
               {tr("home")}
             </button>
             <button onClick={openSetupFromHome}>
               <CubeIcon />
               {tr("codexSetup")}
+            </button>
+            <button
+              className={activeView === "skills" ? "selected" : ""}
+              aria-current={activeView === "skills" ? "page" : undefined}
+              onClick={() => {
+                if (activeView !== "skills") {
+                  trackSkillEvent("skill_manager_opened");
+                }
+                setActiveView("skills");
+              }}
+            >
+              <PuzzlePieceIcon weight="bold" />
+              {tr("skillManagement")}
             </button>
             <button onClick={() => void handleOpenConsole()}>
               <UserCircleIcon />
@@ -2564,6 +4513,9 @@ function App() {
               <span>{tr("signOut")}</span>
             </button>
           </header>
+          {activeView === "skills" ? (
+            renderSkillsContent()
+          ) : (
           <section className="homeContent">
             <p className="sectionKicker">{tr("workspace")}</p>
             <h1>{tr("homeTitle")}</h1>
@@ -2932,6 +4884,7 @@ function App() {
               </div>
             </section>
           </section>
+          )}
         </section>
       </main>
       {confirmState ? (

@@ -4,6 +4,7 @@ mod codex_app;
 mod codex_config;
 mod desktop_auth;
 mod http_client;
+mod skills;
 
 use codex_app::{
     install as install_codex_app, is_installed_app_running, local_status as local_codex_app_status,
@@ -19,6 +20,12 @@ use desktop_auth::{
     exchange_desktop_authorization, installation_id, refresh_desktop_state, restore_desktop_state,
     save_desktop_api_key, save_desktop_session, DesktopAccountSummary, DesktopBootstrapKey,
     DesktopNotificationList, DesktopSession, StoredDesktopState,
+};
+use skills::{
+    archive_category, create_category, delete_category, disable_skill, enable_skill,
+    export_skill, get_skill_detail, install_skill, list_recoverable_skills, remove_skill,
+    rename_category, reorder_categories, restore_skill, scan_skills, set_skill_category,
+    set_skill_tags, set_skills_category, validate_skill_source,
 };
 use futures_util::StreamExt;
 use std::{
@@ -669,6 +676,7 @@ fn main() {
             }
         }))
         .plugin(tauri_plugin_deep_link::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -710,6 +718,24 @@ fn main() {
             open_notification_window,
             open_notification_browser,
             download_and_open_desktop_installer,
+            scan_skills,
+            get_skill_detail,
+            set_skill_category,
+            set_skills_category,
+            set_skill_tags,
+            create_category,
+            rename_category,
+            reorder_categories,
+            archive_category,
+            delete_category,
+            disable_skill,
+            enable_skill,
+            remove_skill,
+            restore_skill,
+            list_recoverable_skills,
+            validate_skill_source,
+            install_skill,
+            export_skill,
             open_devtools
         ])
         .build(tauri::generate_context!())

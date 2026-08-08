@@ -10,5 +10,5 @@
     "notification-detail",
     "notification-browser"
   ],
-  "permissions": ["core:default", "opener:default", "deep-link:default", "updater:default", "process:default"]
+  "permissions": ["core:default", "opener:default", "deep-link:default", "updater:default", "process:default", "dialog:default"]
 }
