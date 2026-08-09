@@ -1,20 +1,22 @@
-// Phase-2 Skill Library / My Distribution client.
-//
-// DTOs mirror the server contract in docs/codex-skill-service/api-contract.md.
-// The server is not built yet, so this ships a mock implementation. Swapping to
-// the real backend is a ONE-LINE change at the bottom of this file
-// (`skillLibraryClient = ...`); the real client can call Rust commands or fetch
-// api.autogateway.cc while conforming to the same `SkillLibraryClient` interface.
-// UI code must treat enum values as open (unknown fallback) per the contract's
-// evolution rules and never parse `nextCursor`.
+import { invoke } from "@tauri-apps/api/core";
+import type { SkillInstallSummary } from "./desktop";
 
-export type SkillVisibility = "private" | "unlisted" | "public";
-export type SkillScanRisk = "low" | "medium" | "high" | "unknown";
+export type SkillScanRisk =
+  | "none"
+  | "low"
+  | "medium"
+  | "high"
+  | "blocked"
+  | "unknown";
 
 export type SkillCategoryDto = {
   publicId: string;
+  parentPublicId: string;
   slug: string;
   name: string;
+  description: string;
+  sortOrder: number;
+  enabled: boolean;
 };
 
 export type SkillVersionDto = {
@@ -25,10 +27,10 @@ export type SkillVersionDto = {
   archiveSha256: string;
   archiveSize: number;
   fileCount: number;
-  changelog?: string;
+  changelog: string;
   scan: {
     scannerVersion: string;
-    risk: SkillScanRisk;
+    risk: SkillScanRisk | string;
     blockingFindings: number;
     warningFindings: number;
   };
@@ -42,9 +44,9 @@ export type PublicSkill = {
   name: string;
   displayName: string;
   description: string;
-  visibility: SkillVisibility;
+  visibility: string;
   status: string;
-  primaryCategory: SkillCategoryDto;
+  primaryCategory: SkillCategoryDto | null;
   tags: string[];
   latestPublishedVersion: SkillVersionDto | null;
   downloadCount: number;
@@ -52,244 +54,93 @@ export type PublicSkill = {
   updatedAt: string;
 };
 
-export type DownloadLicense = {
-  downloadUrl: string;
-  expiresAt: string;
-  archiveSha256: string;
-  archiveSize: number;
-  manifestSha256: string;
-  version: string;
+export type Paged<T> = {
+  items: T[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+  hasNext?: boolean;
+  hasPrevious?: boolean;
+  nextCursor: string | null;
 };
 
-export type ShareLink = {
-  publicId: string;
-  shareUrl: string;
-  expiresAt?: string;
-  maxUses?: number;
-  useCount: number;
-};
-
-export type Installation = {
-  publicId: string;
-  skillPublicId: string;
-  skillName: string;
-  versionPublicId: string;
-  version: string;
-  deviceAlias: string;
-  status: "installed" | "uninstalled";
-  enabled: boolean;
-  reportedAt: string;
-};
-
-export type Paged<T> = { items: T[]; nextCursor: string | null };
+export const skillCatalogPageSize = 20;
 
 export type CatalogQuery = {
   q?: string;
   category?: string;
   sort?: "popular" | "newest" | "updated";
-  cursor?: string;
-  limit?: number;
+  offset?: number;
 };
 
-export type UserSkillScope = "owned" | "shared" | "installed" | "all";
+export type SkillAdvisorMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export type SkillRecommendationResponse = {
+  reply: string;
+  recommendedPublicIds: string[];
+  needsMoreContext: boolean;
+  usedFallback: boolean;
+};
 
 export type SkillLibraryClient = {
-  listCategories(): Promise<SkillCategoryDto[]>;
-  listPublicSkills(query: CatalogQuery): Promise<Paged<PublicSkill>>;
-  getPublicSkill(publicId: string): Promise<PublicSkill>;
-  listPublicVersions(publicId: string): Promise<Paged<SkillVersionDto>>;
-  createDownloadLicense(
+  listCategories(locale: "en" | "zh"): Promise<SkillCategoryDto[]>;
+  listPublicSkills(
+    query: CatalogQuery,
+    locale: "en" | "zh",
+  ): Promise<Paged<PublicSkill>>;
+  installPublicSkill(
     publicId: string,
     versionPublicId: string,
-  ): Promise<DownloadLicense>;
-  listUserSkills(scope: UserSkillScope): Promise<Paged<PublicSkill>>;
-  listShareLinks(skillPublicId: string): Promise<Paged<ShareLink>>;
-  listInstallations(): Promise<Paged<Installation>>;
+    replace?: boolean,
+    categoryId?: string,
+    accessToken?: string,
+  ): Promise<SkillInstallSummary>;
+  reportUninstalled(id: string, accessToken: string): Promise<boolean>;
+  recommendSkills(
+    catalog: PublicSkill[],
+    messages: SkillAdvisorMessage[],
+    locale: "en" | "zh",
+    apiKey: string,
+    endpoint: string,
+  ): Promise<SkillRecommendationResponse>;
 };
 
-// --- Mock implementation -------------------------------------------------
-
-const MOCK_CATEGORIES: SkillCategoryDto[] = [
-  { publicId: "cat_dev", slug: "development", name: "Development & Engineering" },
-  { publicId: "cat_data", slug: "data", name: "Data & Documents" },
-  { publicId: "cat_design", slug: "design", name: "Design & Creative" },
-  { publicId: "cat_sec", slug: "security", name: "Security & Quality" },
-];
-
-function mockVersion(
-  skillPublicId: string,
-  version: string,
-  risk: SkillScanRisk,
-): SkillVersionDto {
-  return {
-    publicId: `skv_${skillPublicId}_${version}`,
-    skillPublicId,
-    version,
-    status: "published",
-    archiveSha256: "4b2f".padEnd(64, "0"),
-    archiveSize: 184320,
-    fileCount: 12,
-    changelog: "Improvements and fixes.",
-    scan: {
-      scannerVersion: "skill-scanner/1.0.0",
-      risk,
-      blockingFindings: 0,
-      warningFindings: risk === "low" ? 0 : 2,
-    },
-    publishedAt: "2026-08-05T00:00:00Z",
-  };
-}
-
-const MOCK_SKILLS: PublicSkill[] = [
-  {
-    publicId: "sk_release_notes",
-    owner: { publicId: "usr_openai", displayName: "AUTO Gateway" },
-    slug: "release-notes",
-    name: "release-notes",
-    displayName: "Release Notes",
-    description: "Generate release notes from repository changes.",
-    visibility: "public",
-    status: "active",
-    primaryCategory: MOCK_CATEGORIES[0],
-    tags: ["git", "documentation"],
-    latestPublishedVersion: mockVersion("sk_release_notes", "1.2.0", "low"),
-    downloadCount: 1280,
-    installCount: 940,
-    updatedAt: "2026-08-05T00:00:00Z",
-  },
-  {
-    publicId: "sk_pr_review",
-    owner: { publicId: "usr_openai", displayName: "AUTO Gateway" },
-    slug: "pr-review",
-    name: "pr-review",
-    displayName: "PR Review",
-    description: "Review pull requests for correctness and style.",
-    visibility: "public",
-    status: "active",
-    primaryCategory: MOCK_CATEGORIES[3],
-    tags: ["review", "quality"],
-    latestPublishedVersion: mockVersion("sk_pr_review", "0.9.1", "medium"),
-    downloadCount: 860,
-    installCount: 610,
-    updatedAt: "2026-08-06T00:00:00Z",
-  },
-  {
-    publicId: "sk_data_report",
-    owner: { publicId: "usr_community", displayName: "Community" },
-    slug: "data-report",
-    name: "data-report",
-    displayName: "Data Report",
-    description: "Summarize CSV and spreadsheet data into a report.",
-    visibility: "public",
-    status: "active",
-    primaryCategory: MOCK_CATEGORIES[1],
-    tags: ["data", "csv"],
-    latestPublishedVersion: mockVersion("sk_data_report", "2.0.0", "low"),
-    downloadCount: 540,
-    installCount: 300,
-    updatedAt: "2026-08-04T00:00:00Z",
-  },
-  {
-    publicId: "sk_mockups",
-    owner: { publicId: "usr_community", displayName: "Community" },
-    slug: "ui-mockups",
-    name: "ui-mockups",
-    displayName: "UI Mockups",
-    description: "Produce quick UI mockups and wireframes.",
-    visibility: "public",
-    status: "active",
-    primaryCategory: MOCK_CATEGORIES[2],
-    tags: ["design", "ui"],
-    latestPublishedVersion: mockVersion("sk_mockups", "1.0.3", "low"),
-    downloadCount: 410,
-    installCount: 220,
-    updatedAt: "2026-08-03T00:00:00Z",
-  },
-];
-
-const MOCK_INSTALLATIONS: Installation[] = [
-  {
-    publicId: "ins_1",
-    skillPublicId: "sk_release_notes",
-    skillName: "release-notes",
-    versionPublicId: "skv_sk_release_notes_1.2.0",
-    version: "1.2.0",
-    deviceAlias: "This Mac",
-    status: "installed",
-    enabled: true,
-    reportedAt: "2026-08-07T08:25:00Z",
-  },
-];
-
-const MOCK_SHARE_LINKS: ShareLink[] = [
-  {
-    publicId: "shr_1",
-    shareUrl: "https://autogateway.cc/skills/share#example",
-    expiresAt: "2026-09-07T00:00:00Z",
-    maxUses: 100,
-    useCount: 3,
-  },
-];
-
-function delay<T>(value: T, ms = 160): Promise<T> {
-  return new Promise((resolve) => setTimeout(() => resolve(value), ms));
-}
-
-export const mockSkillLibraryClient: SkillLibraryClient = {
-  listCategories: () => delay(MOCK_CATEGORIES),
-  listPublicSkills: (query) => {
-    const q = query.q?.trim().toLowerCase();
-    let items = MOCK_SKILLS.filter(
-      (skill) =>
-        (!query.category || skill.primaryCategory.slug === query.category) &&
-        (!q ||
-          skill.displayName.toLowerCase().includes(q) ||
-          skill.description.toLowerCase().includes(q)),
-    );
-    if (query.sort === "popular") {
-      items = [...items].sort((a, b) => b.downloadCount - a.downloadCount);
-    } else if (query.sort === "newest" || query.sort === "updated") {
-      items = [...items].sort((a, b) =>
-        b.updatedAt.localeCompare(a.updatedAt),
-      );
-    }
-    return delay({ items, nextCursor: null });
-  },
-  getPublicSkill: (publicId) => {
-    const skill = MOCK_SKILLS.find((item) => item.publicId === publicId);
-    return skill
-      ? delay(skill)
-      : Promise.reject(new Error("SKILL_NOT_FOUND"));
-  },
-  listPublicVersions: (publicId) => {
-    const skill = MOCK_SKILLS.find((item) => item.publicId === publicId);
-    const items = skill?.latestPublishedVersion
-      ? [skill.latestPublishedVersion]
-      : [];
-    return delay({ items, nextCursor: null });
-  },
-  createDownloadLicense: (publicId, versionPublicId) =>
-    delay({
-      downloadUrl: `https://mock.local/${publicId}/${versionPublicId}`,
-      expiresAt: "2026-08-07T08:20:00Z",
-      archiveSha256: "4b2f".padEnd(64, "0"),
-      archiveSize: 184320,
-      manifestSha256: "8c90".padEnd(64, "0"),
-      version: "1.2.0",
+export const skillLibraryClient: SkillLibraryClient = {
+  listCategories: (locale) =>
+    invoke<SkillCategoryDto[]>("list_ag_skill_categories", { locale }),
+  listPublicSkills: (query, locale) =>
+    invoke<Paged<PublicSkill>>("list_ag_skills", {
+      query: query.q,
+      category: query.category,
+      sort: query.sort,
+      offset: query.offset,
+      locale,
     }),
-  listUserSkills: (scope) => {
-    const items =
-      scope === "installed"
-        ? MOCK_SKILLS.slice(0, 1)
-        : MOCK_SKILLS.slice(0, 2);
-    return delay({ items, nextCursor: null });
-  },
-  listShareLinks: () => delay({ items: MOCK_SHARE_LINKS, nextCursor: null }),
-  listInstallations: () => delay({ items: MOCK_INSTALLATIONS, nextCursor: null }),
+  installPublicSkill: (
+    publicId,
+    versionPublicId,
+    replace = false,
+    categoryId,
+    accessToken = "",
+  ) =>
+    invoke<SkillInstallSummary>("install_ag_skill", {
+      publicId,
+      versionPublicId,
+      replace,
+      categoryId,
+      accessToken,
+    }),
+  reportUninstalled: (id, accessToken) =>
+    invoke<boolean>("report_ag_skill_uninstalled", { id, accessToken }),
+  recommendSkills: (catalog, messages, locale, apiKey, endpoint) =>
+    invoke<SkillRecommendationResponse>("recommend_ag_skills", {
+      catalog,
+      messages,
+      locale,
+      apiKey,
+      endpoint,
+    }),
 };
-
-// Swap point: replace with the real client when the server ships.
-export const skillLibraryClient: SkillLibraryClient = mockSkillLibraryClient;
-
-// True while the mock backs the library — the UI shows a "mock data" banner.
-export const skillLibraryIsMock = true;

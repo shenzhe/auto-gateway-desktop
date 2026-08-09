@@ -1,3 +1,6 @@
+use crate::codex_config::{
+    set_skill_enabled as set_codex_skill_enabled, skill_enablement_overrides,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
@@ -33,8 +36,8 @@ pub fn default_skills_dir() -> Result<PathBuf, String> {
     Ok(home.join(".codex").join("skills"))
 }
 
-// `Plugin`/`External`/`Autogateway`/`Team` are classified in later milestones
-// (plugin skills, external dirs, remote installs); kept for a stable wire enum.
+// Source variants share a stable wire enum so locally installed and remote
+// catalog skills can be managed through the same index.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -47,7 +50,6 @@ pub enum SourceType {
     Team,
 }
 
-// `SourceManaged` is assigned to plugin-owned skills in a later milestone.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -55,6 +57,16 @@ pub enum Ownership {
     UserManaged,
     SourceManaged,
     ReadOnly,
+}
+
+fn ownership_for_source(source_type: SourceType) -> Ownership {
+    match source_type {
+        SourceType::System => Ownership::ReadOnly,
+        SourceType::Plugin => Ownership::SourceManaged,
+        SourceType::User | SourceType::External | SourceType::Autogateway | SourceType::Team => {
+            Ownership::UserManaged
+        }
+    }
 }
 
 // `Error`/`SourceUnavailable` are surfaced by later milestones (detail scan,
@@ -180,7 +192,11 @@ fn strip_scalar(raw: &str) -> String {
 fn split_key_value(line: &str) -> Option<(String, String)> {
     let (key, value) = line.split_once(':')?;
     let key = key.trim();
-    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return None;
     }
     Some((key.to_string(), value.to_string()))
@@ -239,9 +255,9 @@ pub fn parse_frontmatter(markdown: &str) -> Result<SkillFrontmatter, String> {
     if !closed {
         return Err("SKILL.md frontmatter is not terminated with a closing fence".to_string());
     }
-    let name = name.filter(|value| !value.is_empty()).ok_or_else(|| {
-        "SKILL.md frontmatter is missing a name".to_string()
-    })?;
+    let name = name
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "SKILL.md frontmatter is missing a name".to_string())?;
     let description = description
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "SKILL.md frontmatter is missing a description".to_string())?;
@@ -418,13 +434,12 @@ pub fn scan_skills_in(dir: &Path) -> SkillScanResult {
         );
     }
 
-    result.skills.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    result
+        .skills
+        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     result
 }
 
-/// Scan the current user's Codex skills directory. Returns an empty result when
-/// the directory does not exist (Codex not installed or no skills yet) rather
-/// than surfacing an error to the UI.
 /// Scan the skills directory and merge in AUTO Gateway index data (stable ids,
 /// categories, tags), persisting the index when new skills are discovered.
 fn reconciled_scan(app: &tauri::AppHandle) -> Result<SkillScanResult, String> {
@@ -437,6 +452,16 @@ fn reconciled_scan(app: &tauri::AppHandle) -> Result<SkillScanResult, String> {
         save_index_at(&index_path, &index)?;
     }
     append_disabled_skills(&index, &mut result);
+    let enablement = skill_enablement_overrides()?;
+    for record in &mut result.skills {
+        let manifest_path = Path::new(&record.install_path).join(SKILL_MANIFEST_FILE);
+        if enablement
+            .get(manifest_path.to_string_lossy().as_ref())
+            .is_some_and(|enabled| !enabled)
+        {
+            record.status = SkillStatus::Disabled;
+        }
+    }
     result
         .skills
         .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
@@ -455,11 +480,22 @@ fn append_disabled_skills(index: &SkillIndex, result: &mut SkillScanResult) {
             continue;
         };
         let path = Path::new(quarantine_path);
+        let source_type = entry
+            .source_type
+            .as_deref()
+            .and_then(source_type_from_str)
+            .unwrap_or(SourceType::User);
+        let trust_level = match source_type {
+            SourceType::System => TrustLevel::System,
+            SourceType::Autogateway | SourceType::Team => TrustLevel::Verified,
+            SourceType::Plugin | SourceType::External => TrustLevel::KnownSource,
+            SourceType::User => TrustLevel::Unverified,
+        };
         match build_skill_record(
             path,
-            SourceType::User,
-            Ownership::UserManaged,
-            TrustLevel::Unverified,
+            source_type,
+            ownership_for_source(source_type),
+            trust_level,
             &result.scanned_at,
         ) {
             Ok(mut record) => {
@@ -685,6 +721,7 @@ const SKILL_INDEX_FILE: &str = "skills-index.json";
 const SKILL_INDEX_VERSION: u32 = 1;
 const UNCATEGORIZED_ID: &str = "uncategorized";
 const MAX_CATEGORY_NAME_LEN: usize = 40;
+const MAX_CATEGORY_REFERENCE_LEN: usize = 96;
 const MAX_TAGS_PER_SKILL: usize = 20;
 const MAX_TAG_LEN: usize = 40;
 
@@ -732,6 +769,10 @@ pub struct IndexEntry {
     pub tags: Vec<String>,
     #[serde(default)]
     pub source_type: Option<String>,
+    #[serde(default)]
+    pub source_public_id: Option<String>,
+    #[serde(default)]
+    pub source_version_public_id: Option<String>,
     // Disabled = moved out of the active skills dir into quarantine.
     #[serde(default)]
     pub disabled: bool,
@@ -803,6 +844,18 @@ fn source_type_str(source: SourceType) -> String {
     .to_string()
 }
 
+fn source_type_from_str(source: &str) -> Option<SourceType> {
+    match source {
+        "user" => Some(SourceType::User),
+        "system" => Some(SourceType::System),
+        "plugin" => Some(SourceType::Plugin),
+        "external" => Some(SourceType::External),
+        "autogateway" => Some(SourceType::Autogateway),
+        "team" => Some(SourceType::Team),
+        _ => None,
+    }
+}
+
 fn category_exists(index: &SkillIndex, id: &str) -> bool {
     index.categories.iter().any(|category| category.id == id)
 }
@@ -813,6 +866,24 @@ fn is_protected_category(index: &SkillIndex, id: &str) -> bool {
             .categories
             .iter()
             .any(|category| category.id == id && category.category_type == CategoryType::Preset)
+}
+
+fn normalize_category_reference(category_id: Option<String>) -> Result<Option<String>, String> {
+    let Some(category_id) = category_id else {
+        return Ok(None);
+    };
+    let category_id = category_id.trim();
+    if category_id.is_empty() {
+        return Ok(None);
+    }
+    if category_id.len() > MAX_CATEGORY_REFERENCE_LEN
+        || !category_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("the Skill category reference is invalid".to_string());
+    }
+    Ok(Some(category_id.to_string()))
 }
 
 fn normalize_tags(tags: Vec<String>) -> Vec<String> {
@@ -876,8 +947,8 @@ fn save_index_at(path: &Path, index: &SkillIndex) -> Result<(), String> {
         let backup = path.with_extension("json.bak");
         let _ = fs::copy(path, &backup);
     }
-    let serialized =
-        serde_json::to_string_pretty(index).map_err(|error| format!("serialize the skills index: {error}"))?;
+    let serialized = serde_json::to_string_pretty(index)
+        .map_err(|error| format!("serialize the skills index: {error}"))?;
     let temporary = parent.join(format!(".{SKILL_INDEX_FILE}.{}.tmp", Uuid::new_v4()));
     fs::write(&temporary, serialized.as_bytes())
         .map_err(|error| format!("write the skills index: {error}"))?;
@@ -933,7 +1004,21 @@ fn reconcile_index(index: &mut SkillIndex, result: &mut SkillScanResult) -> bool
                         entry.name = record.name.clone();
                         changed = true;
                     }
-                    entry.source_type = Some(source_type_str(record.source_type));
+                    if let Some(source_type) =
+                        entry.source_type.as_deref().and_then(source_type_from_str)
+                    {
+                        record.source_type = source_type;
+                        record.ownership = ownership_for_source(source_type);
+                        record.trust_level = match source_type {
+                            SourceType::System => TrustLevel::System,
+                            SourceType::Autogateway | SourceType::Team => TrustLevel::Verified,
+                            SourceType::Plugin | SourceType::External => TrustLevel::KnownSource,
+                            SourceType::User => TrustLevel::Unverified,
+                        };
+                    } else {
+                        entry.source_type = Some(source_type_str(record.source_type));
+                        changed = true;
+                    }
                     record.category_id = entry.category_id.clone();
                     record.tags = entry.tags.clone();
                 }
@@ -970,15 +1055,12 @@ pub fn set_skill_category(
 ) -> Result<(), String> {
     let path = skill_index_path(&app)?;
     let mut index = load_index_at(&path);
-    if let Some(category) = &category_id {
-        if !category_exists(&index, category) {
-            return Err("the category does not exist".to_string());
-        }
-    }
+    let category_id = normalize_category_reference(category_id)?;
     let entry = index
         .entries
         .get_mut(&id)
         .ok_or_else(|| "the requested skill was not found".to_string())?;
+    require_user_managed(entry)?;
     entry.category_id = category_id;
     save_index_at(&path, &index)
 }
@@ -991,15 +1073,17 @@ pub fn set_skills_category(
 ) -> Result<(), String> {
     let path = skill_index_path(&app)?;
     let mut index = load_index_at(&path);
-    if let Some(category) = &category_id {
-        if !category_exists(&index, category) {
-            return Err("the category does not exist".to_string());
-        }
+    let category_id = normalize_category_reference(category_id)?;
+    for id in &ids {
+        let entry = index
+            .entries
+            .get(id)
+            .ok_or_else(|| "the requested skill was not found".to_string())?;
+        require_user_managed(entry)?;
     }
     for id in ids {
-        if let Some(entry) = index.entries.get_mut(&id) {
-            entry.category_id = category_id.clone();
-        }
+        let entry = index.entries.get_mut(&id).unwrap();
+        entry.category_id = category_id.clone();
     }
     save_index_at(&path, &index)
 }
@@ -1012,6 +1096,7 @@ pub fn set_skill_tags(app: tauri::AppHandle, id: String, tags: Vec<String>) -> R
         .entries
         .get_mut(&id)
         .ok_or_else(|| "the requested skill was not found".to_string())?;
+    require_user_managed(entry)?;
     entry.tags = normalize_tags(tags);
     save_index_at(&path, &index)
 }
@@ -1074,7 +1159,11 @@ pub fn reorder_categories(app: tauri::AppHandle, ordered_ids: Vec<String>) -> Re
     let path = skill_index_path(&app)?;
     let mut index = load_index_at(&path);
     for (order, id) in ordered_ids.iter().enumerate() {
-        if let Some(category) = index.categories.iter_mut().find(|category| &category.id == id) {
+        if let Some(category) = index
+            .categories
+            .iter_mut()
+            .find(|category| &category.id == id)
+        {
             category.order = order as i64;
         }
     }
@@ -1083,11 +1172,7 @@ pub fn reorder_categories(app: tauri::AppHandle, ordered_ids: Vec<String>) -> Re
 }
 
 #[tauri::command]
-pub fn archive_category(
-    app: tauri::AppHandle,
-    id: String,
-    archived: bool,
-) -> Result<(), String> {
+pub fn archive_category(app: tauri::AppHandle, id: String, archived: bool) -> Result<(), String> {
     let path = skill_index_path(&app)?;
     let mut index = load_index_at(&path);
     if is_protected_category(&index, &id) {
@@ -1149,9 +1234,9 @@ pub fn delete_category(
 }
 
 // ---------------------------------------------------------------------------
-// Enable / disable / remove / restore — move a skill directory between the
-// active skills dir and AUTO Gateway-managed quarantine/trash areas. Effect
-// takes place on the next Codex session (surfaced as pending reload in the UI).
+// Disable writes Codex's supported `[[skills.config]]` override; enable removes
+// that override and restores Codex's default behavior. The skill directory
+// stays in place. Remove / restore continues to use the recoverable trash area.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize)]
@@ -1160,10 +1245,6 @@ pub struct RecoverableSkill {
     pub id: String,
     pub name: String,
     pub removed_at: Option<String>,
-}
-
-fn quarantine_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(skills_data_dir(app)?.join("skills-quarantine"))
 }
 
 fn trash_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -1186,10 +1267,11 @@ fn reject_symlink(path: &Path) -> Result<(), String> {
 }
 
 fn require_user_managed(entry: &IndexEntry) -> Result<(), String> {
-    if entry.source_type.as_deref() == Some("user") {
-        Ok(())
-    } else {
-        Err("only user-installed skills can be changed here".to_string())
+    match entry.source_type.as_deref() {
+        Some("system" | "plugin") => {
+            Err("skills managed by Codex or a plugin cannot be changed here".to_string())
+        }
+        _ => Ok(()),
     }
 }
 
@@ -1241,35 +1323,25 @@ fn move_dir(from: &Path, to: &Path) -> Result<(), String> {
 #[tauri::command]
 pub fn disable_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let index_path = skill_index_path(&app)?;
-    let mut index = load_index_at(&index_path);
+    let index = load_index_at(&index_path);
     let entry = index
         .entries
         .get(&id)
         .ok_or_else(|| "the requested skill was not found".to_string())?;
     require_user_managed(entry)?;
+    if entry.removed {
+        return Err("the requested skill has been removed".to_string());
+    }
+    // Legacy desktop versions moved disabled skills into quarantine. Leave
+    // those entries untouched until the user enables them once.
     if entry.disabled {
         return Ok(());
     }
-    let dir_name =
-        dir_name_of(&entry.install_path).ok_or_else(|| "the skill path is invalid".to_string())?;
-    let skills_dir = default_skills_dir()?;
-    let source = skills_dir.join(&dir_name);
-    reject_symlink(&source)?;
-    if !source.is_dir() {
-        return Err("the skill directory was not found".to_string());
+    let manifest = PathBuf::from(&entry.install_path).join(SKILL_MANIFEST_FILE);
+    if !manifest.is_file() {
+        return Err("the skill manifest was not found".to_string());
     }
-    let quarantine = quarantine_root(&app)?.join(&id).join(&dir_name);
-    move_dir(&source, &quarantine)?;
-
-    let entry = index.entries.get_mut(&id).unwrap();
-    entry.disabled = true;
-    entry.quarantine_path = Some(quarantine.to_string_lossy().to_string());
-    entry.original_relative_path = Some(dir_name);
-    if let Err(error) = save_index_at(&index_path, &index) {
-        let _ = move_dir(&quarantine, &source);
-        return Err(error);
-    }
-    Ok(())
+    set_codex_skill_enabled(&manifest, false)
 }
 
 #[tauri::command]
@@ -1281,8 +1353,15 @@ pub fn enable_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
         .get(&id)
         .ok_or_else(|| "the requested skill was not found".to_string())?;
     require_user_managed(entry)?;
+    if entry.removed {
+        return Err("the requested skill has been removed".to_string());
+    }
     if !entry.disabled {
-        return Ok(());
+        let manifest = PathBuf::from(&entry.install_path).join(SKILL_MANIFEST_FILE);
+        if !manifest.is_file() {
+            return Err("the skill manifest was not found".to_string());
+        }
+        return set_codex_skill_enabled(&manifest, true);
     }
     let quarantine_path = entry
         .quarantine_path
@@ -1296,7 +1375,9 @@ pub fn enable_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let skills_dir = default_skills_dir()?;
     let target = skills_dir.join(&dir_name);
     if target.exists() {
-        return Err("a skill with this name already exists; resolve the conflict first".to_string());
+        return Err(
+            "a skill with this name already exists; resolve the conflict first".to_string(),
+        );
     }
     let quarantine = PathBuf::from(&quarantine_path);
     reject_symlink(&quarantine)?;
@@ -1310,7 +1391,7 @@ pub fn enable_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
         let _ = move_dir(&target, &quarantine);
         return Err(error);
     }
-    Ok(())
+    set_codex_skill_enabled(&target.join(SKILL_MANIFEST_FILE), true)
 }
 
 #[tauri::command]
@@ -1341,8 +1422,7 @@ pub fn remove_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
     if !source.is_dir() {
         return Err("the skill directory was not found".to_string());
     }
-    let dir_name =
-        dir_name_of(&source.to_string_lossy()).unwrap_or_else(|| "skill".to_string());
+    let dir_name = dir_name_of(&source.to_string_lossy()).unwrap_or_else(|| "skill".to_string());
     let stamp = now_millis();
     let trash = trash_root(&app)?
         .join(format!("{id}-{stamp}"))
@@ -1371,6 +1451,7 @@ pub fn restore_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
         .entries
         .get(&id)
         .ok_or_else(|| "the requested skill was not found".to_string())?;
+    require_user_managed(entry)?;
     if !entry.removed {
         return Ok(());
     }
@@ -1386,7 +1467,9 @@ pub fn restore_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let skills_dir = default_skills_dir()?;
     let target = skills_dir.join(&dir_name);
     if target.exists() {
-        return Err("a skill with this name already exists; resolve the conflict first".to_string());
+        return Err(
+            "a skill with this name already exists; resolve the conflict first".to_string(),
+        );
     }
     let trash = PathBuf::from(&trash_path);
     reject_symlink(&trash)?;
@@ -1427,7 +1510,7 @@ pub fn list_recoverable_skills(app: tauri::AppHandle) -> Result<Vec<RecoverableS
 // index.
 // ---------------------------------------------------------------------------
 
-const MAX_ARCHIVE_BYTES: u64 = 25 * 1024 * 1024;
+pub(crate) const MAX_ARCHIVE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_UNPACKED_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_INSTALL_FILES: usize = 2000;
 const MAX_INSTALL_PATH_DEPTH: usize = 16;
@@ -1506,8 +1589,7 @@ fn extract_zip_safe(zip_path: &Path, dest: &Path) -> Result<(), String> {
         }
         let outpath = dest.join(&relative);
         if entry.is_dir() {
-            fs::create_dir_all(&outpath)
-                .map_err(|error| format!("create a directory: {error}"))?;
+            fs::create_dir_all(&outpath).map_err(|error| format!("create a directory: {error}"))?;
             continue;
         }
         if entry.size() > MAX_INSTALL_FILE_BYTES {
@@ -1624,7 +1706,12 @@ struct SkillInstallProgress {
     percent: Option<u64>,
 }
 
-fn emit_skill_progress(app: &tauri::AppHandle, stage: &str, downloaded: u64, total: Option<u64>) {
+pub(crate) fn emit_skill_progress(
+    app: &tauri::AppHandle,
+    stage: &str,
+    downloaded: u64,
+    total: Option<u64>,
+) {
     let percent = total.map(|total| {
         if total > 0 {
             (downloaded.saturating_mul(100) / total).min(100)
@@ -1694,7 +1781,10 @@ fn parse_github_url(raw: &str) -> Result<(String, String, String, Option<String>
         return Err("the URL contains unsupported characters".to_string());
     }
     if let Some(path) = &subpath {
-        if path.split('/').any(|part| part.is_empty() || part == "." || part == "..") {
+        if path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        {
             return Err("the URL path is invalid".to_string());
         }
     }
@@ -1730,8 +1820,8 @@ async fn download_codeload_zip(
     if total.is_some_and(|length| length > MAX_ARCHIVE_BYTES) {
         return Err("the repository archive is too large".to_string());
     }
-    let mut file =
-        fs::File::create(destination).map_err(|error| format!("create the download file: {error}"))?;
+    let mut file = fs::File::create(destination)
+        .map_err(|error| format!("create the download file: {error}"))?;
     let mut downloaded: u64 = 0;
     let mut last_emit: u64 = 0;
     let mut stream = response.bytes_stream();
@@ -1829,6 +1919,59 @@ pub struct InstallSummary {
     pub installed: Vec<String>,
     pub skipped: Vec<InstallSkip>,
     pub failed: Vec<InstallSkip>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_warning: Option<String>,
+}
+
+/// Persist provenance for skills installed from a trusted remote catalog. The
+/// scan index remains the source of truth, so this first reconciles newly
+/// installed folders and then updates only matching active entries.
+pub(crate) fn mark_installed_skill_source(
+    app: &tauri::AppHandle,
+    names: &[String],
+    source_type: SourceType,
+    category_id: Option<String>,
+    source_public_id: Option<String>,
+    source_version_public_id: Option<String>,
+) -> Result<(), String> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    let _ = reconciled_scan(app)?;
+    let path = skill_index_path(app)?;
+    let mut index = load_index_at(&path);
+    let source = source_type_str(source_type);
+    let category_id = normalize_category_reference(category_id)?;
+    for entry in index.entries.values_mut() {
+        if !entry.disabled && !entry.removed && names.contains(&entry.name) {
+            entry.source_type = Some(source.clone());
+            entry.category_id = category_id.clone();
+            entry.source_public_id = source_public_id.clone();
+            entry.source_version_public_id = source_version_public_id.clone();
+        }
+    }
+    save_index_at(&path, &index)
+}
+
+pub(crate) fn ag_skill_source_ids(
+    app: &tauri::AppHandle,
+    id: &str,
+) -> Result<Option<(String, String)>, String> {
+    let index = load_index_at(&skill_index_path(app)?);
+    let entry = index
+        .entries
+        .get(id)
+        .ok_or_else(|| "the requested skill was not found".to_string())?;
+    if entry.source_type.as_deref() != Some("autogateway") {
+        return Ok(None);
+    }
+    match (
+        entry.source_public_id.clone(),
+        entry.source_version_public_id.clone(),
+    ) {
+        (Some(public_id), Some(version_public_id)) => Ok(Some((public_id, version_public_id))),
+        _ => Ok(None),
+    }
 }
 
 /// Preview every installable skill found in the source (1 for a single skill,
@@ -1897,7 +2040,9 @@ pub async fn install_skill(
     location: String,
     replace: bool,
     names: Vec<String>,
+    category_id: Option<String>,
 ) -> Result<InstallSummary, String> {
+    let category_id = normalize_category_reference(category_id)?;
     let skills_dir = default_skills_dir()?;
     fs::create_dir_all(&skills_dir)
         .map_err(|error| format!("create the skills directory: {error}"))?;
@@ -1916,6 +2061,7 @@ pub async fn install_skill(
             installed: Vec::new(),
             skipped: Vec::new(),
             failed: Vec::new(),
+            sync_warning: None,
         };
         for root in &roots {
             let Ok(preview) = build_install_preview(root, &skills_dir) else {
@@ -1941,6 +2087,14 @@ pub async fn install_skill(
             }
         }
         emit_skill_progress(&app, "complete", 0, None);
+        mark_installed_skill_source(
+            &app,
+            &summary.installed,
+            SourceType::User,
+            category_id.clone(),
+            None,
+            None,
+        )?;
         Ok(summary)
     }
     .await;
@@ -2059,7 +2213,9 @@ pub fn export_skill(app: tauri::AppHandle, id: String) -> Result<ExportResult, S
         .into_iter()
         .find(|skill| skill.id == id)
         .ok_or_else(|| "the requested skill was not found".to_string())?;
-    if record.ownership != Ownership::UserManaged {
+    if record.ownership != Ownership::UserManaged
+        || matches!(record.source_type, SourceType::System | SourceType::Plugin)
+    {
         return Err("only user-installed skills can be exported".to_string());
     }
     let root = PathBuf::from(&record.install_path);
@@ -2106,10 +2262,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_root(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "autogateway-skills-{label}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("autogateway-skills-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("create temp root");
         dir
@@ -2202,11 +2356,35 @@ mod tests {
     }
 
     #[test]
+    fn built_in_sources_are_read_only_and_reject_mutations() {
+        assert_eq!(
+            ownership_for_source(SourceType::System),
+            Ownership::ReadOnly
+        );
+        assert_eq!(
+            ownership_for_source(SourceType::Plugin),
+            Ownership::SourceManaged
+        );
+
+        for source_type in ["system", "plugin"] {
+            let entry = IndexEntry {
+                source_type: Some(source_type.to_string()),
+                ..Default::default()
+            };
+            assert!(require_user_managed(&entry).is_err());
+        }
+
+        let user_entry = IndexEntry {
+            source_type: Some("user".to_string()),
+            ..Default::default()
+        };
+        assert!(require_user_managed(&user_entry).is_ok());
+    }
+
+    #[test]
     fn scan_of_missing_directory_is_empty() {
-        let dir = std::env::temp_dir().join(format!(
-            "autogateway-skills-missing-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("autogateway-skills-missing-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         let result = scan_skills_in(&dir);
         assert!(result.skills.is_empty());
@@ -2216,9 +2394,15 @@ mod tests {
     #[test]
     fn frontmatter_body_strips_the_fence() {
         let md = "---\nname: x\ndescription: y\n---\n\n# Title\n\nBody text.\n";
-        assert_eq!(frontmatter_body(md).as_deref(), Some("# Title\n\nBody text."));
+        assert_eq!(
+            frontmatter_body(md).as_deref(),
+            Some("# Title\n\nBody text.")
+        );
         let no_fence = "# Just markdown\n";
-        assert_eq!(frontmatter_body(no_fence).as_deref(), Some("# Just markdown"));
+        assert_eq!(
+            frontmatter_body(no_fence).as_deref(),
+            Some("# Just markdown")
+        );
     }
 
     #[test]
@@ -2316,6 +2500,19 @@ mod tests {
         assert_eq!(second.skills[0].category_id.as_deref(), Some("development"));
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn category_references_accept_ag_slugs_and_reject_unsafe_values() {
+        assert_eq!(
+            normalize_category_reference(Some("health-management".into())).unwrap(),
+            Some("health-management".into())
+        );
+        assert_eq!(
+            normalize_category_reference(Some("  ".into())).unwrap(),
+            None
+        );
+        assert!(normalize_category_reference(Some("../invalid".into())).is_err());
     }
 
     #[test]
@@ -2557,7 +2754,10 @@ mod tests {
     fn parse_github_url_extracts_parts_and_rejects_untrusted() {
         let (owner, repo, git_ref, subpath) =
             parse_github_url("https://github.com/openai/skills").expect("root url");
-        assert_eq!((owner.as_str(), repo.as_str(), git_ref.as_str()), ("openai", "skills", "main"));
+        assert_eq!(
+            (owner.as_str(), repo.as_str(), git_ref.as_str()),
+            ("openai", "skills", "main")
+        );
         assert_eq!(subpath, None);
 
         let (_, repo, git_ref, subpath) = parse_github_url(

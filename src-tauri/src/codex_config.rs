@@ -1,10 +1,11 @@
 use serde::Serialize;
 use serde_json::{Map, Value as JsonValue};
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
-use toml_edit::{value, DocumentMut, Item, Table, Value as TomlValue};
+use toml_edit::{value, ArrayOfTables, DocumentMut, Item, Table, Value as TomlValue};
 
 const DEFAULT_MODEL: &str = "gpt-5.6-sol";
 
@@ -60,6 +61,134 @@ pub fn default_codex_paths() -> Result<CodexPaths, String> {
         config: codex_directory.join("config.toml"),
         auth: codex_directory.join("auth.json"),
     })
+}
+
+/// Read explicit per-skill enablement overrides from the user's Codex config.
+/// Keys are the manifest paths Codex expects in `[[skills.config]]` entries.
+pub fn skill_enablement_overrides() -> Result<BTreeMap<String, bool>, String> {
+    let paths = default_codex_paths()?;
+    skill_enablement_overrides_at(&paths.config)
+}
+
+/// Disable a skill through Codex's supported `config.toml` format, or restore
+/// the default enabled behavior by removing its override entirely. The skill
+/// directory remains in place so disabled skills stay discoverable.
+pub fn set_skill_enabled(skill_manifest: &Path, enabled: bool) -> Result<(), String> {
+    let paths = default_codex_paths()?;
+    set_skill_enabled_at(&paths.config, skill_manifest, enabled)
+}
+
+fn skill_enablement_overrides_at(config_path: &Path) -> Result<BTreeMap<String, bool>, String> {
+    let Some(content) = read_optional(config_path)? else {
+        return Ok(BTreeMap::new());
+    };
+    let document = content
+        .parse::<DocumentMut>()
+        .map_err(|error| format!("existing config.toml is invalid: {error}"))?;
+    let mut overrides = BTreeMap::new();
+    let Some(entries) = document
+        .get("skills")
+        .and_then(Item::as_table)
+        .and_then(|skills| skills.get("config"))
+        .and_then(Item::as_array_of_tables)
+    else {
+        return Ok(overrides);
+    };
+    for entry in entries.iter() {
+        let Some(path) = entry.get("path").and_then(Item::as_str) else {
+            continue;
+        };
+        let enabled = entry.get("enabled").and_then(Item::as_bool).unwrap_or(true);
+        overrides.insert(path.to_string(), enabled);
+    }
+    Ok(overrides)
+}
+
+fn set_skill_enabled_at(
+    config_path: &Path,
+    skill_manifest: &Path,
+    enabled: bool,
+) -> Result<(), String> {
+    let manifest = skill_manifest.to_string_lossy().to_string();
+    if manifest.trim().is_empty() || !skill_manifest.is_absolute() {
+        return Err("the skill manifest path must be absolute".to_string());
+    }
+    ensure_not_symlink(config_path)?;
+    let previous = read_optional(config_path)?;
+    let mut document = match previous.as_deref() {
+        Some(content) => content
+            .parse::<DocumentMut>()
+            .map_err(|error| format!("existing config.toml is invalid: {error}"))?,
+        None => DocumentMut::new(),
+    };
+    if enabled {
+        let Some(skills_item) = document.get_mut("skills") else {
+            return Ok(());
+        };
+        let skills = skills_item
+            .as_table_mut()
+            .ok_or_else(|| "skills must be a TOML table".to_string())?;
+        let Some(config_item) = skills.get_mut("config") else {
+            return Ok(());
+        };
+        let entries = config_item
+            .as_array_of_tables_mut()
+            .ok_or_else(|| "skills.config must be an array of tables".to_string())?;
+        let Some(index) = entries
+            .iter()
+            .position(|entry| entry.get("path").and_then(Item::as_str) == Some(manifest.as_str()))
+        else {
+            return Ok(());
+        };
+        entries.remove(index);
+        if entries.is_empty() {
+            skills.remove("config");
+        }
+        if skills.is_empty() {
+            document.remove("skills");
+        }
+    } else {
+        if document.get("skills").is_none() {
+            document["skills"] = Item::Table(Table::new());
+        }
+        let skills = document["skills"]
+            .as_table_mut()
+            .ok_or_else(|| "skills must be a TOML table".to_string())?;
+        if skills.get("config").is_none() {
+            skills["config"] = Item::ArrayOfTables(ArrayOfTables::new());
+        }
+        let entries = skills["config"]
+            .as_array_of_tables_mut()
+            .ok_or_else(|| "skills.config must be an array of tables".to_string())?;
+        let existing_index = entries
+            .iter()
+            .position(|entry| entry.get("path").and_then(Item::as_str) == Some(manifest.as_str()));
+        if let Some(index) = existing_index {
+            let entry = entries
+                .get_mut(index)
+                .ok_or_else(|| "resolve the existing skill configuration".to_string())?;
+            entry["enabled"] = value(false);
+        } else {
+            let mut entry = Table::new();
+            entry["path"] = value(manifest);
+            entry["enabled"] = value(false);
+            entries.push(entry);
+        }
+    }
+
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| "determine the Codex configuration directory".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("create the Codex configuration directory: {error}"))?;
+    let _backup = backup_if_exists(config_path)?;
+    if let Err(error) = atomic_write(config_path, document.to_string().as_bytes()) {
+        return Err(with_restore_result(
+            format!("write Codex skill configuration: {error}"),
+            restore_previous(config_path, previous.as_deref()),
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve the Codex home directory. Honors `$CODEX_HOME` the way the official
@@ -498,7 +627,8 @@ fn set_private_permissions(_path: &Path) -> Result<(), String> {
 mod tests {
     use super::{
         backup_if_exists, backup_paths, classify_provider, merge_auth, merge_config,
-        normalize_endpoint, restore_from_backup, CodexPaths, CodexProviderStatus,
+        normalize_endpoint, restore_from_backup, set_skill_enabled_at,
+        skill_enablement_overrides_at, CodexPaths, CodexProviderStatus,
     };
     use std::fs;
     use toml_edit::Item;
@@ -597,6 +727,58 @@ base_url = "https://example.com/v1"
         fs::write(&config, "generated by AUTO Gateway").expect("write generated configuration");
         restore_from_backup(&backup, &config).expect("restore missing file snapshot");
         assert!(!config.exists());
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn skill_enablement_uses_codex_config_without_removing_other_settings() {
+        let directory = std::env::temp_dir().join(format!(
+            "autogateway-skill-enablement-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create test directory");
+        let config = directory.join("config.toml");
+        let manifest = directory.join("skills").join("example").join("SKILL.md");
+        let other_manifest = directory.join("skills").join("other").join("SKILL.md");
+        fs::create_dir_all(manifest.parent().unwrap()).expect("create skill directory");
+        fs::write(&manifest, "---\nname: example\ndescription: Test.\n---\n")
+            .expect("write manifest");
+        fs::write(
+            &config,
+            format!(
+                "model = \"gpt-5.6-sol\"\n\n[skills]\npreserve = \"value\"\n\n[[skills.config]]\npath = {:?}\nenabled = false\n",
+                other_manifest.to_string_lossy()
+            ),
+        )
+        .expect("write config");
+
+        set_skill_enabled_at(&config, &manifest, false).expect("disable skill");
+        let overrides = skill_enablement_overrides_at(&config).expect("read overrides");
+        assert_eq!(
+            overrides.get(manifest.to_string_lossy().as_ref()),
+            Some(&false)
+        );
+        assert_eq!(
+            overrides.get(other_manifest.to_string_lossy().as_ref()),
+            Some(&false)
+        );
+        assert!(fs::read_to_string(&config)
+            .expect("read config")
+            .contains("model = \"gpt-5.6-sol\""));
+
+        set_skill_enabled_at(&config, &manifest, true).expect("enable skill");
+        let overrides = skill_enablement_overrides_at(&config).expect("read overrides");
+        assert!(!overrides.contains_key(manifest.to_string_lossy().as_ref()));
+        assert_eq!(
+            overrides.get(other_manifest.to_string_lossy().as_ref()),
+            Some(&false)
+        );
+        let content = fs::read_to_string(&config).expect("read enabled config");
+        assert!(!content.contains(manifest.to_string_lossy().as_ref()));
+        assert!(content.contains(other_manifest.to_string_lossy().as_ref()));
+        assert!(content.contains("preserve = \"value\""));
+        assert!(content.contains("model = \"gpt-5.6-sol\""));
+        assert!(!backup_paths(&config).expect("list backups").is_empty());
         fs::remove_dir_all(directory).expect("remove test directory");
     }
 

@@ -316,6 +316,7 @@ export type SkillInstallSummary = {
   installed: string[];
   skipped: SkillInstallSkip[];
   failed: SkillInstallSkip[];
+  syncWarning?: string;
 };
 
 export function validateSkillSource(
@@ -333,12 +334,14 @@ export function installSkill(
   location: string,
   replace: boolean,
   names: string[],
+  categoryId?: string,
 ): Promise<SkillInstallSummary> {
   return invoke<SkillInstallSummary>("install_skill", {
     kind,
     location,
     replace,
     names,
+    categoryId,
   });
 }
 
@@ -393,8 +396,13 @@ export function restoreLatestCodexBackups(): Promise<RestoreResult> {
 export function openConsole(
   accessToken: string,
   section?: "billing" | "support",
+  originalUserAgent?: string,
 ): Promise<void> {
-  return invoke<void>("open_console", { accessToken, section });
+  return invoke<void>("open_console", {
+    accessToken,
+    section,
+    originalUserAgent,
+  });
 }
 
 export function openDevtools(): Promise<void> {
@@ -423,8 +431,14 @@ export function openNotificationWindow(notificationID: number): Promise<void> {
   });
 }
 
-export function openNotificationBrowser(url: string): Promise<void> {
-  return invoke<void>("open_notification_browser", { url });
+export function openNotificationBrowser(
+  url: string,
+  originalUserAgent?: string,
+): Promise<void> {
+  return invoke<void>("open_notification_browser", {
+    url,
+    originalUserAgent,
+  });
 }
 
 export function downloadAndOpenDesktopInstaller(
@@ -469,8 +483,13 @@ export function exchangeDesktopAuthorization(
 export function openDesktopSignIn(
   challenge: string,
   state: string,
+  originalUserAgent?: string,
 ): Promise<void> {
-  return invoke<void>("open_desktop_sign_in_command", { challenge, state });
+  return invoke<void>("open_desktop_sign_in_command", {
+    challenge,
+    state,
+    originalUserAgent,
+  });
 }
 
 export function closeDesktopSignIn(): Promise<void> {

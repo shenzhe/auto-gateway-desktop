@@ -1,12 +1,26 @@
 use std::time::Duration;
 
+fn desktop_user_agent_token() -> String {
+    format!("AUTO-Gateway-Desktop/{}", env!("CARGO_PKG_VERSION"))
+}
+
 pub fn desktop_user_agent() -> String {
     format!(
-        "AUTO-Gateway-Desktop/{} ({}; {})",
+        "autogateway-desktop/{} {} ({}; {})",
         env!("CARGO_PKG_VERSION"),
+        desktop_user_agent_token(),
         std::env::consts::OS,
         std::env::consts::ARCH
     )
+}
+
+pub fn desktop_user_agent_for_webview(original_user_agent: Option<&str>) -> String {
+    let original_user_agent = original_user_agent
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("autogateway-desktop/{}", env!("CARGO_PKG_VERSION")));
+    format!("{original_user_agent} {}", desktop_user_agent_token())
 }
 
 pub fn client() -> Result<reqwest::Client, String> {
@@ -50,14 +64,29 @@ pub fn client_with_timeouts_and_read_timeout(
 
 #[cfg(test)]
 mod tests {
-    use super::desktop_user_agent;
+    use super::{desktop_user_agent, desktop_user_agent_for_webview};
 
     #[test]
-    fn desktop_user_agent_identifies_the_product_version_and_platform() {
+    fn desktop_user_agent_preserves_the_original_product_identity() {
         let user_agent = desktop_user_agent();
-        assert!(user_agent.starts_with("AUTO-Gateway-Desktop/"));
+        assert!(user_agent.starts_with("autogateway-desktop/"));
         assert!(user_agent.contains(env!("CARGO_PKG_VERSION")));
+        assert!(user_agent.contains("AUTO-Gateway-Desktop/"));
         assert!(user_agent.contains(std::env::consts::OS));
         assert!(user_agent.contains(std::env::consts::ARCH));
+    }
+
+    #[test]
+    fn webview_user_agent_appends_to_the_original_value() {
+        let original = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)";
+        let user_agent = desktop_user_agent_for_webview(Some(original));
+
+        assert_eq!(
+            user_agent,
+            format!(
+                "{original} AUTO-Gateway-Desktop/{}",
+                env!("CARGO_PKG_VERSION")
+            )
+        );
     }
 }

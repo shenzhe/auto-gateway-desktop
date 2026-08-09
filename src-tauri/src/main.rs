@@ -4,6 +4,7 @@ mod codex_app;
 mod codex_config;
 mod desktop_auth;
 mod http_client;
+mod skill_hub;
 mod skills;
 
 use codex_app::{
@@ -21,13 +22,17 @@ use desktop_auth::{
     save_desktop_api_key, save_desktop_session, DesktopAccountSummary, DesktopBootstrapKey,
     DesktopNotificationList, DesktopSession, StoredDesktopState,
 };
-use skills::{
-    archive_category, create_category, delete_category, disable_skill, enable_skill,
-    export_skill, get_skill_detail, install_skill, list_recoverable_skills, remove_skill,
-    rename_category, reorder_categories, restore_skill, scan_skills, set_skill_category,
-    set_skill_tags, set_skills_category, validate_skill_source,
-};
 use futures_util::StreamExt;
+use skill_hub::{
+    install_ag_skill, list_ag_skill_categories, list_ag_skills, recommend_ag_skills,
+    report_ag_skill_uninstalled,
+};
+use skills::{
+    archive_category, create_category, delete_category, disable_skill, enable_skill, export_skill,
+    get_skill_detail, install_skill, list_recoverable_skills, remove_skill, rename_category,
+    reorder_categories, restore_skill, scan_skills, set_skill_category, set_skill_tags,
+    set_skills_category, validate_skill_source,
+};
 use std::{
     fs::{self, File},
     io::Write,
@@ -293,6 +298,7 @@ async fn open_desktop_sign_in_command(
     app: AppHandle,
     challenge: String,
     state: String,
+    original_user_agent: Option<String>,
 ) -> Result<(), String> {
     let challenge = challenge.trim();
     let state = state.trim();
@@ -320,12 +326,14 @@ async fn open_desktop_sign_in_command(
     }
 
     let app_handle = app.clone();
+    let user_agent = http_client::desktop_user_agent_for_webview(original_user_agent.as_deref());
     WebviewWindowBuilder::new(&app, "auth", WebviewUrl::External(sign_in_url))
         .title("Connect AUTO Gateway")
         .inner_size(520.0, 760.0)
         .min_inner_size(420.0, 640.0)
         .center()
         .resizable(true)
+        .user_agent(&user_agent)
         .initialization_script(DISABLE_CONTEXT_MENU_SCRIPT)
         .on_navigation(move |url| {
             let is_callback = url.scheme() == "autogateway"
@@ -530,6 +538,7 @@ async fn open_console(
     app: AppHandle,
     access_token: String,
     section: Option<String>,
+    original_user_agent: Option<String>,
 ) -> Result<(), String> {
     let ticket = create_desktop_console_ticket(&access_token).await?;
     let mut console_url =
@@ -552,9 +561,11 @@ async fn open_console(
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
     }
+    let user_agent = http_client::desktop_user_agent_for_webview(original_user_agent.as_deref());
     WebviewWindowBuilder::new(&app, "console", WebviewUrl::External(console_url))
         .title("AUTO Gateway Console")
         .inner_size(1280.0, 900.0)
+        .user_agent(&user_agent)
         .initialization_script(DISABLE_CONTEXT_MENU_SCRIPT)
         .build()
         .map_err(|error| error.to_string())?;
@@ -598,7 +609,11 @@ fn open_notification_window(app: AppHandle, notification_id: i64) -> Result<(), 
 }
 
 #[tauri::command]
-fn open_notification_browser(app: AppHandle, url: String) -> Result<(), String> {
+fn open_notification_browser(
+    app: AppHandle,
+    url: String,
+    original_user_agent: Option<String>,
+) -> Result<(), String> {
     let url =
         Url::parse(url.trim()).map_err(|error| format!("invalid notification link: {error}"))?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
@@ -616,11 +631,13 @@ fn open_notification_browser(app: AppHandle, url: String) -> Result<(), String> 
             .map_err(|error| format!("focus the notification browser: {error}"))?;
         return Ok(());
     }
+    let user_agent = http_client::desktop_user_agent_for_webview(original_user_agent.as_deref());
     WebviewWindowBuilder::new(&app, "notification-browser", WebviewUrl::External(url))
         .title("AUTO Gateway Browser")
         .inner_size(1180.0, 820.0)
         .min_inner_size(720.0, 520.0)
         .center()
+        .user_agent(&user_agent)
         .initialization_script(DISABLE_CONTEXT_MENU_SCRIPT)
         .build()
         .map_err(|error| format!("open the notification browser: {error}"))?;
@@ -679,7 +696,12 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            tauri_plugin_updater::Builder::new()
+                .header("User-Agent", http_client::desktop_user_agent())
+                .expect("failed to configure the desktop updater user agent")
+                .build(),
+        )
         .on_window_event(|window, event| match (window.label(), event) {
             ("main", WindowEvent::CloseRequested { api, .. }) => {
                 api.prevent_close();
@@ -736,6 +758,11 @@ fn main() {
             validate_skill_source,
             install_skill,
             export_skill,
+            list_ag_skill_categories,
+            list_ag_skills,
+            recommend_ag_skills,
+            install_ag_skill,
+            report_ag_skill_uninstalled,
             open_devtools
         ])
         .build(tauri::generate_context!())
