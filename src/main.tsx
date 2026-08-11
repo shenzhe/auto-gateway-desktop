@@ -15,6 +15,7 @@ import {
   CaretRightIcon,
   CheckCircleIcon,
   CheckIcon,
+  ClockCounterClockwiseIcon,
   CircleNotchIcon,
   CopyIcon,
   CubeIcon,
@@ -27,6 +28,8 @@ import {
   MagnifyingGlassIcon,
   MoonIcon,
   PaperPlaneRightIcon,
+  PencilSimpleIcon,
+  PlusIcon,
   PuzzlePieceIcon,
   QuestionIcon,
   SparkleIcon,
@@ -114,8 +117,10 @@ import {
   skillCatalogPageSize,
   skillLibraryClient,
   type PublicSkill,
+  type SkillAdvisorConversation,
   type SkillAdvisorMessage,
   type SkillCategoryDto,
+  type SkillRecommendationResponse,
 } from "./skillLibrary";
 import "./styles.css";
 
@@ -1494,8 +1499,31 @@ function App() {
   const [skillAdvisorRecommendedIds, setSkillAdvisorRecommendedIds] = useState<
     string[]
   >([]);
+  const [skillAdvisorRecommendedSkills, setSkillAdvisorRecommendedSkills] =
+    useState<PublicSkill[]>([]);
   const [skillAdvisorUsedFallback, setSkillAdvisorUsedFallback] =
     useState(false);
+  const [skillAdvisorThreadId, setSkillAdvisorThreadId] = useState<
+    string | null
+  >(null);
+  const [skillAdvisorConversations, setSkillAdvisorConversations] = useState<
+    SkillAdvisorConversation[]
+  >([]);
+  const [skillAdvisorConversationId, setSkillAdvisorConversationId] = useState<
+    string | null
+  >(null);
+  const [skillAdvisorConversationTitle, setSkillAdvisorConversationTitle] =
+    useState("");
+  const [skillAdvisorConversationCreatedAt, setSkillAdvisorConversationCreatedAt] =
+    useState(0);
+  const [skillAdvisorHistoryOpen, setSkillAdvisorHistoryOpen] = useState(true);
+  const [skillAdvisorHistoryLoading, setSkillAdvisorHistoryLoading] =
+    useState(false);
+  const [skillAdvisorHistoryError, setSkillAdvisorHistoryError] = useState("");
+  const [skillAdvisorRenamingId, setSkillAdvisorRenamingId] = useState<
+    string | null
+  >(null);
+  const [skillAdvisorRenameInput, setSkillAdvisorRenameInput] = useState("");
   const [theme, setTheme] = useState<ThemeMode>(() => readTheme());
   const [localePreference, setLocalePreference] = useState<LocalePreference>(
     () => readLocalePreference(),
@@ -1505,6 +1533,12 @@ function App() {
   const completedAuthorizationCode = useRef("");
   const skillAdvisorEndRef = useRef<HTMLDivElement>(null);
   const skillAdvisorInputRef = useRef<HTMLTextAreaElement>(null);
+  const skillAdvisorConversationGenerationRef = useRef(0);
+  const skillAdvisorHistoryInitializedRef = useRef(false);
+  const libraryIndexRefreshRef = useRef<{
+    key: string;
+    promise: Promise<void>;
+  } | null>(null);
   const locale = resolveLocale(localePreference);
   const tr = (
     key: Parameters<typeof translate>[1],
@@ -1644,16 +1678,25 @@ function App() {
     let active = true;
     setLibraryLoading(true);
     setLibraryError("");
-    skillLibraryClient
-      .listPublicSkills(
-        {
-          q: debouncedLibrarySearch || undefined,
-          category:
-            libraryCategory !== "all" ? libraryCategory : undefined,
-          sort: librarySort,
-          offset: libraryPage * skillCatalogPageSize,
-        },
-        locale,
+    const refreshKey = `${locale}:${libraryRefreshNonce}`;
+    if (libraryIndexRefreshRef.current?.key !== refreshKey) {
+      libraryIndexRefreshRef.current = {
+        key: refreshKey,
+        promise: skillLibraryClient.refreshIndex(locale).then(() => undefined),
+      };
+    }
+    libraryIndexRefreshRef.current.promise
+      .then(() =>
+        skillLibraryClient.listPublicSkills(
+          {
+            q: debouncedLibrarySearch || undefined,
+            category:
+              libraryCategory !== "all" ? libraryCategory : undefined,
+            sort: librarySort,
+            offset: libraryPage * skillCatalogPageSize,
+          },
+          locale,
+        ),
       )
       .then((page) => {
         if (!active) return;
@@ -2999,8 +3042,8 @@ function App() {
     }
   }
 
-  function availableSkillAdvisorCatalog(catalog = skillAdvisorCatalog) {
-    const installedNames = new Set(
+  function installedSkillAdvisorNames() {
+    return new Set(
       (skillScan?.skills ?? [])
         .filter(
           (skill) =>
@@ -3008,16 +3051,122 @@ function App() {
         )
         .map((skill) => skill.name),
     );
+  }
+
+  function availableSkillAdvisorCatalog(catalog = skillAdvisorCatalog) {
+    const installedNames = installedSkillAdvisorNames();
     return catalog.filter((skill) => !installedNames.has(skill.name));
   }
 
+  function closeSkillAdvisor() {
+    setShowSkillAdvisor(false);
+  }
+
+  function advisorConversationTitle(messages: SkillAdvisorMessage[]) {
+    const firstUserMessage = messages.find((message) => message.role === "user");
+    const title = firstUserMessage?.content.replace(/\s+/g, " ").trim() ?? "";
+    return (
+      Array.from(title).slice(0, 48).join("") ||
+      tr("skillAdvisorNewConversation")
+    );
+  }
+
+  function advisorConversationTimestamp() {
+    return Math.floor(Date.now() / 1000);
+  }
+
+  function upsertSkillAdvisorConversation(
+    conversation: SkillAdvisorConversation,
+  ) {
+    setSkillAdvisorConversations((current) =>
+      [conversation, ...current.filter((item) => item.id !== conversation.id)]
+        .sort((left, right) => right.updatedAt - left.updatedAt)
+        .slice(0, 50),
+    );
+  }
+
+  async function persistSkillAdvisorConversation(
+    conversation: SkillAdvisorConversation,
+  ) {
+    try {
+      const saved = await skillLibraryClient.saveAdvisorConversation(
+        conversation,
+      );
+      upsertSkillAdvisorConversation(saved);
+      setSkillAdvisorHistoryError("");
+      return saved;
+    } catch (error) {
+      setSkillAdvisorHistoryError(
+        tr("skillAdvisorHistorySaveFailed", { error: String(error) }),
+      );
+      return null;
+    }
+  }
+
+  function restoreSkillAdvisorConversation(
+    conversation: SkillAdvisorConversation,
+  ) {
+    skillAdvisorConversationGenerationRef.current += 1;
+    setSkillAdvisorLoading(false);
+    setSkillAdvisorConversationId(conversation.id);
+    setSkillAdvisorConversationTitle(conversation.title);
+    setSkillAdvisorConversationCreatedAt(conversation.createdAt);
+    setSkillAdvisorThreadId(conversation.threadId);
+    setSkillAdvisorMessages(
+      conversation.messages.length > 0
+        ? conversation.messages
+        : [{ role: "assistant", content: tr("skillAdvisorWelcome") }],
+    );
+    setSkillAdvisorRecommendedIds(conversation.recommendedPublicIds);
+    setSkillAdvisorRecommendedSkills(conversation.recommendedSkills);
+    setSkillAdvisorCatalog((current) => {
+      const merged = new Map(
+        current.map((skill) => [skill.publicId, skill] as const),
+      );
+      conversation.recommendedSkills.forEach((skill) =>
+        merged.set(skill.publicId, skill),
+      );
+      return Array.from(merged.values());
+    });
+    setSkillAdvisorUsedFallback(conversation.usedFallback);
+    setSkillAdvisorInput("");
+    setSkillAdvisorError("");
+    setLibraryInstallNote("");
+    setLibraryInstallConflict(false);
+    setLibraryInstallConflictId(null);
+  }
+
+  function localizedSkillAdvisorReply(
+    recommendation: SkillRecommendationResponse,
+  ) {
+    switch (recommendation.fallbackReplyKey) {
+      case "need-task-details":
+        return tr("skillAdvisorFallbackNeedTaskDetails");
+      case "need-tools":
+        return tr("skillAdvisorFallbackNeedTools");
+      case "no-match":
+        return tr("skillAdvisorFallbackNoMatch");
+      case "matches-found":
+        return tr("skillAdvisorFallbackMatchesFound");
+      default:
+        return recommendation.reply;
+    }
+  }
+
   function resetSkillAdvisorConversation() {
+    skillAdvisorConversationGenerationRef.current += 1;
+    setSkillAdvisorLoading(false);
+    setSkillAdvisorConversationId(null);
+    setSkillAdvisorConversationTitle(tr("skillAdvisorNewConversation"));
+    setSkillAdvisorConversationCreatedAt(0);
+    setSkillAdvisorThreadId(null);
     setSkillAdvisorMessages([
       { role: "assistant", content: tr("skillAdvisorWelcome") },
     ]);
     setSkillAdvisorInput("");
     setSkillAdvisorError("");
     setSkillAdvisorRecommendedIds([]);
+    setSkillAdvisorRecommendedSkills([]);
     setSkillAdvisorUsedFallback(false);
     setLibraryInstallNote("");
     setLibraryInstallConflict(false);
@@ -3027,9 +3176,32 @@ function App() {
   async function openSkillAdvisor() {
     setSelectedLibrarySkill(null);
     setShowSkillAdvisor(true);
-    resetSkillAdvisorConversation();
     setSkillAdvisorCatalogLoading(true);
+    setSkillAdvisorHistoryLoading(true);
+    setSkillAdvisorHistoryError("");
     trackSkillEvent("skill_advisor_opened", { sourceType: "autogateway" });
+    const shouldRestoreConversation =
+      !skillAdvisorHistoryInitializedRef.current;
+    skillAdvisorHistoryInitializedRef.current = true;
+    const historyPromise = skillLibraryClient
+      .listAdvisorConversations()
+      .then((conversations) => {
+        setSkillAdvisorConversations(conversations);
+        if (shouldRestoreConversation) {
+          if (conversations[0]) {
+            restoreSkillAdvisorConversation(conversations[0]);
+          } else {
+            resetSkillAdvisorConversation();
+          }
+        }
+      })
+      .catch((error) => {
+        setSkillAdvisorHistoryError(
+          tr("skillAdvisorHistoryLoadFailed", { error: String(error) }),
+        );
+        if (shouldRestoreConversation) resetSkillAdvisorConversation();
+      })
+      .finally(() => setSkillAdvisorHistoryLoading(false));
     try {
       const page = await skillLibraryClient.listPublicSkills(
         { sort: "popular" },
@@ -3050,6 +3222,74 @@ function App() {
     } finally {
       setSkillAdvisorCatalogLoading(false);
     }
+    await historyPromise;
+  }
+
+  async function deleteSkillAdvisorConversation(
+    conversation: SkillAdvisorConversation,
+  ) {
+    if (
+      skillAdvisorLoading ||
+      !window.confirm(
+        tr("skillAdvisorHistoryDeleteConfirm", { title: conversation.title }),
+      )
+    ) {
+      return;
+    }
+    try {
+      const threadId = await skillLibraryClient.deleteAdvisorConversation(
+        conversation.id,
+      );
+      setSkillAdvisorConversations((current) =>
+        current.filter((item) => item.id !== conversation.id),
+      );
+      if (skillAdvisorConversationId === conversation.id) {
+        resetSkillAdvisorConversation();
+      }
+      if (threadId) {
+        void skillLibraryClient.deleteAdvisorThread(threadId).catch(() => {
+          // Local history deletion succeeds even when Codex thread cleanup fails.
+        });
+      }
+      setSkillAdvisorHistoryError("");
+    } catch (error) {
+      setSkillAdvisorHistoryError(
+        tr("skillAdvisorHistoryDeleteFailed", { error: String(error) }),
+      );
+    }
+  }
+
+  function beginSkillAdvisorRename(conversation: SkillAdvisorConversation) {
+    setSkillAdvisorRenamingId(conversation.id);
+    setSkillAdvisorRenameInput(conversation.title);
+  }
+
+  async function commitSkillAdvisorRename(
+    conversation: SkillAdvisorConversation,
+  ) {
+    const title = skillAdvisorRenameInput.trim();
+    if (!title) return;
+    const saved = await persistSkillAdvisorConversation({
+      ...conversation,
+      title,
+    });
+    if (!saved) return;
+    if (skillAdvisorConversationId === conversation.id) {
+      setSkillAdvisorConversationTitle(saved.title);
+    }
+    setSkillAdvisorRenamingId(null);
+    setSkillAdvisorRenameInput("");
+  }
+
+  function formatSkillAdvisorHistoryTime(timestamp: number) {
+    const date = new Date(timestamp * 1000);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleString(locale === "zh" ? "zh-CN" : "en-US", {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   }
 
   async function submitSkillAdvisorMessage(value = skillAdvisorInput) {
@@ -3060,39 +3300,110 @@ function App() {
       ...skillAdvisorMessages,
       { role: "user", content },
     ];
+    const now = advisorConversationTimestamp();
+    const conversationId =
+      skillAdvisorConversationId ?? globalThis.crypto.randomUUID();
+    const conversationTitle = skillAdvisorConversationId
+      ? skillAdvisorConversationTitle
+      : advisorConversationTitle(nextMessages);
+    const conversationCreatedAt = skillAdvisorConversationCreatedAt || now;
+    setSkillAdvisorConversationId(conversationId);
+    setSkillAdvisorConversationTitle(conversationTitle);
+    setSkillAdvisorConversationCreatedAt(conversationCreatedAt);
     setSkillAdvisorMessages(nextMessages);
     setSkillAdvisorInput("");
     setSkillAdvisorError("");
     setSkillAdvisorRecommendedIds([]);
+    setSkillAdvisorRecommendedSkills([]);
     setSkillAdvisorUsedFallback(false);
     setLibraryInstallNote("");
     setLibraryInstallConflict(false);
     setLibraryInstallConflictId(null);
     setSkillAdvisorLoading(true);
+    const conversationGeneration =
+      skillAdvisorConversationGenerationRef.current;
     try {
+      await persistSkillAdvisorConversation({
+        id: conversationId,
+        title: conversationTitle,
+        createdAt: conversationCreatedAt,
+        updatedAt: now,
+        messages: nextMessages,
+        recommendedPublicIds: [],
+        recommendedSkills: [],
+        usedFallback: false,
+        threadId: skillAdvisorThreadId,
+      });
       const recommendation = await skillLibraryClient.recommendSkills(
         catalog,
         nextMessages,
         locale,
-        apiKey,
-        endpoint,
+        skillAdvisorThreadId,
+        Array.from(installedSkillAdvisorNames()),
       );
-      setSkillAdvisorMessages((current) => [
-        ...current,
-        { role: "assistant", content: recommendation.reply },
-      ]);
+      if (
+        conversationGeneration !== skillAdvisorConversationGenerationRef.current
+      ) {
+        if (recommendation.threadId) {
+          void skillLibraryClient
+            .deleteAdvisorThread(recommendation.threadId)
+            .catch(() => {
+              // A superseded conversation is already hidden from the user.
+            });
+        }
+        return;
+      }
+      const assistantReply = localizedSkillAdvisorReply(recommendation);
+      const completedMessages: SkillAdvisorMessage[] = [
+        ...nextMessages,
+        { role: "assistant", content: assistantReply },
+      ];
+      setSkillAdvisorThreadId(recommendation.threadId);
+      if (recommendation.recommendedSkills.length > 0) {
+        setSkillAdvisorCatalog((current) => {
+          const merged = new Map(
+            current.map((skill) => [skill.publicId, skill] as const),
+          );
+          recommendation.recommendedSkills.forEach((skill) =>
+            merged.set(skill.publicId, skill),
+          );
+          return Array.from(merged.values());
+        });
+      }
+      setSkillAdvisorMessages(completedMessages);
       setSkillAdvisorRecommendedIds(recommendation.recommendedPublicIds);
+      setSkillAdvisorRecommendedSkills(recommendation.recommendedSkills);
       setSkillAdvisorUsedFallback(recommendation.usedFallback);
+      await persistSkillAdvisorConversation({
+        id: conversationId,
+        title: conversationTitle,
+        createdAt: conversationCreatedAt,
+        updatedAt: advisorConversationTimestamp(),
+        messages: completedMessages,
+        recommendedPublicIds: recommendation.recommendedPublicIds,
+        recommendedSkills: recommendation.recommendedSkills,
+        usedFallback: recommendation.usedFallback,
+        threadId: recommendation.threadId,
+      });
       trackSkillEvent("skill_advisor_recommendation_completed", {
-        result: recommendation.usedFallback ? "local-fallback" : "ai",
+        result: recommendation.usedFallback ? "local-fallback" : "local-codex",
         count: recommendation.recommendedPublicIds.length,
       });
     } catch (error) {
+      if (
+        conversationGeneration !== skillAdvisorConversationGenerationRef.current
+      ) {
+        return;
+      }
       setSkillAdvisorError(
         tr("skillAdvisorRequestFailed", { error: String(error) }),
       );
     } finally {
-      setSkillAdvisorLoading(false);
+      if (
+        conversationGeneration === skillAdvisorConversationGenerationRef.current
+      ) {
+        setSkillAdvisorLoading(false);
+      }
     }
   }
 
@@ -3256,11 +3567,14 @@ function App() {
 
   function renderSkillAdvisorDrawer() {
     if (!showSkillAdvisor) return null;
-    const recommendedSkills = skillAdvisorRecommendedIds
-      .map((publicId) =>
-        skillAdvisorCatalog.find((skill) => skill.publicId === publicId),
-      )
-      .filter((skill): skill is PublicSkill => Boolean(skill));
+    const recommendedSkills =
+      skillAdvisorRecommendedSkills.length > 0
+        ? skillAdvisorRecommendedSkills
+        : skillAdvisorRecommendedIds
+            .map((publicId) =>
+              skillAdvisorCatalog.find((skill) => skill.publicId === publicId),
+            )
+            .filter((skill): skill is PublicSkill => Boolean(skill));
     const hasUserMessage = skillAdvisorMessages.some(
       (message) => message.role === "user",
     );
@@ -3272,7 +3586,7 @@ function App() {
     return (
       <div
         className="skillDrawerOverlay"
-        onClick={() => setShowSkillAdvisor(false)}
+        onClick={closeSkillAdvisor}
       >
         <aside
           className="skillDrawer skillAdvisorDrawer"
@@ -3291,183 +3605,342 @@ function App() {
             </div>
             <div className="skillAdvisorHeaderActions">
               <button
-                className="iconButton"
+                className={`skillAdvisorHeaderButton ${
+                  skillAdvisorHistoryOpen ? "selected" : ""
+                }`.trim()}
+                aria-expanded={skillAdvisorHistoryOpen}
+                aria-controls="skill-advisor-history"
+                onClick={() => setSkillAdvisorHistoryOpen((open) => !open)}
+              >
+                <ClockCounterClockwiseIcon weight="bold" />
+                {tr("skillAdvisorHistory")}
+              </button>
+              <button
+                className="skillAdvisorHeaderButton"
                 aria-label={tr("skillAdvisorRestart")}
                 title={tr("skillAdvisorRestart")}
                 disabled={skillAdvisorLoading}
                 onClick={resetSkillAdvisorConversation}
               >
-                <ArrowsClockwiseIcon weight="bold" />
+                <PlusIcon weight="bold" />
+                {tr("skillAdvisorNewConversation")}
               </button>
               <button
                 className="iconButton"
                 aria-label={tr("skillDetailClose")}
-                onClick={() => setShowSkillAdvisor(false)}
+                onClick={closeSkillAdvisor}
               >
                 <XIcon weight="bold" />
               </button>
             </div>
           </header>
-          <div className="skillAdvisorConversation" aria-live="polite">
-            <div className="skillAdvisorMessages">
-              {skillAdvisorMessages.map((message, index) => (
-                <div
-                  className={`skillAdvisorMessage ${message.role}`}
-                  key={`${message.role}-${index}`}
-                >
-                  {message.role === "assistant" ? (
-                    <SparkleIcon weight="fill" />
-                  ) : null}
-                  <p>{message.content}</p>
+          <div
+            className={`skillAdvisorWorkspace ${
+              skillAdvisorHistoryOpen ? "" : "historyCollapsed"
+            }`.trim()}
+          >
+            {skillAdvisorHistoryOpen ? (
+              <aside
+                className="skillAdvisorHistory"
+                id="skill-advisor-history"
+                aria-label={tr("skillAdvisorHistory")}
+              >
+                <div className="skillAdvisorHistoryHeader">
+                  <strong>{tr("skillAdvisorHistory")}</strong>
+                  <span>{skillAdvisorConversations.length}</span>
                 </div>
-              ))}
-              {skillAdvisorLoading ? (
-                <div className="skillAdvisorMessage assistant loading">
-                  <CircleNotchIcon className="spin" weight="bold" />
-                  <p>{tr("skillAdvisorThinking")}</p>
+                {skillAdvisorHistoryLoading ? (
+                  <div className="skillAdvisorHistoryStatus">
+                    <CircleNotchIcon className="spin" weight="bold" />
+                    <span>{tr("skillAdvisorHistoryLoading")}</span>
+                  </div>
+                ) : skillAdvisorConversations.length === 0 ? (
+                  <div className="skillAdvisorHistoryEmpty">
+                    <ChatCircleTextIcon weight="duotone" />
+                    <span>{tr("skillAdvisorHistoryEmpty")}</span>
+                  </div>
+                ) : (
+                  <div className="skillAdvisorHistoryList">
+                    {skillAdvisorConversations.map((conversation) => (
+                      <article
+                        className={`skillAdvisorHistoryItem ${
+                          skillAdvisorConversationId === conversation.id
+                            ? "selected"
+                            : ""
+                        }`.trim()}
+                        key={conversation.id}
+                      >
+                        {skillAdvisorRenamingId === conversation.id ? (
+                          <form
+                            className="skillAdvisorHistoryRename"
+                            onSubmit={(event) => {
+                              event.preventDefault();
+                              void commitSkillAdvisorRename(conversation);
+                            }}
+                          >
+                            <input
+                              autoFocus
+                              maxLength={80}
+                              value={skillAdvisorRenameInput}
+                              aria-label={tr("skillAdvisorHistoryRename")}
+                              onChange={(event) =>
+                                setSkillAdvisorRenameInput(event.target.value)
+                              }
+                            />
+                            <button
+                              className="iconButton"
+                              type="submit"
+                              aria-label={tr("confirm")}
+                              disabled={!skillAdvisorRenameInput.trim()}
+                            >
+                              <CheckIcon weight="bold" />
+                            </button>
+                            <button
+                              className="iconButton"
+                              type="button"
+                              aria-label={tr("cancel")}
+                              onClick={() => setSkillAdvisorRenamingId(null)}
+                            >
+                              <XIcon weight="bold" />
+                            </button>
+                          </form>
+                        ) : (
+                          <>
+                            <button
+                              className="skillAdvisorHistorySelect"
+                              disabled={skillAdvisorLoading}
+                              onClick={() =>
+                                restoreSkillAdvisorConversation(conversation)
+                              }
+                            >
+                              <ChatCircleTextIcon weight="duotone" />
+                              <span>
+                                <strong>{conversation.title}</strong>
+                                <small>
+                                  {formatSkillAdvisorHistoryTime(
+                                    conversation.updatedAt,
+                                  )}
+                                </small>
+                              </span>
+                            </button>
+                            <div className="skillAdvisorHistoryActions">
+                              <button
+                                className="iconButton"
+                                aria-label={tr("skillAdvisorHistoryRename")}
+                                title={tr("skillAdvisorHistoryRename")}
+                                disabled={skillAdvisorLoading}
+                                onClick={() =>
+                                  beginSkillAdvisorRename(conversation)
+                                }
+                              >
+                                <PencilSimpleIcon weight="bold" />
+                              </button>
+                              <button
+                                className="iconButton danger"
+                                aria-label={tr("skillAdvisorHistoryDelete")}
+                                title={tr("skillAdvisorHistoryDelete")}
+                                disabled={skillAdvisorLoading}
+                                onClick={() =>
+                                  void deleteSkillAdvisorConversation(
+                                    conversation,
+                                  )
+                                }
+                              >
+                                <TrashIcon weight="bold" />
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </article>
+                    ))}
+                  </div>
+                )}
+                {skillAdvisorHistoryError ? (
+                  <p className="skillAdvisorHistoryError" role="alert">
+                    {skillAdvisorHistoryError}
+                  </p>
+                ) : null}
+                <p className="skillAdvisorHistoryRetention">
+                  {tr("skillAdvisorHistoryRetention")}
+                </p>
+              </aside>
+            ) : null}
+            <section className="skillAdvisorChat">
+              {skillAdvisorConversationId ? (
+                <div className="skillAdvisorCurrentConversation">
+                  <ChatCircleTextIcon weight="duotone" />
+                  <strong>{skillAdvisorConversationTitle}</strong>
                 </div>
               ) : null}
-            </div>
-            {!hasUserMessage && !skillAdvisorCatalogLoading ? (
-              <div className="skillAdvisorStarters">
-                {starterPrompts.map((prompt) => (
-                  <button
-                    className="skillAdvisorStarter"
-                    key={prompt}
-                    disabled={skillAdvisorCatalog.length === 0}
-                    onClick={() => void submitSkillAdvisorMessage(prompt)}
-                  >
-                    {prompt}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-            {skillAdvisorCatalogLoading ? (
-              <div className="skillAdvisorCatalogLoading">
-                <CircleNotchIcon className="spin" weight="bold" />
-                <span>{tr("skillAdvisorLoadingCatalog")}</span>
-              </div>
-            ) : null}
-            {recommendedSkills.length > 0 ? (
-              <section
-                className="skillAdvisorRecommendations"
-                aria-label={tr("skillAdvisorRecommendations")}
-              >
-                <h3>{tr("skillAdvisorRecommendations")}</h3>
-                <div className="skillAdvisorRecommendationList">
-                  {recommendedSkills.map((skill) => (
-                    <article
-                      className="skillAdvisorRecommendation"
-                      key={skill.publicId}
+              <div className="skillAdvisorConversation" aria-live="polite">
+                <div className="skillAdvisorMessages">
+                  {skillAdvisorMessages.map((message, index) => (
+                    <div
+                      className={`skillAdvisorMessage ${message.role}`}
+                      key={`${message.role}-${index}`}
                     >
-                      <div>
-                        <strong>{skill.displayName}</strong>
-                        <p>{skill.description}</p>
-                        {skill.primaryCategory ? (
-                          <span className="skillTag">
-                            {skill.primaryCategory.name}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="skillAdvisorRecommendationActions">
-                        <button
-                          className="linkButton"
-                          onClick={() => {
-                            setShowSkillAdvisor(false);
-                            setSelectedLibrarySkill(skill);
-                          }}
-                        >
-                          {tr("skillAdvisorViewDetails")}
-                        </button>
-                        {libraryInstallConflictId === skill.publicId ? (
-                          <button
-                            className="secondaryButton"
-                            disabled={libraryInstallingId === skill.publicId}
-                            onClick={() => void installFromLibrary(skill, true)}
-                          >
-                            {tr("skillLibraryReplaceLocal")}
-                          </button>
-                        ) : (
-                          <button
-                            className="primaryButton"
-                            disabled={
-                              !skill.latestPublishedVersion ||
-                              libraryInstallingId === skill.publicId
-                            }
-                            onClick={() => void installFromLibrary(skill)}
-                          >
-                            {libraryInstallingId === skill.publicId ? (
-                              <CircleNotchIcon className="spin" weight="bold" />
-                            ) : null}
-                            {tr("skillLibraryInstallLocal")}
-                          </button>
-                        )}
-                      </div>
-                    </article>
+                      {message.role === "assistant" ? (
+                        <SparkleIcon weight="fill" />
+                      ) : null}
+                      <p>{message.content}</p>
+                    </div>
                   ))}
+                  {skillAdvisorLoading ? (
+                    <div className="skillAdvisorMessage assistant loading">
+                      <CircleNotchIcon className="spin" weight="bold" />
+                      <p>{tr("skillAdvisorThinking")}</p>
+                    </div>
+                  ) : null}
                 </div>
-              </section>
-            ) : null}
-            {skillAdvisorUsedFallback ? (
-              <p className="skillAdvisorFallbackNote">
-                {tr("skillAdvisorFallbackNote")}
-              </p>
-            ) : null}
-            {libraryInstallNote ? (
-              <section
-                className={`notice ${libraryInstallConflict ? "warning" : ""}`.trim()}
-              >
-                <span>{libraryInstallNote}</span>
-              </section>
-            ) : null}
-            {skillAdvisorError ? (
-              <section className="notice warning">
-                <strong>{skillAdvisorError}</strong>
-              </section>
-            ) : null}
-            <div ref={skillAdvisorEndRef} />
-          </div>
-          <form
-            className="skillAdvisorComposer"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void submitSkillAdvisorMessage();
-            }}
-          >
-            <textarea
-              ref={skillAdvisorInputRef}
-              rows={2}
-              maxLength={2000}
-              value={skillAdvisorInput}
-              aria-label={tr("skillAdvisorInputPlaceholder")}
-              placeholder={tr("skillAdvisorInputPlaceholder")}
-              disabled={skillAdvisorCatalogLoading || skillAdvisorLoading}
-              onChange={(event) => setSkillAdvisorInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (
-                  event.key === "Enter" &&
-                  !event.shiftKey &&
-                  !event.nativeEvent.isComposing
-                ) {
+                {!hasUserMessage && !skillAdvisorCatalogLoading ? (
+                  <div className="skillAdvisorStarters">
+                    {starterPrompts.map((prompt) => (
+                      <button
+                        className="skillAdvisorStarter"
+                        key={prompt}
+                        disabled={skillAdvisorCatalog.length === 0}
+                        onClick={() => void submitSkillAdvisorMessage(prompt)}
+                      >
+                        {prompt}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+                {skillAdvisorCatalogLoading ? (
+                  <div className="skillAdvisorCatalogLoading">
+                    <CircleNotchIcon className="spin" weight="bold" />
+                    <span>{tr("skillAdvisorLoadingCatalog")}</span>
+                  </div>
+                ) : null}
+                {recommendedSkills.length > 0 ? (
+                  <section
+                    className="skillAdvisorRecommendations"
+                    aria-label={tr("skillAdvisorRecommendations")}
+                  >
+                    <h3>{tr("skillAdvisorRecommendations")}</h3>
+                    <div className="skillAdvisorRecommendationList">
+                      {recommendedSkills.map((skill) => (
+                        <article
+                          className="skillAdvisorRecommendation"
+                          key={skill.publicId}
+                        >
+                          <div>
+                            <strong>{skill.displayName}</strong>
+                            <p>{skill.description}</p>
+                            {skill.primaryCategory ? (
+                              <span className="skillTag">
+                                {skill.primaryCategory.name}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="skillAdvisorRecommendationActions">
+                            <button
+                              className="linkButton"
+                              onClick={() => {
+                                closeSkillAdvisor();
+                                setSelectedLibrarySkill(skill);
+                              }}
+                            >
+                              {tr("skillAdvisorViewDetails")}
+                            </button>
+                            {libraryInstallConflictId === skill.publicId ? (
+                              <button
+                                className="secondaryButton"
+                                disabled={libraryInstallingId === skill.publicId}
+                                onClick={() =>
+                                  void installFromLibrary(skill, true)
+                                }
+                              >
+                                {tr("skillLibraryReplaceLocal")}
+                              </button>
+                            ) : (
+                              <button
+                                className="primaryButton"
+                                disabled={
+                                  !skill.latestPublishedVersion ||
+                                  libraryInstallingId === skill.publicId
+                                }
+                                onClick={() => void installFromLibrary(skill)}
+                              >
+                                {libraryInstallingId === skill.publicId ? (
+                                  <CircleNotchIcon
+                                    className="spin"
+                                    weight="bold"
+                                  />
+                                ) : null}
+                                {tr("skillLibraryInstallLocal")}
+                              </button>
+                            )}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  </section>
+                ) : null}
+                {skillAdvisorUsedFallback ? (
+                  <p className="skillAdvisorFallbackNote">
+                    {tr("skillAdvisorFallbackNote")}
+                  </p>
+                ) : null}
+                {libraryInstallNote ? (
+                  <section
+                    className={`notice ${
+                      libraryInstallConflict ? "warning" : ""
+                    }`.trim()}
+                  >
+                    <span>{libraryInstallNote}</span>
+                  </section>
+                ) : null}
+                {skillAdvisorError ? (
+                  <section className="notice warning">
+                    <strong>{skillAdvisorError}</strong>
+                  </section>
+                ) : null}
+                <div ref={skillAdvisorEndRef} />
+              </div>
+              <form
+                className="skillAdvisorComposer"
+                onSubmit={(event) => {
                   event.preventDefault();
                   void submitSkillAdvisorMessage();
-                }
-              }}
-            />
-            <button
-              className="primaryButton skillAdvisorSend"
-              type="submit"
-              aria-label={tr("skillAdvisorSend")}
-              disabled={
-                !skillAdvisorInput.trim() ||
-                skillAdvisorCatalogLoading ||
-                skillAdvisorLoading ||
-                availableSkillAdvisorCatalog().length === 0
-              }
-            >
-              <PaperPlaneRightIcon weight="bold" />
-            </button>
-          </form>
+                }}
+              >
+                <textarea
+                  ref={skillAdvisorInputRef}
+                  rows={2}
+                  maxLength={2000}
+                  value={skillAdvisorInput}
+                  aria-label={tr("skillAdvisorInputPlaceholder")}
+                  placeholder={tr("skillAdvisorInputPlaceholder")}
+                  disabled={skillAdvisorCatalogLoading || skillAdvisorLoading}
+                  onChange={(event) => setSkillAdvisorInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "Enter" &&
+                      !event.shiftKey &&
+                      !event.nativeEvent.isComposing
+                    ) {
+                      event.preventDefault();
+                      void submitSkillAdvisorMessage();
+                    }
+                  }}
+                />
+                <button
+                  className="primaryButton skillAdvisorSend"
+                  type="submit"
+                  aria-label={tr("skillAdvisorSend")}
+                  disabled={
+                    !skillAdvisorInput.trim() ||
+                    skillAdvisorCatalogLoading ||
+                    skillAdvisorLoading ||
+                    availableSkillAdvisorCatalog().length === 0
+                  }
+                >
+                  <PaperPlaneRightIcon weight="bold" />
+                </button>
+              </form>
+            </section>
+          </div>
         </aside>
       </div>
     );

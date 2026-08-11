@@ -403,10 +403,25 @@ const dictionaries = {
     skillLibraryErrorDetails: "Technical details",
     skillAdvisorOpen: "Smart recommendations",
     skillAdvisorTitle: "Skill advisor",
-    skillAdvisorSubtitle: "Describe your work and get a focused shortlist",
+    skillAdvisorSubtitle:
+      "Uses a dedicated local Codex conversation for a focused shortlist",
     skillAdvisorWelcome:
       "What would you like Codex to help you accomplish? Describe a task, the material you work with, or a step you repeat often.",
     skillAdvisorRestart: "Start a new conversation",
+    skillAdvisorNewConversation: "New chat",
+    skillAdvisorHistory: "History",
+    skillAdvisorHistoryLoading: "Loading history…",
+    skillAdvisorHistoryEmpty: "No saved conversations yet.",
+    skillAdvisorHistoryRename: "Rename conversation",
+    skillAdvisorHistoryDelete: "Delete conversation",
+    skillAdvisorHistoryDeleteConfirm:
+      'Delete “{title}”? This conversation cannot be recovered.',
+    skillAdvisorHistoryRetention:
+      "Saved on this device for 30 days, up to 50 conversations.",
+    skillAdvisorHistoryLoadFailed: "Conversation history could not be loaded: {error}",
+    skillAdvisorHistorySaveFailed: "Conversation history could not be saved: {error}",
+    skillAdvisorHistoryDeleteFailed:
+      "The conversation could not be deleted: {error}",
     skillAdvisorThinking: "Finding the best matches…",
     skillAdvisorLoadingCatalog: "Loading the available skill catalog…",
     skillAdvisorRecommendations: "Recommended skills",
@@ -417,7 +432,15 @@ const dictionaries = {
     skillAdvisorStarterDocuments: "Work with documents and data",
     skillAdvisorStarterDevelopment: "Improve a development workflow",
     skillAdvisorFallbackNote:
-      "The AI service was unavailable, so these matches were selected from the local catalog.",
+      "Local Codex was unavailable, so these matches were selected from the local skill index.",
+    skillAdvisorFallbackNeedTaskDetails:
+      "Could you be more specific? Tell me the task, the content you work with, and which steps you want to automate.",
+    skillAdvisorFallbackNeedTools:
+      "I do not have a clear match yet. Which tools or file types do you use most, such as code, spreadsheets, PDFs, websites, or designs?",
+    skillAdvisorFallbackNoMatch:
+      "The current catalog still has no clear match. Try describing the input, desired result, or a tool that the workflow must use.",
+    skillAdvisorFallbackMatchesFound:
+      "Based on your workflow, I found these installable skills. Review the details and choose the ones that best fit your current task.",
     skillAdvisorNoAvailableSkills:
       "Every catalog skill is already installed on this computer.",
     skillAdvisorCatalogUnavailable:
@@ -911,10 +934,21 @@ const dictionaries = {
     skillLibraryErrorDetails: "技术详情",
     skillAdvisorOpen: "智能推荐",
     skillAdvisorTitle: "技能推荐助手",
-    skillAdvisorSubtitle: "描述你的工作，获得精简的技能建议",
+    skillAdvisorSubtitle: "通过独立的本机 Codex 会话获得精简的技能建议",
     skillAdvisorWelcome:
       "你希望 Codex 帮你完成什么？可以描述一个任务、经常处理的内容，或者需要重复执行的步骤。",
     skillAdvisorRestart: "开始新对话",
+    skillAdvisorNewConversation: "新对话",
+    skillAdvisorHistory: "历史会话",
+    skillAdvisorHistoryLoading: "正在加载历史会话…",
+    skillAdvisorHistoryEmpty: "还没有保存的会话。",
+    skillAdvisorHistoryRename: "重命名会话",
+    skillAdvisorHistoryDelete: "删除会话",
+    skillAdvisorHistoryDeleteConfirm: "确定删除“{title}”吗？删除后无法恢复。",
+    skillAdvisorHistoryRetention: "会话保存在本机，保留30天，最多50个。",
+    skillAdvisorHistoryLoadFailed: "无法加载历史会话：{error}",
+    skillAdvisorHistorySaveFailed: "无法保存历史会话：{error}",
+    skillAdvisorHistoryDeleteFailed: "无法删除会话：{error}",
     skillAdvisorThinking: "正在寻找合适的技能…",
     skillAdvisorLoadingCatalog: "正在加载可安装的技能目录…",
     skillAdvisorRecommendations: "推荐安装",
@@ -925,7 +959,15 @@ const dictionaries = {
     skillAdvisorStarterDocuments: "处理文档与数据",
     skillAdvisorStarterDevelopment: "优化开发工作流程",
     skillAdvisorFallbackNote:
-      "AI 服务暂时不可用，本次结果由本地技能目录匹配生成。",
+      "本机 Codex 暂时不可用，本次结果由本地技能索引匹配生成。",
+    skillAdvisorFallbackNeedTaskDetails:
+      "可以再具体一点吗？请告诉我你要完成的任务、经常处理的内容，以及希望自动化的步骤。",
+    skillAdvisorFallbackNeedTools:
+      "我还没有找到足够明确的匹配。你主要使用哪些工具或文件类型？例如代码、表格、PDF、网页或设计稿。",
+    skillAdvisorFallbackNoMatch:
+      "当前技能目录里还没有明确匹配。可以换一种方式描述输入内容、期望结果或必须使用的工具。",
+    skillAdvisorFallbackMatchesFound:
+      "根据你描述的工作方式，我找到了下面这些可安装的技能。建议先查看详情，再选择最贴近当前任务的技能。",
     skillAdvisorNoAvailableSkills: "技能库中的技能均已安装到本机。",
     skillAdvisorCatalogUnavailable: "无法加载技能目录：{error}",
     skillAdvisorRequestFailed: "暂时无法生成推荐：{error}",

@@ -2,6 +2,7 @@
 
 mod codex_app;
 mod codex_config;
+mod codex_skill_advisor;
 mod desktop_auth;
 mod http_client;
 mod skill_hub;
@@ -24,8 +25,10 @@ use desktop_auth::{
 };
 use futures_util::StreamExt;
 use skill_hub::{
-    install_ag_skill, list_ag_skill_categories, list_ag_skills, recommend_ag_skills,
-    report_ag_skill_uninstalled,
+    delete_ag_skill_advisor_conversation, delete_ag_skill_advisor_thread, install_ag_skill,
+    list_ag_skill_advisor_conversations, list_ag_skill_categories, list_ag_skills,
+    recommend_ag_skills, refresh_ag_skill_index, report_ag_skill_uninstalled,
+    save_ag_skill_advisor_conversation,
 };
 use skills::{
     archive_category, create_category, delete_category, disable_skill, enable_skill, export_skill,
@@ -759,8 +762,13 @@ fn main() {
             install_skill,
             export_skill,
             list_ag_skill_categories,
+            refresh_ag_skill_index,
             list_ag_skills,
             recommend_ag_skills,
+            list_ag_skill_advisor_conversations,
+            save_ag_skill_advisor_conversation,
+            delete_ag_skill_advisor_conversation,
+            delete_ag_skill_advisor_thread,
             install_ag_skill,
             report_ag_skill_uninstalled,
             open_devtools

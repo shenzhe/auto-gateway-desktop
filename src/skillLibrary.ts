@@ -66,6 +66,13 @@ export type Paged<T> = {
 
 export const skillCatalogPageSize = 20;
 
+export type SkillIndexSyncResult = {
+  total: number;
+  changed: boolean;
+  synchronized: boolean;
+  usedCached: boolean;
+};
+
 export type CatalogQuery = {
   q?: string;
   category?: string;
@@ -81,12 +88,33 @@ export type SkillAdvisorMessage = {
 export type SkillRecommendationResponse = {
   reply: string;
   recommendedPublicIds: string[];
+  recommendedSkills: PublicSkill[];
   needsMoreContext: boolean;
   usedFallback: boolean;
+  fallbackReplyKey:
+    | "need-task-details"
+    | "need-tools"
+    | "no-match"
+    | "matches-found"
+    | null;
+  threadId: string | null;
+};
+
+export type SkillAdvisorConversation = {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: SkillAdvisorMessage[];
+  recommendedPublicIds: string[];
+  recommendedSkills: PublicSkill[];
+  usedFallback: boolean;
+  threadId: string | null;
 };
 
 export type SkillLibraryClient = {
   listCategories(locale: "en" | "zh"): Promise<SkillCategoryDto[]>;
+  refreshIndex(locale: "en" | "zh"): Promise<SkillIndexSyncResult>;
   listPublicSkills(
     query: CatalogQuery,
     locale: "en" | "zh",
@@ -103,14 +131,22 @@ export type SkillLibraryClient = {
     catalog: PublicSkill[],
     messages: SkillAdvisorMessage[],
     locale: "en" | "zh",
-    apiKey: string,
-    endpoint: string,
+    threadId: string | null,
+    excludedSkillNames: string[],
   ): Promise<SkillRecommendationResponse>;
+  listAdvisorConversations(): Promise<SkillAdvisorConversation[]>;
+  saveAdvisorConversation(
+    conversation: SkillAdvisorConversation,
+  ): Promise<SkillAdvisorConversation>;
+  deleteAdvisorConversation(conversationId: string): Promise<string | null>;
+  deleteAdvisorThread(threadId: string): Promise<boolean>;
 };
 
 export const skillLibraryClient: SkillLibraryClient = {
   listCategories: (locale) =>
     invoke<SkillCategoryDto[]>("list_ag_skill_categories", { locale }),
+  refreshIndex: (locale) =>
+    invoke<SkillIndexSyncResult>("refresh_ag_skill_index", { locale }),
   listPublicSkills: (query, locale) =>
     invoke<Paged<PublicSkill>>("list_ag_skills", {
       query: query.q,
@@ -135,12 +171,30 @@ export const skillLibraryClient: SkillLibraryClient = {
     }),
   reportUninstalled: (id, accessToken) =>
     invoke<boolean>("report_ag_skill_uninstalled", { id, accessToken }),
-  recommendSkills: (catalog, messages, locale, apiKey, endpoint) =>
+  recommendSkills: (
+    catalog,
+    messages,
+    locale,
+    threadId,
+    excludedSkillNames,
+  ) =>
     invoke<SkillRecommendationResponse>("recommend_ag_skills", {
       catalog,
       messages,
       locale,
-      apiKey,
-      endpoint,
+      threadId,
+      excludedSkillNames,
     }),
+  listAdvisorConversations: () =>
+    invoke<SkillAdvisorConversation[]>("list_ag_skill_advisor_conversations"),
+  saveAdvisorConversation: (conversation) =>
+    invoke<SkillAdvisorConversation>("save_ag_skill_advisor_conversation", {
+      conversation,
+    }),
+  deleteAdvisorConversation: (conversationId) =>
+    invoke<string | null>("delete_ag_skill_advisor_conversation", {
+      conversationId,
+    }),
+  deleteAdvisorThread: (threadId) =>
+    invoke<boolean>("delete_ag_skill_advisor_thread", { threadId }),
 };

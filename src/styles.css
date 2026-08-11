@@ -2940,7 +2940,7 @@ h1 {
   overflow-y: auto;
 }
 .skillAdvisorDrawer {
-  width: min(640px, 100%);
+  width: min(920px, 100%);
 }
 .skillAdvisorTitle {
   display: flex;
@@ -2970,7 +2970,228 @@ h1 {
 .skillAdvisorHeaderActions {
   display: flex;
   flex: 0 0 auto;
+  align-items: center;
   gap: 8px;
+}
+.skillAdvisorHeaderButton {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--muted);
+  background: var(--control-bg);
+  font-size: 12px;
+  font-weight: 680;
+  white-space: nowrap;
+}
+.skillAdvisorHeaderButton:hover,
+.skillAdvisorHeaderButton.selected {
+  color: var(--primary);
+  border-color: color-mix(in oklch, var(--primary) 32%, var(--line));
+  background: var(--primary-soft);
+}
+.skillAdvisorHeaderButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.skillAdvisorHeaderButton svg {
+  width: 16px;
+  height: 16px;
+}
+.skillAdvisorWorkspace {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  grid-template-columns: 248px minmax(0, 1fr);
+}
+.skillAdvisorWorkspace.historyCollapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+.skillAdvisorHistory {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  padding: 14px 10px 12px;
+  border-right: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+.skillAdvisorHistoryHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 6px 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.skillAdvisorHistoryHeader span {
+  min-width: 24px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--subtle);
+  background: var(--control-bg);
+  text-align: center;
+}
+.skillAdvisorHistoryList {
+  display: grid;
+  min-height: 0;
+  gap: 6px;
+  overflow-y: auto;
+}
+.skillAdvisorHistoryItem {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+}
+.skillAdvisorHistoryItem:hover {
+  border-color: var(--line);
+  background: var(--control-bg);
+}
+.skillAdvisorHistoryItem.selected {
+  border-color: color-mix(in oklch, var(--primary) 28%, var(--line));
+  background: var(--primary-soft);
+}
+.skillAdvisorHistorySelect {
+  display: flex;
+  min-width: 0;
+  min-height: 44px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+}
+.skillAdvisorHistorySelect:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+.skillAdvisorHistorySelect > svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+.skillAdvisorHistorySelect > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+.skillAdvisorHistorySelect strong,
+.skillAdvisorHistorySelect small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.skillAdvisorHistorySelect strong {
+  font-size: 12px;
+}
+.skillAdvisorHistorySelect small {
+  color: var(--subtle);
+  font-size: 10px;
+}
+.skillAdvisorHistoryActions {
+  display: flex;
+  gap: 3px;
+}
+.skillAdvisorHistoryActions .iconButton,
+.skillAdvisorHistoryRename .iconButton {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+.skillAdvisorHistoryActions .iconButton.danger:hover {
+  color: var(--danger);
+  border-color: color-mix(in oklch, var(--danger) 34%, var(--line));
+}
+.skillAdvisorHistoryRename {
+  display: grid;
+  min-width: 0;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 4px;
+}
+.skillAdvisorHistoryRename input {
+  min-width: 0;
+  height: 36px;
+  padding: 0 8px;
+  border: 1px solid var(--primary);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+  outline: 2px solid color-mix(in oklch, var(--primary) 16%, transparent);
+}
+.skillAdvisorHistoryStatus,
+.skillAdvisorHistoryEmpty {
+  display: flex;
+  min-height: 96px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px;
+  color: var(--subtle);
+  font-size: 12px;
+  text-align: center;
+}
+.skillAdvisorHistoryStatus svg,
+.skillAdvisorHistoryEmpty svg {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+}
+.skillAdvisorHistoryError {
+  margin: 10px 6px 0;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.skillAdvisorHistoryRetention {
+  margin: auto 6px 0;
+  padding-top: 10px;
+  color: var(--subtle);
+  font-size: 10px;
+  line-height: 1.4;
+}
+.skillAdvisorChat {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+.skillAdvisorCurrentConversation {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  background: color-mix(in oklch, var(--surface) 92%, var(--panel-soft));
+}
+.skillAdvisorCurrentConversation svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--primary);
+}
+.skillAdvisorCurrentConversation strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .skillAdvisorConversation {
   display: flex;
@@ -3797,6 +4018,18 @@ h1 {
   .skillDrawer {
     width: 100%;
   }
+  .skillAdvisorWorkspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .skillAdvisorHistory {
+    max-height: 240px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .skillAdvisorHistoryRetention {
+    display: none;
+  }
   .skillDetailGrid {
     grid-template-columns: 1fr;
   }
@@ -3810,6 +4043,22 @@ h1 {
   }
   .skillAdvisorConversation {
     padding: 16px;
+  }
+  .skillAdvisorDrawer .skillDrawerHeader {
+    align-items: flex-start;
+    padding: 14px 16px;
+  }
+  .skillAdvisorTitle span {
+    display: none;
+  }
+  .skillAdvisorHeaderActions {
+    gap: 4px;
+  }
+  .skillAdvisorHeaderButton {
+    padding-inline: 8px;
+  }
+  .skillAdvisorCurrentConversation {
+    padding-inline: 16px;
   }
   .skillAdvisorMessage {
     max-width: 94%;
