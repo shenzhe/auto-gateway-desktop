@@ -5,6 +5,8 @@ src-tauri/target/
 .env
 .env.*
 !.env.example
+!.env.development
+!.env.production
 configs/r2.env
 configs/apple-notary.env
 configs/artifact-signing.metadata.json

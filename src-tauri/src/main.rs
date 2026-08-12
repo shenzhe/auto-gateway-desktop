@@ -5,12 +5,15 @@ mod codex_config;
 mod codex_skill_advisor;
 mod desktop_auth;
 mod http_client;
+mod runtime;
 mod skill_hub;
 mod skills;
 
 use codex_app::{
-    install as install_codex_app, is_installed_app_running, local_status as local_codex_app_status,
-    open_installed_app, status as codex_app_status, CodexAppStatus, CodexInstallResult,
+    apply_update as apply_codex_update, close_installed_app,
+    download_update as download_codex_update, install as install_codex_app,
+    is_installed_app_running, local_status as local_codex_app_status, open_installed_app,
+    status as codex_app_status, CodexAppStatus, CodexInstallResult, CodexUpdateDownloadResult,
 };
 use codex_config::{
     apply_configuration, default_codex_paths, restore_latest_backups, CodexStatus,
@@ -19,11 +22,13 @@ use codex_config::{
 use desktop_auth::{
     bootstrap_desktop_key, clear_desktop_session, clear_stored_desktop_api_key,
     create_desktop_console_ticket, desktop_account_summary, desktop_notifications,
-    exchange_desktop_authorization, installation_id, refresh_desktop_state, restore_desktop_state,
-    save_desktop_api_key, save_desktop_session, DesktopAccountSummary, DesktopBootstrapKey,
-    DesktopNotificationList, DesktopSession, StoredDesktopState,
+    desktop_subscriptions, exchange_desktop_authorization, installation_id, refresh_desktop_state,
+    restore_desktop_state, save_desktop_api_key, save_desktop_session, DesktopAccountSummary,
+    DesktopBootstrapKey, DesktopNotificationList, DesktopSession, DesktopSubscriptionList,
+    StoredDesktopState,
 };
 use futures_util::StreamExt;
+use runtime::AUTO_GATEWAY_CONSOLE_BASE_URL;
 use skill_hub::{
     delete_ag_skill_advisor_conversation, delete_ag_skill_advisor_thread, install_ag_skill,
     list_ag_skill_advisor_conversations, list_ag_skill_categories, list_ag_skills,
@@ -256,6 +261,27 @@ async fn install_codex(
 }
 
 #[tauri::command]
+async fn download_codex_update_command(
+    app: AppHandle,
+    force_redownload: bool,
+) -> Result<CodexUpdateDownloadResult, String> {
+    download_codex_update(&app, force_redownload).await
+}
+
+#[tauri::command]
+async fn apply_codex_update_command(
+    app: AppHandle,
+    downloaded_version: String,
+) -> Result<CodexInstallResult, String> {
+    apply_codex_update(&app, downloaded_version).await
+}
+
+#[tauri::command]
+fn close_codex() -> Result<(), String> {
+    close_installed_app()
+}
+
+#[tauri::command]
 fn open_codex() -> Result<(), String> {
     open_installed_app()
 }
@@ -301,19 +327,27 @@ async fn open_desktop_sign_in_command(
     app: AppHandle,
     challenge: String,
     state: String,
+    locale: Option<String>,
     original_user_agent: Option<String>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let challenge = challenge.trim();
     let state = state.trim();
     if challenge.is_empty() || state.is_empty() {
         return Err("desktop sign-in challenge is missing".to_string());
     }
-    let mut sign_in_url = Url::parse("https://autogateway.cc/login")
+    let mut sign_in_url = Url::parse(&format!("{AUTO_GATEWAY_CONSOLE_BASE_URL}/login"))
         .map_err(|error| format!("build desktop sign-in URL: {error}"))?;
     sign_in_url
         .query_pairs_mut()
         .append_pair("desktopCodeChallenge", challenge)
         .append_pair("desktopState", state);
+    if let Some(locale) = locale
+        .as_deref()
+        .filter(|locale| matches!(*locale, "en" | "zh"))
+    {
+        sign_in_url.query_pairs_mut().append_pair("locale", locale);
+    }
+    let fallback_url = sign_in_url.to_string();
 
     if let Some(window) = app.get_webview_window("auth") {
         window
@@ -325,7 +359,7 @@ async fn open_desktop_sign_in_command(
         window
             .set_focus()
             .map_err(|error| format!("focus the sign-in window: {error}"))?;
-        return Ok(());
+        return Ok(fallback_url);
     }
 
     let app_handle = app.clone();
@@ -353,7 +387,7 @@ async fn open_desktop_sign_in_command(
         })
         .build()
         .map_err(|error| format!("open the in-app sign-in window: {error}"))?;
-    Ok(())
+    Ok(fallback_url)
 }
 
 #[tauri::command]
@@ -417,6 +451,13 @@ async fn get_desktop_notifications_command(
     access_token: String,
 ) -> Result<DesktopNotificationList, String> {
     desktop_notifications(&access_token).await
+}
+
+#[tauri::command]
+async fn get_desktop_subscriptions_command(
+    access_token: String,
+) -> Result<DesktopSubscriptionList, String> {
+    desktop_subscriptions(&access_token).await
 }
 
 #[tauri::command]
@@ -541,21 +582,35 @@ async fn open_console(
     app: AppHandle,
     access_token: String,
     section: Option<String>,
+    locale: Option<String>,
     original_user_agent: Option<String>,
 ) -> Result<(), String> {
     let ticket = create_desktop_console_ticket(&access_token).await?;
-    let mut console_url =
-        Url::parse("https://autogateway.cc/console").map_err(|error| error.to_string())?;
+    let console_path = match section.as_deref() {
+        Some("usage") => "/console/usage",
+        Some("billing") => "/console/purchase",
+        Some("subscription") => "/console/subscriptions",
+        Some("support") => "/console/tickets",
+        _ => "/console",
+    };
+    let mut console_url = Url::parse(&format!("{AUTO_GATEWAY_CONSOLE_BASE_URL}{console_path}"))
+        .map_err(|error| error.to_string())?;
     console_url
         .query_pairs_mut()
         .append_pair("desktopTicket", &ticket.ticket);
     if let Some(section) = section
         .as_deref()
-        .filter(|section| matches!(*section, "billing" | "support"))
+        .filter(|section| matches!(*section, "billing" | "support" | "usage" | "subscription"))
     {
         console_url
             .query_pairs_mut()
             .append_pair("section", section);
+    }
+    if let Some(locale) = locale
+        .as_deref()
+        .filter(|locale| matches!(*locale, "en" | "zh"))
+    {
+        console_url.query_pairs_mut().append_pair("locale", locale);
     }
     if let Some(window) = app.get_webview_window("console") {
         window
@@ -698,6 +753,7 @@ fn main() {
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_updater::Builder::new()
@@ -720,6 +776,9 @@ fn main() {
             get_codex_app_status,
             get_local_codex_app_status,
             install_codex,
+            download_codex_update_command,
+            apply_codex_update_command,
+            close_codex,
             open_codex,
             is_codex_running,
             configure_codex,
@@ -735,6 +794,7 @@ fn main() {
             close_desktop_sign_in_command,
             get_desktop_account_summary_command,
             get_desktop_notifications_command,
+            get_desktop_subscriptions_command,
             update_tray_status_command,
             show_main_window,
             get_desktop_app_version,

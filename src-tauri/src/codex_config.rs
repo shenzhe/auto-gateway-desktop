@@ -365,11 +365,20 @@ fn normalize_api_key(raw: &str) -> Result<String, String> {
 
 fn normalize_endpoint(raw: &str) -> Result<String, String> {
     let value = raw.trim().trim_end_matches('/');
-    if !value.starts_with("https://") {
-        return Err("the gateway endpoint must start with https://".to_string());
-    }
     let parsed =
         url::Url::parse(value).map_err(|_| "the gateway endpoint is invalid".to_string())?;
+    let is_local_host = matches!(
+        parsed.host_str(),
+        Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+    );
+    let valid_scheme = parsed.scheme() == "https"
+        || (cfg!(debug_assertions) && parsed.scheme() == "http" && is_local_host);
+    if !valid_scheme {
+        return Err(
+            "the gateway endpoint must use https://, or a local http:// endpoint in dev mode"
+                .to_string(),
+        );
+    }
     if parsed.host_str().is_none()
         || parsed.path() != "/"
         || parsed.query().is_some()
@@ -683,13 +692,23 @@ base_url = "https://example.com/v1"
     }
 
     #[test]
-    fn accepts_https_origins_only() {
+    fn accepts_secure_origins_and_local_dev_http() {
         assert_eq!(
             normalize_endpoint("https://api.autogateway.cc/"),
             Ok("https://api.autogateway.cc".to_string())
         );
         assert!(normalize_endpoint("http://api.autogateway.cc").is_err());
         assert!(normalize_endpoint("https://api.autogateway.cc/?key=value").is_err());
+        if cfg!(debug_assertions) {
+            assert_eq!(
+                normalize_endpoint("http://127.0.0.1:18181/"),
+                Ok("http://127.0.0.1:18181".to_string())
+            );
+            assert_eq!(
+                normalize_endpoint("http://localhost:18181"),
+                Ok("http://localhost:18181".to_string())
+            );
+        }
     }
 
     #[test]

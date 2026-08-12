@@ -1,4 +1,5 @@
 use crate::http_client::client as desktop_http_client;
+use crate::runtime::AUTO_GATEWAY_API_BASE_URL;
 use aes_gcm::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
@@ -19,7 +20,6 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
-const AUTO_GATEWAY_API_BASE_URL: &str = "https://api.autogateway.cc";
 const INSTALLATION_ID_FILE: &str = "installation-id";
 const ENCRYPTED_STATE_FILE: &str = "desktop-session.enc.json";
 const ENCRYPTED_STATE_FORMAT: &str = "autogateway-desktop-session";
@@ -86,6 +86,46 @@ pub struct DesktopConsoleTicket {
 #[serde(rename_all = "camelCase")]
 pub struct DesktopAccountSummary {
     pub balance: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopSubscription {
+    pub id: i64,
+    pub plan_id: i64,
+    pub plan_code: String,
+    pub plan_name: String,
+    pub status: String,
+    pub auto_renew: bool,
+    pub cancel_at_period_end: bool,
+    pub five_hour_limit_micros: i64,
+    pub five_hour_used_micros: i64,
+    pub five_hour_limit: String,
+    pub five_hour_used: String,
+    #[serde(default)]
+    pub five_hour_reset_at: String,
+    pub weekly_limit_micros: i64,
+    pub weekly_used_micros: i64,
+    pub weekly_limit: String,
+    pub weekly_used: String,
+    #[serde(default)]
+    pub weekly_reset_at: String,
+    pub monthly_limit_micros: i64,
+    pub monthly_used_micros: i64,
+    pub monthly_limit: String,
+    pub monthly_used: String,
+    #[serde(default)]
+    pub monthly_reset_at: String,
+    pub available_micros: i64,
+    pub available: String,
+    pub started_at: String,
+    pub renews_at: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopSubscriptionList {
+    pub items: Vec<DesktopSubscription>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -318,6 +358,18 @@ pub async fn desktop_account_summary(access_token: &str) -> Result<DesktopAccoun
             .await?
             .account,
     )
+}
+
+pub async fn desktop_subscriptions(access_token: &str) -> Result<DesktopSubscriptionList, String> {
+    let response = desktop_http_client()?
+        .get(format!(
+            "{AUTO_GATEWAY_API_BASE_URL}/user/api/subscriptions"
+        ))
+        .bearer_auth(access_token.trim())
+        .send()
+        .await
+        .map_err(|error| format!("contact AUTO Gateway: {error}"))?;
+    decode_response(response, "read desktop subscriptions").await
 }
 
 pub async fn desktop_notifications(access_token: &str) -> Result<DesktopNotificationList, String> {

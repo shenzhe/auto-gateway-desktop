@@ -256,4 +256,9 @@ npm install
 npm run tauri dev
 ```
 
+Runtime endpoints are defined in the tracked `.env.development` and
+`.env.production` files. Vite loads the matching file for the frontend, while
+the Tauri build script loads the same file for native Rust requests. Debug
+builds use the development configuration; release builds use production.
+
 The frontend can be checked independently with `npm run build`.

@@ -2,6 +2,7 @@ use crate::http_client::{
     client_with_timeout as desktop_http_client, client_with_timeouts,
     client_with_timeouts_and_read_timeout,
 };
+use crate::runtime::AUTO_GATEWAY_API_BASE_URL;
 use futures_util::{stream, StreamExt};
 use serde::Deserialize;
 use serde::Serialize;
@@ -22,6 +23,7 @@ use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
+#[cfg(any(target_os = "windows", test))]
 use url::Url;
 
 #[cfg(target_os = "macos")]
@@ -30,13 +32,14 @@ const MACOS_DOWNLOAD_URL: &str = "https://persistent.oaistatic.com/codex-app-pro
 const PREFERRED_DIRECT_DOWNLOAD_URL: &str = "https://codexapp.agentsmirror.com/latest/mac-arm64";
 #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
 const PREFERRED_DIRECT_DOWNLOAD_URL: &str = "https://codexapp.agentsmirror.com/latest/mac-intel";
-const CODEX_VERSION_API_URL: &str = "https://api.autogateway.cc/public/api/desktop/codex-version";
+#[cfg(any(target_os = "windows", test))]
 const TRUSTED_WINDOWS_DOWNLOAD_HOSTS: &[&str] = &[
     "codexapp.agentsmirror.com",
     "codexapp-r2.agentsmirror.com",
     "cdn.autogateway.cc",
     "get.microsoft.com",
 ];
+#[cfg(any(target_os = "windows", test))]
 const WINDOWS_STORE_PRODUCT_ID: &str = "9PLM9XGG6VKS";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -72,6 +75,14 @@ pub struct CodexInstallResult {
     pub message: String,
     pub awaiting_installation: bool,
     pub can_retry_cached_installer: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexUpdateDownloadResult {
+    pub downloaded: bool,
+    pub version: String,
+    pub message: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -331,6 +342,99 @@ pub async fn install(
         } else {
             "ChatGPT and Codex are installed and ready for the next step.".to_string()
         },
+        awaiting_installation: false,
+        can_retry_cached_installer: false,
+    })
+}
+
+/// Download an update without touching a running Codex process. The frontend
+/// can therefore show real download progress and ask for shutdown approval
+/// only after the installer is ready.
+pub async fn download_update(
+    app: &AppHandle,
+    force_redownload: bool,
+) -> Result<CodexUpdateDownloadResult, String> {
+    let latest_release = latest_release().await.ok();
+    let download_urls = download_urls(latest_release.as_ref())?;
+    let extension = download_extension(&download_urls);
+    let download_path = resumable_download_path(
+        latest_release
+            .as_ref()
+            .map(|release| release.version.as_str()),
+        extension,
+    );
+    if force_redownload && download_path.is_file() {
+        let _ = fs::remove_file(&download_path);
+        let _ = fs::remove_file(completed_download_marker(&download_path));
+    }
+
+    emit_install_progress(app, "preparing", 0, None);
+    if download_path.is_file() && completed_download_marker(&download_path).is_file() {
+        let downloaded_bytes = fs::metadata(&download_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        emit_download_progress(
+            app,
+            "downloading",
+            downloaded_bytes,
+            Some(downloaded_bytes),
+            "cached installer",
+            None,
+            None,
+        );
+    } else {
+        download_installer(app, &download_urls, &download_path).await?;
+    }
+
+    Ok(CodexUpdateDownloadResult {
+        downloaded: true,
+        version: latest_release
+            .map(|release| release.version)
+            .unwrap_or_else(|| "latest".to_string()),
+        message: "The verified Codex installer is ready to install.".to_string(),
+    })
+}
+
+/// Install a previously downloaded update, then launch the refreshed app.
+pub async fn apply_update(
+    app: &AppHandle,
+    downloaded_version: String,
+) -> Result<CodexInstallResult, String> {
+    let download_path =
+        resumable_download_path(Some(downloaded_version.as_str()), download_extension(&[]));
+    if !download_path.is_file() || !completed_download_marker(&download_path).is_file() {
+        return Err(
+            "the Codex installer is no longer available; download the update again".to_string(),
+        );
+    }
+
+    let preferred_destination = local_installation().map(|installation| installation.path);
+    install_downloaded_path(app, &download_path, preferred_destination.as_deref()).await?;
+    emit_install_progress(app, "verifying", 0, None);
+    let status = status().await;
+    if !status.installed {
+        return Err(
+            "the Codex installer finished, but the application could not be found".to_string(),
+        );
+    }
+    if let (Some(expected), Some(installed)) = (
+        (downloaded_version != "latest").then_some(downloaded_version.as_str()),
+        status.local_version.as_deref(),
+    ) {
+        if compare_versions(installed, expected) == Ordering::Less {
+            return Err(format!(
+                "the update finished, but version {installed} is still installed; expected {expected}"
+            ));
+        }
+    }
+    let _ = fs::remove_file(completed_download_marker(&download_path));
+    emit_install_progress(app, "opening", 0, None);
+    open_installed_app()?;
+    emit_install_progress(app, "complete", 0, None);
+    Ok(CodexInstallResult {
+        installed: true,
+        path: status.path,
+        message: "ChatGPT and Codex were updated successfully.".to_string(),
         awaiting_installation: false,
         can_retry_cached_installer: false,
     })
@@ -719,6 +823,56 @@ pub fn is_installed_app_running() -> Result<bool, String> {
     Err("This desktop build supports macOS and Windows only.".to_string())
 }
 
+pub fn close_installed_app() -> Result<(), String> {
+    if !is_installed_app_running()? {
+        return Ok(());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for application in ["ChatGPT", "Codex"] {
+            let script = format!("tell application \"{application}\" to quit");
+            let _ = Command::new("osascript")
+                .args(["-e", script.as_str()])
+                .output();
+        }
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if !is_installed_app_running()? {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        return Err(
+            "Codex is still running. Quit Codex completely, then try the update again.".to_string(),
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let script = "$processes = @(Get-Process -Name 'ChatGPT','Codex','OpenAI.Codex' -ErrorAction SilentlyContinue); foreach ($process in $processes) { if ($process.MainWindowHandle -ne 0) { $null = $process.CloseMainWindow() } }";
+        Command::new("powershell.exe")
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .output()
+            .map_err(|error| format!("request ChatGPT to close: {error}"))?;
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if !is_installed_app_running()? {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        return Err(
+            "ChatGPT is still running. Quit ChatGPT completely, then try the update again."
+                .to_string(),
+        );
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    Err("This desktop build supports macOS and Windows only.".to_string())
+}
+
 #[cfg(target_os = "macos")]
 fn process_name_running(process_name: &str) -> Result<bool, String> {
     let output = Command::new("pgrep")
@@ -773,7 +927,9 @@ async fn latest_release() -> Result<PlatformVersion, String> {
         .map_err(|error| format!("prepare the Codex update check: {error}"))?;
 
     let snapshot = client
-        .get(CODEX_VERSION_API_URL)
+        .get(format!(
+            "{AUTO_GATEWAY_API_BASE_URL}/public/api/desktop/codex-version"
+        ))
         .send()
         .await
         .map_err(|error| format!("request the AUTO Gateway Codex version service: {error}"))?
@@ -823,6 +979,7 @@ fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String
     windows_download_urls(latest)
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn windows_download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String> {
     let mut urls = Vec::with_capacity(4);
     if let Some(latest) = latest {
@@ -864,6 +1021,7 @@ fn append_url(urls: &mut Vec<String>, candidate: Option<&str>) {
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn append_trusted_windows_artifact_urls(
     urls: &mut Vec<String>,
     release: &PlatformVersion,
@@ -877,6 +1035,7 @@ fn append_trusted_windows_artifact_urls(
     append_trusted_windows_download_url(urls, artifact.fallback_url.as_deref());
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn append_trusted_windows_download_url(urls: &mut Vec<String>, candidate: Option<&str>) {
     let Some(candidate) = candidate.map(str::trim).filter(|url| !url.is_empty()) else {
         return;
@@ -886,6 +1045,7 @@ fn append_trusted_windows_download_url(urls: &mut Vec<String>, candidate: Option
     }
 }
 
+#[cfg(any(target_os = "windows", test))]
 fn is_trusted_windows_download_url(candidate: &str) -> bool {
     let Ok(url) = Url::parse(candidate) else {
         return false;
@@ -1072,10 +1232,14 @@ fn install_downloaded_app(
         .arg(&mount_path)
         .output()
         .map_err(|error| format!("unmount the official ChatGPT installer: {error}"));
-    let _ = fs::remove_file(download_path);
-    install_result?;
-    detach_result?;
-    Ok(InstallerResult::Complete)
+    match (install_result, detach_result) {
+        (Ok(()), Ok(_)) => {
+            let _ = fs::remove_file(download_path);
+            Ok(InstallerResult::Complete)
+        }
+        (Err(error), Ok(_)) | (Err(error), Err(_)) => Err(error),
+        (Ok(()), Err(error)) => Err(error),
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -1173,9 +1337,12 @@ fn quit_macos_app(app_path: &Path) -> Result<(), String> {
     if !macos_app_is_running(app_path) {
         return Ok(());
     }
-    let _ = Command::new("osascript")
-        .args(["-e", "tell application id \"com.openai.codex\" to quit"])
-        .output();
+    for application in ["ChatGPT", "Codex"] {
+        let script = format!("tell application \"{application}\" to quit");
+        let _ = Command::new("osascript")
+            .args(["-e", script.as_str()])
+            .output();
+    }
     let deadline = Instant::now() + Duration::from_secs(20);
     while Instant::now() < deadline {
         if !macos_app_is_running(app_path) {

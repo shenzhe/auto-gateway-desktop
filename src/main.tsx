@@ -2,6 +2,11 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrent, onOpenUrl } from "@tauri-apps/plugin-deep-link";
 import { exit, relaunch } from "@tauri-apps/plugin-process";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -13,12 +18,14 @@ import {
   BellIcon,
   CaretDownIcon,
   CaretRightIcon,
+  ChartLineUpIcon,
   CheckCircleIcon,
   CheckIcon,
   ClockCounterClockwiseIcon,
   CircleNotchIcon,
   CopyIcon,
   CubeIcon,
+  CreditCardIcon,
   CurrencyDollarIcon,
   DesktopIcon,
   DownloadSimpleIcon,
@@ -50,7 +57,9 @@ import {
   closeDesktopSignIn,
   clearDesktopSession,
   clearStoredDesktopAPIKey,
+  closeCodex,
   configureCodex,
+  downloadCodexUpdate,
   downloadAndOpenDesktopInstaller,
   exchangeDesktopAuthorization,
   getCodexAppStatus,
@@ -58,7 +67,9 @@ import {
   getDesktopAccountSummary,
   getDesktopAppVersion,
   getDesktopNotifications,
+  getDesktopSubscriptions,
   getLocalCodexAppStatus,
+  applyCodexUpdate,
   installCodex,
   isCodexRunning,
   isAuthenticationRequired,
@@ -93,6 +104,8 @@ import {
   type DesktopNotification,
   type DesktopNotificationList,
   type DesktopSession,
+  type DesktopSubscription,
+  type DesktopSubscriptionList,
   type SkillRecord,
   type SkillScanResult,
   type SkillDetail,
@@ -124,16 +137,31 @@ import {
 } from "./skillLibrary";
 import "./styles.css";
 
-const defaultEndpoint = "https://api.autogateway.cc";
+const defaultEndpoint = import.meta.env.VITE_AUTO_GATEWAY_API_BASE_URL;
+const consoleBaseUrl = import.meta.env.VITE_AUTO_GATEWAY_CONSOLE_BASE_URL;
 const pendingAuthorizationStorageKey =
   "autogateway.desktop.pending-authorization";
 const setupCompletedStoragePrefix = "autogateway.desktop.setup-completed";
 const notificationReadStoragePrefix =
   "autogateway.desktop.notification-reads.v1";
+const balanceAlertStoragePrefix = "autogateway.desktop.balance-alerts.v1";
 const notificationWindowStorageKey =
   "autogateway.desktop.notification-window.v1";
 const notificationDetailQueryKey = "notificationId";
 const notificationPageSize = 5;
+const lowBalanceThreshold = 0.5;
+const negativeBalanceThreshold = 0;
+
+type BalanceAlertKind = "low" | "negative";
+
+type BalanceAlertState = {
+  lowNotified: boolean;
+  negativeNotified: boolean;
+};
+
+const balanceAlertStateCache = new Map<number, BalanceAlertState>();
+const balanceAlertInFlight = new Map<string, Promise<void>>();
+let balanceNotificationPermission: Promise<boolean> | null = null;
 const skillSearchDebounceMs = 350;
 const sidebarCollapsedStorageKey =
   "autogateway.desktop.sidebar-collapsed.v1";
@@ -302,6 +330,134 @@ function saveNotificationReads(userID: number, reads: Set<number>): void {
     notificationReadStorageKey(userID),
     JSON.stringify(compactReads),
   );
+}
+
+function balanceAlertStorageKey(userID: number): string {
+  return `${balanceAlertStoragePrefix}:${userID}`;
+}
+
+function loadBalanceAlertState(userID: number): BalanceAlertState {
+  const cached = balanceAlertStateCache.get(userID);
+  if (cached) return cached;
+  try {
+    const raw = window.localStorage.getItem(balanceAlertStorageKey(userID));
+    const parsed = JSON.parse(raw ?? "null") as Partial<BalanceAlertState>;
+    const state = {
+      lowNotified: parsed?.lowNotified === true,
+      negativeNotified: parsed?.negativeNotified === true,
+    };
+    balanceAlertStateCache.set(userID, state);
+    return state;
+  } catch {
+    const state = { lowNotified: false, negativeNotified: false };
+    balanceAlertStateCache.set(userID, state);
+    return state;
+  }
+}
+
+function saveBalanceAlertState(userID: number, state: BalanceAlertState): void {
+  balanceAlertStateCache.set(userID, state);
+  try {
+    window.localStorage.setItem(
+      balanceAlertStorageKey(userID),
+      JSON.stringify(state),
+    );
+  } catch {
+    // The in-memory cache still prevents duplicate alerts during this run.
+  }
+}
+
+function parseBalanceAmount(value: string): number | null {
+  const normalized = value.trim().replaceAll(",", "");
+  if (!normalized) return null;
+  const currencyPrefix = normalized.match(/^[^\d+-]*/)?.[0] ?? "";
+  const amount = Number(normalized.slice(currencyPrefix.length));
+  return Number.isFinite(amount) ? amount : null;
+}
+
+function formatBalanceAlertAmount(value: string, locale: "en" | "zh"): string {
+  const amount = parseBalanceAmount(value);
+  if (amount === null) return value.trim();
+  return amount.toLocaleString(locale === "zh" ? "zh-CN" : "en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
+async function hasBalanceNotificationPermission(): Promise<boolean> {
+  if (!balanceNotificationPermission) {
+    balanceNotificationPermission = isPermissionGranted()
+      .then(async (granted) => {
+        if (granted) return true;
+        return (await requestPermission()) === "granted";
+      })
+      .catch(() => false);
+  }
+  return balanceNotificationPermission;
+}
+
+async function sendBalanceAlert(
+  userID: number,
+  kind: BalanceAlertKind,
+  balance: string,
+  locale: "en" | "zh",
+): Promise<void> {
+  const key = `${userID}:${kind}`;
+  const existing = balanceAlertInFlight.get(key);
+  if (existing) return existing;
+
+  const promise = (async () => {
+    const state = loadBalanceAlertState(userID);
+    const alreadyNotified =
+      kind === "low" ? state.lowNotified : state.negativeNotified;
+    if (alreadyNotified || !(await hasBalanceNotificationPermission())) return;
+
+    try {
+      sendNotification({
+        title: translate(
+          locale,
+          kind === "low"
+            ? "balanceLowAlertTitle"
+            : "balanceNegativeAlertTitle",
+        ),
+        body: translate(
+          locale,
+          kind === "low" ? "balanceLowAlertBody" : "balanceNegativeAlertBody",
+          { balance: formatBalanceAlertAmount(balance, locale) },
+        ),
+      });
+    } catch {
+      return;
+    }
+
+    saveBalanceAlertState(userID, {
+      ...state,
+      ...(kind === "low" ? { lowNotified: true } : { negativeNotified: true }),
+    });
+  })().finally(() => {
+    balanceAlertInFlight.delete(key);
+  });
+  balanceAlertInFlight.set(key, promise);
+  return promise;
+}
+
+async function notifyBalanceAlerts(
+  userID: number | undefined,
+  balance: string,
+  locale: "en" | "zh",
+): Promise<void> {
+  if (!userID) return;
+  const amount = parseBalanceAmount(balance);
+  if (amount === null) return;
+
+  if (amount < lowBalanceThreshold) {
+    await sendBalanceAlert(userID, "low", balance, locale);
+  }
+  if (amount < negativeBalanceThreshold) {
+    await sendBalanceAlert(userID, "negative", balance, locale);
+  }
 }
 
 type NotificationWindowPayload = {
@@ -614,6 +770,30 @@ function formatBalance(value: string, locale: "en" | "zh"): string {
     maximumFractionDigits: 2,
   });
   return `${currencyPrefix}${formatted}`;
+}
+
+function subscriptionUsagePercent(usedMicros: number, limitMicros: number): number {
+  if (
+    !Number.isFinite(usedMicros) ||
+    !Number.isFinite(limitMicros) ||
+    limitMicros <= 0
+  ) {
+    return 0;
+  }
+  return Math.min(100, Math.max(0, Math.round((usedMicros / limitMicros) * 100)));
+}
+
+function formatSubscriptionResetAt(value: string, locale: "en" | "zh"): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString(locale === "zh" ? "zh-CN" : "en-US", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function formatDownloadSpeed(bytesPerSecond?: number): string {
@@ -1361,6 +1541,8 @@ function App() {
   const [setupCompleted, setSetupCompleted] = useState(false);
   const [accountBalance, setAccountBalance] = useState("");
   const [balanceSyncedAt, setBalanceSyncedAt] = useState<Date | null>(null);
+  const [accountSubscription, setAccountSubscription] =
+    useState<DesktopSubscription | null>(null);
   const [notifications, setNotifications] = useState<DesktopNotification[]>(
     [],
   );
@@ -2054,6 +2236,7 @@ function App() {
         if (payload.stage === "windows-installing")
           setMessage(tr("windowsInstalling"));
         if (payload.stage === "verifying") setMessage(tr("verifyingCodex"));
+        if (payload.stage === "opening") setMessage(tr("openingCodex"));
       },
     ).then((nextUnlisten) => {
       unlisten = nextUnlisten;
@@ -2319,6 +2502,11 @@ function App() {
         if (!active) return;
         setAccountBalance(summary.balance);
         setBalanceSyncedAt(new Date());
+        void notifyBalanceAlerts(
+          desktopSession?.user.id,
+          summary.balance,
+          locale,
+        );
         void updateTrayStatus(accountName || accountDetail, summary.balance);
       } catch (error) {
         if (!active) return;
@@ -2341,7 +2529,61 @@ function App() {
       active = false;
       window.clearInterval(interval);
     };
-  }, [desktopAccessToken, showHome]);
+  }, [desktopAccessToken, desktopSession?.user.id, locale, showHome]);
+
+  useEffect(() => {
+    if (!desktopAccessToken) {
+      setAccountSubscription(null);
+      return;
+    }
+    let active = true;
+    let syncing = false;
+    async function syncAccountSubscription() {
+      if (syncing) return;
+      syncing = true;
+      try {
+        let data: DesktopSubscriptionList;
+        try {
+          data = await getDesktopSubscriptions(desktopAccessToken);
+        } catch (error) {
+          if (!isAuthenticationRequired(error)) throw error;
+          const refreshed = await refreshDesktopState(desktopAccessToken);
+          if (!refreshed?.session.token) {
+            await handleSessionExpired();
+            return;
+          }
+          if (!active) return;
+          setDesktopSession(refreshed.session);
+          setDesktopAccessToken(refreshed.session.token);
+          setAPIKey(refreshed.apiKey);
+          data = await getDesktopSubscriptions(refreshed.session.token);
+        }
+        if (!active) return;
+        const current = (data.items ?? []).find((subscription) =>
+          ["active", "trialing"].includes(subscription.status.toLowerCase()),
+        );
+        setAccountSubscription(current ?? null);
+      } catch (error) {
+        if (!active) return;
+        if (isAuthenticationRequired(error)) {
+          void handleSessionExpired();
+          return;
+        }
+        // Keep the last confirmed subscription during transient failures.
+      } finally {
+        syncing = false;
+      }
+    }
+    void syncAccountSubscription();
+    const interval = window.setInterval(
+      () => void syncAccountSubscription(),
+      60_000,
+    );
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+    };
+  }, [desktopAccessToken, desktopSession?.user.id, showHome]);
 
   useEffect(() => {
     if (designPreviewState || !showHome || !appInstalled) return;
@@ -2466,12 +2708,13 @@ function App() {
         pendingAuthorizationStorageKey,
         JSON.stringify({ verifier, state }),
       );
-      const query = new URLSearchParams({
-        desktopCodeChallenge: challenge,
-        desktopState: state,
-      });
-      setDesktopSignInUrl(`https://autogateway.cc/login?${query.toString()}`);
-      await openDesktopSignIn(challenge, state, navigator.userAgent);
+      const signInUrl = await openDesktopSignIn(
+        challenge,
+        state,
+        locale,
+        navigator.userAgent,
+      );
+      setDesktopSignInUrl(signInUrl);
       setMessage(tr("completeInApp"));
     } catch (error) {
       setMessage(tr("startSignInFailed", { error: String(error) }));
@@ -2615,6 +2858,32 @@ function App() {
     );
     let waitingForExternalInstallation = false;
     try {
+      if (forceUpdate) {
+        const downloadedUpdate = await downloadCodexUpdate(forceRedownload);
+        setMessage(tr("downloadReadyForCodexUpdate"));
+
+        if (await isCodexRunning()) {
+          if (!(await confirm(tr("codexCloseConfirm")))) {
+            setMessage(tr("codexUpdateCancelled"));
+            return;
+          }
+          setInstallProgress({ stage: "closing", downloadedBytes: 0 });
+          setMessage(tr("closingCodex"));
+          await closeCodex();
+        }
+
+        setInstallProgress({ stage: "installing", downloadedBytes: 0 });
+        setMessage(tr("replacingCodex"));
+        await applyCodexUpdate(downloadedUpdate.version);
+        await refreshStatus(false);
+        const reopened = await waitForCodexOpen();
+        setCodexOpenPhase(reopened ? "opened" : "closed");
+        setMessage(
+          tr(reopened ? "codexUpdatedAndReopened" : "codexUpdatedReopenFailed"),
+        );
+        return;
+      }
+
       const result = await installCodex(forceUpdate, forceRedownload);
       if (result.awaitingInstallation) {
         waitingForExternalInstallation = true;
@@ -2795,13 +3064,20 @@ function App() {
     }
   }
 
-  async function handleOpenConsole(section?: "billing" | "support") {
+  async function handleOpenConsole(
+    section?: "billing" | "support" | "usage" | "subscription",
+  ) {
     if (!desktopAccessToken) {
       setMessage(tr("signInRequired"));
       return;
     }
     try {
-      await openConsole(desktopAccessToken, section, navigator.userAgent);
+      await openConsole(
+        desktopAccessToken,
+        section,
+        locale,
+        navigator.userAgent,
+      );
     } catch (error) {
       if (isAuthenticationRequired(error)) {
         await handleSessionExpired();
@@ -2819,21 +3095,26 @@ function App() {
     }
   }
 
+  async function waitForCodexOpen(): Promise<boolean> {
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      if (await isCodexRunning()) return true;
+      await new Promise((resolve) => window.setTimeout(resolve, 500));
+    }
+    return false;
+  }
+
   async function handleOpenCodex() {
     setHomeActionError("");
     setCodexOpenPhase("opening");
     try {
       await openCodex();
-      const deadline = Date.now() + 15_000;
-      while (Date.now() < deadline) {
-        if (await isCodexRunning()) {
-          setCodexOpenPhase("opened");
-          return;
-        }
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      if (await waitForCodexOpen()) {
+        setCodexOpenPhase("opened");
+      } else {
+        setCodexOpenPhase("closed");
+        setHomeActionError(tr("codexOpenTimeout"));
       }
-      setCodexOpenPhase("closed");
-      setHomeActionError(tr("codexOpenTimeout"));
     } catch (error) {
       setCodexOpenPhase("closed");
       setHomeActionError(tr("openCodexFailed", { error: String(error) }));
@@ -3772,6 +4053,10 @@ function App() {
                   <strong>{skillAdvisorConversationTitle}</strong>
                 </div>
               ) : null}
+              <div className="skillAdvisorUsageNotice" role="note">
+                <WarningIcon weight="duotone" aria-hidden="true" />
+                <span>{tr("skillAdvisorUsageNotice")}</span>
+              </div>
               <div className="skillAdvisorConversation" aria-live="polite">
                 <div className="skillAdvisorMessages">
                   {skillAdvisorMessages.map((message, index) => (
@@ -3929,6 +4214,7 @@ function App() {
                   className="primaryButton skillAdvisorSend"
                   type="submit"
                   aria-label={tr("skillAdvisorSend")}
+                  title={tr("skillAdvisorUsageNotice")}
                   disabled={
                     !skillAdvisorInput.trim() ||
                     skillAdvisorCatalogLoading ||
@@ -5639,13 +5925,13 @@ function App() {
           className={`homeRail ${sidebarCollapsed ? "collapsed" : ""}`.trim()}
         >
           <button
-            className="homeRailToggle"
+            className="tooltipValue homeRailToggle"
             aria-label={
               sidebarCollapsed
                 ? tr("sidebarExpand")
                 : tr("sidebarCollapse")
             }
-            title={
+            data-tooltip={
               sidebarCollapsed
                 ? tr("sidebarExpand")
                 : tr("sidebarCollapse")
@@ -5668,7 +5954,7 @@ function App() {
               <strong>AUTO Gateway</strong>
               <div className="homeBrandVersion">
                 <small
-                  className="buildTimeTooltip"
+                  className="tooltipValue buildTimeTooltip"
                   aria-label={tr("lastCompiledAt", { time: buildTime })}
                   data-tooltip={tr("lastCompiledAt", { time: buildTime })}
                   tabIndex={0}
@@ -5695,25 +5981,29 @@ function App() {
           </div>
           <nav className="homeNav" aria-label={tr("homeNavigation")}>
             <button
-              className={activeView === "home" ? "selected" : ""}
+              className={`tooltipValue homeNavTooltip ${activeView === "home" ? "selected" : ""}`.trim()}
               aria-current={activeView === "home" ? "page" : undefined}
-              title={sidebarCollapsed ? tr("home") : undefined}
+              aria-label={tr("home")}
+              data-tooltip={tr("home")}
               onClick={() => setActiveView("home")}
             >
               <HouseIcon weight="bold" />
               <span className="homeNavLabel">{tr("home")}</span>
             </button>
             <button
-              title={sidebarCollapsed ? tr("codexSetup") : undefined}
+              className="tooltipValue homeNavTooltip"
+              aria-label={tr("codexSetup")}
+              data-tooltip={tr("codexSetup")}
               onClick={openSetupFromHome}
             >
               <CubeIcon />
               <span className="homeNavLabel">{tr("codexSetup")}</span>
             </button>
             <button
-              className={activeView === "skills" ? "selected" : ""}
+              className={`tooltipValue homeNavTooltip ${activeView === "skills" ? "selected" : ""}`.trim()}
               aria-current={activeView === "skills" ? "page" : undefined}
-              title={sidebarCollapsed ? tr("skillManagement") : undefined}
+              aria-label={tr("skillManagement")}
+              data-tooltip={tr("skillManagement")}
               onClick={() => {
                 if (activeView !== "skills") {
                   trackSkillEvent("skill_manager_opened");
@@ -5727,7 +6017,27 @@ function App() {
               <span className="homeNavLabel">{tr("skillManagement")}</span>
             </button>
             <button
-              title={sidebarCollapsed ? tr("userConsole") : undefined}
+              className="tooltipValue homeNavTooltip"
+              aria-label={tr("usageRecords")}
+              data-tooltip={tr("usageRecords")}
+              onClick={() => void handleOpenConsole("usage")}
+            >
+              <ChartLineUpIcon weight="bold" />
+              <span className="homeNavLabel">{tr("usageRecords")}</span>
+            </button>
+            <button
+              className="tooltipValue homeNavTooltip"
+              aria-label={tr("subscriptions")}
+              data-tooltip={tr("subscriptions")}
+              onClick={() => void handleOpenConsole("subscription")}
+            >
+              <CreditCardIcon weight="bold" />
+              <span className="homeNavLabel">{tr("subscriptions")}</span>
+            </button>
+            <button
+              className="tooltipValue homeNavTooltip"
+              aria-label={tr("userConsole")}
+              data-tooltip={tr("userConsole")}
               onClick={() => void handleOpenConsole()}
             >
               <UserCircleIcon />
@@ -5736,14 +6046,18 @@ function App() {
           </nav>
           <div className="homeSupportLinks">
             <button
-              className="homeSupportLink"
-              onClick={() => void openUrl("https://autogateway.cc/docs#codex")}
+              className="homeSupportLink tooltipValue homeNavTooltip"
+              aria-label={tr("needHelp")}
+              data-tooltip={tr("needHelp")}
+              onClick={() => void openUrl(`${consoleBaseUrl}/docs#codex`)}
             >
               <QuestionIcon weight="bold" />
               <span className="homeNavLabel">{tr("needHelp")}</span>
             </button>
             <button
-              className="homeSupportLink"
+              className="homeSupportLink tooltipValue homeNavTooltip"
+              aria-label={tr("reportIssue")}
+              data-tooltip={tr("reportIssue")}
               onClick={() => void handleOpenConsole("support")}
             >
               <ChatCircleTextIcon weight="bold" />
@@ -5773,7 +6087,7 @@ function App() {
               <div className="headerBalanceInfo">
                 <span>{tr("accountBalance")}</span>
                 <strong
-                  className="balanceValue"
+                  className="tooltipValue balanceValue"
                   aria-label={getBalanceTooltip()}
                   data-tooltip={getBalanceTooltip()}
                   tabIndex={0}
@@ -5877,6 +6191,128 @@ function App() {
                 {homeActionError}
               </p>
             ) : null}
+            {accountSubscription ? (
+              <section
+                className="homeSubscriptionCard"
+                aria-labelledby="home-subscription-title"
+              >
+                <div className="homeSubscriptionHeader">
+                  <div className="homeSubscriptionTitle">
+                    <span className="homeSubscriptionKicker">
+                      {tr("currentSubscription")}
+                    </span>
+                    <h2 id="home-subscription-title">
+                      {accountSubscription.planName}
+                    </h2>
+                  </div>
+                  <button
+                    className="homeSubscriptionAction"
+                    type="button"
+                    onClick={() => void handleOpenConsole("subscription")}
+                  >
+                    {tr("manageSubscription")}
+                    <ArrowRightIcon weight="bold" />
+                  </button>
+                </div>
+                <div className="homeSubscriptionBody">
+                  <div className="homeSubscriptionBalance">
+                    <span>{tr("subscriptionBalance")}</span>
+                    <strong>{accountSubscription.available}</strong>
+                    <small>
+                      {tr("subscriptionBalanceUsed", {
+                        used: accountSubscription.monthlyUsed,
+                        limit: accountSubscription.monthlyLimit,
+                      })}
+                    </small>
+                  </div>
+                  <div className="homeSubscriptionWindows">
+                    {[
+                      {
+                        label: tr("subscriptionFiveHour"),
+                        used: accountSubscription.fiveHourUsed,
+                        limit: accountSubscription.fiveHourLimit,
+                        usedMicros: accountSubscription.fiveHourUsedMicros,
+                        limitMicros: accountSubscription.fiveHourLimitMicros,
+                        resetAt: accountSubscription.fiveHourResetAt ?? "",
+                      },
+                      {
+                        label: tr("subscriptionWeekly"),
+                        used: accountSubscription.weeklyUsed,
+                        limit: accountSubscription.weeklyLimit,
+                        usedMicros: accountSubscription.weeklyUsedMicros,
+                        limitMicros: accountSubscription.weeklyLimitMicros,
+                        resetAt: accountSubscription.weeklyResetAt ?? "",
+                      },
+                      {
+                        label: tr("subscriptionMonthly"),
+                        used: accountSubscription.monthlyUsed,
+                        limit: accountSubscription.monthlyLimit,
+                        usedMicros: accountSubscription.monthlyUsedMicros,
+                        limitMicros: accountSubscription.monthlyLimitMicros,
+                        resetAt: accountSubscription.monthlyResetAt ?? "",
+                      },
+                    ].map((window) => {
+                      const percentage = subscriptionUsagePercent(
+                        window.usedMicros,
+                        window.limitMicros,
+                      );
+                      const resetAt = formatSubscriptionResetAt(
+                        window.resetAt,
+                        locale,
+                      );
+                      return (
+                        <div
+                          className="homeSubscriptionUsageWindow"
+                          key={window.label}
+                        >
+                          <div className="homeSubscriptionProgressMeta">
+                            <span>{window.label}</span>
+                            <strong>
+                              {tr("subscriptionUsedPercent", {
+                                value: percentage,
+                              })}
+                            </strong>
+                          </div>
+                          <div
+                            className="homeSubscriptionProgress"
+                            role="progressbar"
+                            aria-label={`${window.label}: ${percentage}%`}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                            aria-valuenow={percentage}
+                          >
+                            <span style={{ width: `${percentage}%` }} />
+                          </div>
+                          <div className="homeSubscriptionUsageDetails">
+                            <small>
+                              {tr("subscriptionUsedAmount", {
+                                used: window.used,
+                                limit: window.limit,
+                              })}
+                            </small>
+                            <small className="homeSubscriptionResetAt">
+                              {tr("subscriptionNextReset", {
+                                time:
+                                  resetAt ||
+                                  tr("subscriptionResetUnavailable"),
+                              })}
+                            </small>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div className="homeSubscriptionMeta">
+                    <span>
+                      {accountSubscription.cancelAtPeriodEnd
+                        ? tr("subscriptionEndsAt")
+                        : tr("subscriptionRenewsAt")}
+                    </span>
+                    <strong>{accountSubscription.renewsAt || "—"}</strong>
+                  </div>
+                </div>
+              </section>
+            ) : null}
             <section className="homeStatusPanel">
               <div
                 className={`homeHealth ${providerTone}`}
@@ -5906,7 +6342,7 @@ function App() {
               <div className="homeMetric">
                 <span>{tr("accountBalance")}</span>
                 <strong
-                  className="balanceValue"
+                  className="tooltipValue balanceValue"
                   aria-label={getBalanceTooltip()}
                   data-tooltip={getBalanceTooltip()}
                   tabIndex={0}
@@ -5922,30 +6358,32 @@ function App() {
                 <span>{tr("localVersion")}</span>
                 <strong>{version}</strong>
                 <small>{versionStatus}</small>
-                <button
-                  className="versionAction"
-                  disabled={checkingCodexUpdates || installingCodex}
-                  onClick={() =>
-                    appInstalled
-                      ? void handleCheckCodexUpdates()
-                      : openSetupFromHome()
-                  }
-                >
-                  {!appInstalled
-                    ? tr("installNow")
-                    : checkingCodexUpdates
-                      ? tr("checkingCodexUpdates")
-                      : tr("checkNow")}
-                </button>
-                {updateAvailable ? (
+                <div className="homeVersionActions">
                   <button
-                    className="versionAction versionUpdateAction"
-                    disabled={installingCodex}
-                    onClick={() => void handleInstallCodex(true)}
+                    className="versionAction"
+                    disabled={checkingCodexUpdates || installingCodex}
+                    onClick={() =>
+                      appInstalled
+                        ? void handleCheckCodexUpdates()
+                        : openSetupFromHome()
+                    }
                   >
-                    {installingCodex ? tr("updatingCodex") : tr("updateNow")}
+                    {!appInstalled
+                      ? tr("installNow")
+                      : checkingCodexUpdates
+                        ? tr("checkingCodexUpdates")
+                        : tr("checkNow")}
                   </button>
-                ) : null}
+                  {updateAvailable ? (
+                    <button
+                      className="versionAction versionUpdateAction"
+                      disabled={installingCodex}
+                      onClick={() => void handleInstallCodex(true)}
+                    >
+                      {installingCodex ? tr("updatingCodex") : tr("updateNow")}
+                    </button>
+                  ) : null}
+                </div>
               </div>
               <button
                 className="primaryButton homeOpenButton"
@@ -5959,6 +6397,47 @@ function App() {
                     : tr("openCodex")}
               </button>
             </section>
+            {installingCodex && installProgress ? (
+              <div className="homeCodexUpdateProgress" aria-live="polite">
+                {installProgress.stage === "downloading" ? (
+                  <>
+                    <div className="downloadProgressHeader">
+                      <strong>{tr("downloadingCodex")}</strong>
+                      <span>
+                        {installPercent === undefined
+                          ? "—"
+                          : `${installPercent}%`}
+                      </span>
+                    </div>
+                    <progress max="100" value={installPercent} />
+                    <div className="downloadProgressMetrics">
+                      <span>{downloadAmountDetails}</span>
+                      <span>{downloadSpeedDetails}</span>
+                    </div>
+                    {downloadProgressDetails ? (
+                      <small className="downloadProgressSource">
+                        {downloadProgressDetails}
+                      </small>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="progressStatusRow">
+                    <span className="progressSpinner" aria-hidden="true" />
+                    <small>
+                      {installProgress.stage === "selecting-source"
+                        ? tr("selectingDownloadSource")
+                        : installProgress.stage === "closing"
+                          ? tr("closingCodex")
+                          : installProgress.stage === "verifying"
+                            ? tr("verifyingCodex")
+                            : installProgress.stage === "opening"
+                              ? tr("openingCodex")
+                              : tr("replacingCodex")}
+                    </small>
+                  </div>
+                )}
+              </div>
+            ) : null}
             <section className="homeDualSection">
               <section className="homeSectionColumn">
                 <h2>{tr("quickActions")}</h2>
@@ -6399,6 +6878,38 @@ function App() {
                     role="progressbar"
                     aria-label={tr("windowsInstalling")}
                     aria-valuetext={tr("windowsInstalling")}
+                  >
+                    <span />
+                  </div>
+                </div>
+              ) : null}
+              {installingCodex &&
+              (installProgress?.stage === "closing" ||
+                installProgress?.stage === "installing" ||
+                installProgress?.stage === "verifying" ||
+                installProgress?.stage === "opening") ? (
+                <div
+                  className="installProgress indeterminateProgress"
+                  aria-live="polite"
+                  aria-busy="true"
+                >
+                  <div className="progressStatusRow">
+                    <span className="progressSpinner" aria-hidden="true" />
+                    <small>
+                      {installProgress.stage === "verifying"
+                        ? tr("verifyingCodex")
+                        : installProgress.stage === "opening"
+                          ? tr("openingCodex")
+                          : installProgress.stage === "closing"
+                            ? tr("closingCodex")
+                          : tr("replacingCodex")}
+                    </small>
+                  </div>
+                  <div
+                    className="indeterminateProgressTrack"
+                    role="progressbar"
+                    aria-label={tr("updatingCodex")}
+                    aria-valuetext={tr("updatingCodex")}
                   >
                     <span />
                   </div>

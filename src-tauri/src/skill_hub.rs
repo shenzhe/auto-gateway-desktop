@@ -1,6 +1,7 @@
 use crate::codex_skill_advisor::{delete_codex_advisor_thread, run_codex_advisor};
 use crate::desktop_auth::installation_id;
 use crate::http_client::client as desktop_http_client;
+use crate::runtime::AUTO_GATEWAY_API_BASE_URL;
 use crate::skills::{
     ag_skill_source_ids, emit_skill_progress, install_skill, mark_installed_skill_source,
     InstallSummary, SourceType, MAX_ARCHIVE_BYTES,
@@ -15,7 +16,6 @@ use tauri::{AppHandle, Manager};
 use url::Url;
 use uuid::Uuid;
 
-const AUTO_GATEWAY_API_BASE_URL: &str = "https://api.autogateway.cc";
 const AUTO_GATEWAY_SKILL_CDN_HOST: &str = "cdn.autogateway.cc";
 const SKILL_CATALOG_PAGE_SIZE: usize = 20;
 const SKILL_INDEX_SCHEMA_VERSION: u32 = 2;
@@ -398,6 +398,7 @@ fn read_skill_index_cache(path: &std::path::Path) -> Result<Option<PagedSkillsDt
         .map_err(|error| format!("decode the Skill index cache: {error}"))
 }
 
+#[cfg(test)]
 fn write_skill_index_cache(path: &std::path::Path, skills: &PagedSkillsDto) -> Result<(), String> {
     let parent = path
         .parent()

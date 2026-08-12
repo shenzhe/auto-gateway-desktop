@@ -510,13 +510,10 @@ select:focus-visible {
   line-height: 1.2;
   white-space: nowrap;
 }
-.balanceValue {
+.tooltipValue {
   position: relative;
-  display: inline-flex;
-  width: fit-content;
-  cursor: help;
 }
-.balanceValue[data-tooltip]::after {
+.tooltipValue[data-tooltip]::after {
   position: absolute;
   z-index: 30;
   top: calc(100% + 9px);
@@ -543,58 +540,29 @@ select:focus-visible {
     transform 140ms ease,
     visibility 140ms ease;
   visibility: hidden;
+}
+.balanceValue,
+.buildTimeTooltip {
+  display: inline-flex;
+  width: fit-content;
+  cursor: help;
 }
 .buildTimeTooltip {
-  position: relative;
-  display: inline-flex;
-  width: fit-content;
-  cursor: help;
+  /* Keep the existing build-time tooltip geometry while sharing its base. */
 }
-.buildTimeTooltip[data-tooltip]::after {
-  position: absolute;
-  z-index: 30;
-  top: calc(100% + 9px);
-  left: 50%;
-  width: max-content;
-  max-width: min(320px, calc(100vw - 32px));
-  padding: 8px 10px;
-  border: 1px solid var(--tooltip-border);
-  border-radius: 8px;
-  color: var(--tooltip-text);
-  background: var(--tooltip-bg);
-  box-shadow: var(--shadow-soft);
-  content: attr(data-tooltip);
-  font-size: 11px;
-  font-weight: 550;
-  line-height: 1.45;
-  text-align: left;
-  white-space: pre-line;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, -3px);
-  transition:
-    opacity 140ms ease,
-    transform 140ms ease,
-    visibility 140ms ease;
-  visibility: hidden;
-}
-.balanceValue[data-tooltip]:hover::after,
-.balanceValue[data-tooltip]:focus-visible::after,
-.buildTimeTooltip[data-tooltip]:hover::after,
-.buildTimeTooltip[data-tooltip]:focus-visible::after {
+.tooltipValue[data-tooltip]:hover::after,
+.tooltipValue[data-tooltip]:focus-visible::after {
   opacity: 1;
   transform: translate(-50%, 0);
   visibility: visible;
 }
-.buildTimeTooltip:focus-visible {
+.tooltipValue:focus-visible {
   border-radius: 3px;
   outline: 3px solid color-mix(in oklch, var(--primary) 28%, transparent);
   outline-offset: 3px;
 }
-.balanceValue:focus-visible {
-  border-radius: 3px;
-  outline: 3px solid color-mix(in oklch, var(--primary) 28%, transparent);
-  outline-offset: 3px;
+.homeNavTooltip {
+  cursor: pointer;
 }
 .headerTopUpButton {
   display: inline-flex;
@@ -1197,7 +1165,15 @@ h1 {
   overflow: visible;
 }
 .homeRail.collapsed .homeRailToggle {
-  left: 186px;
+  left: calc(16px + (36px + 6px) * 6 + 8px);
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.homeRail.collapsed .homeRailToggle:hover,
+.homeRail.collapsed .homeRailToggle:focus-visible {
+  border-color: transparent;
+  background: color-mix(in oklch, var(--primary-soft) 54%, transparent);
 }
 .homeRail.collapsed > .homeBrand,
 .homeRail.collapsed > .homeSupportLinks {
@@ -1374,6 +1350,157 @@ h1 {
   font-size: 14px;
   line-height: 1.45;
 }
+.homeSubscriptionCard {
+  display: grid;
+  gap: 22px;
+  margin-bottom: 24px;
+  padding: 22px 24px;
+  border: 1px solid color-mix(in oklch, var(--primary) 26%, var(--line));
+  border-radius: 14px;
+  background:
+    linear-gradient(
+      120deg,
+      color-mix(in oklch, var(--primary-soft) 56%, var(--panel)) 0,
+      var(--panel) 64%
+    );
+  box-shadow: var(--shadow-soft);
+}
+.homeSubscriptionHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+.homeSubscriptionTitle {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.homeSubscriptionKicker {
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 780;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.homeSubscriptionTitle h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: 22px;
+  letter-spacing: -0.025em;
+}
+.homeSubscriptionAction {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 0;
+  border: 0;
+  color: var(--primary);
+  background: transparent;
+  font-size: 13px;
+  font-weight: 760;
+}
+.homeSubscriptionAction svg {
+  width: 15px;
+  height: 15px;
+}
+.homeSubscriptionAction:hover {
+  color: var(--primary-dark);
+  text-decoration: underline;
+}
+.homeSubscriptionBody {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.72fr) minmax(360px, 1.7fr) auto;
+  gap: 28px;
+  align-items: center;
+}
+.homeSubscriptionBalance,
+.homeSubscriptionWindows,
+.homeSubscriptionMeta {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.homeSubscriptionBalance > span,
+.homeSubscriptionProgressMeta span,
+.homeSubscriptionMeta span {
+  color: var(--subtle);
+  font-size: 11px;
+  font-weight: 760;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.homeSubscriptionBalance strong {
+  color: var(--text);
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.025em;
+}
+.homeSubscriptionBalance small,
+.homeSubscriptionUsageWindow small {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.homeSubscriptionWindows {
+  gap: 14px;
+}
+.homeSubscriptionUsageWindow {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+.homeSubscriptionUsageDetails {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px 16px;
+  text-align: right;
+}
+.homeSubscriptionUsageDetails small {
+  white-space: nowrap;
+}
+.homeSubscriptionResetAt {
+  color: var(--subtle);
+  font-size: 11px;
+}
+.homeSubscriptionProgressMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.homeSubscriptionProgressMeta strong {
+  color: var(--primary);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.homeSubscriptionProgress {
+  height: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--primary) 13%, var(--line));
+}
+.homeSubscriptionProgress > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--primary), var(--success));
+  transition: width 260ms ease;
+}
+.homeSubscriptionMeta {
+  min-width: 108px;
+  padding-left: 28px;
+  border-left: 1px solid var(--line);
+}
+.homeSubscriptionMeta strong {
+  color: var(--text);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .homeStatusPanel {
   display: grid;
   grid-template-columns: 1.3fr 0.72fr 0.78fr auto;
@@ -1520,6 +1647,12 @@ h1 {
   cursor: not-allowed;
   opacity: 0.55;
 }
+.homeVersionActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
 .homeMetric .versionUpdateAction {
   border-color: var(--primary);
   color: var(--on-primary);
@@ -1532,6 +1665,46 @@ h1 {
   min-width: 170px;
   margin: 0 24px;
   padding: 15px 20px;
+}
+.homeCodexUpdateProgress {
+  display: grid;
+  gap: 9px;
+  margin-top: 12px;
+  padding: 14px 18px;
+  border: 1px solid color-mix(in oklch, var(--primary) 30%, var(--line));
+  border-radius: 12px;
+  color: var(--muted);
+  background: color-mix(in oklch, var(--primary-soft) 48%, var(--panel));
+}
+.homeCodexUpdateProgress progress {
+  width: 100%;
+  height: 8px;
+  accent-color: var(--primary);
+}
+.homeCodexUpdateProgress .downloadProgressHeader,
+.homeCodexUpdateProgress .downloadProgressMetrics {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.homeCodexUpdateProgress .downloadProgressHeader strong {
+  color: var(--text);
+  font-size: 13px;
+}
+.homeCodexUpdateProgress .downloadProgressHeader span {
+  color: var(--primary);
+  font-size: 13px;
+  font-weight: 760;
+}
+.homeCodexUpdateProgress .downloadProgressMetrics,
+.homeCodexUpdateProgress small {
+  font-size: 12px;
+}
+.homeCodexUpdateProgress .downloadProgressSource {
+  width: auto;
+  min-width: 0 !important;
+  text-align: left !important;
 }
 .trayPopupRoot {
   display: grid;
@@ -2232,6 +2405,16 @@ h1 {
   .homeStatusPanel {
     grid-template-columns: 1fr 1fr;
   }
+  .homeSubscriptionBody {
+    grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.2fr);
+  }
+  .homeSubscriptionMeta {
+    grid-column: 1 / -1;
+    padding-top: 14px;
+    padding-left: 0;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
   .homeDualSection {
     grid-template-columns: 1fr;
   }
@@ -2424,6 +2607,20 @@ h1 {
   }
   .homeStatusPanel {
     grid-template-columns: 1fr;
+  }
+  .homeSubscriptionHeader {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .homeSubscriptionBody {
+    grid-template-columns: 1fr;
+    gap: 18px;
+  }
+  .homeSubscriptionMeta {
+    grid-column: auto;
+    padding-top: 0;
+    border-top: 0;
   }
   .homeHealth,
   .homeMetric {
@@ -3192,6 +3389,26 @@ h1 {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.skillAdvisorUsageNotice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 20px 0;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in oklch, var(--primary) 28%, var(--line));
+  border-radius: 10px;
+  color: var(--muted);
+  background: var(--primary-soft);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.skillAdvisorUsageNotice svg {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--primary);
 }
 .skillAdvisorConversation {
   display: flex;
@@ -4059,6 +4276,9 @@ h1 {
   }
   .skillAdvisorCurrentConversation {
     padding-inline: 16px;
+  }
+  .skillAdvisorUsageNotice {
+    margin-inline: 16px;
   }
   .skillAdvisorMessage {
     max-width: 94%;

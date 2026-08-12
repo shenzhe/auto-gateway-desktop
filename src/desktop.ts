@@ -32,14 +32,22 @@ export type CodexInstallResult = {
   canRetryCachedInstaller: boolean;
 };
 
+export type CodexUpdateDownloadResult = {
+  downloaded: boolean;
+  version: string;
+  message: string;
+};
+
 export type CodexInstallProgress = {
   stage:
     | "preparing"
     | "selecting-source"
     | "downloading"
+    | "closing"
     | "installing"
     | "windows-installing"
     | "verifying"
+    | "opening"
     | "complete";
   downloadedBytes: number;
   totalBytes?: number;
@@ -86,6 +94,39 @@ export type StoredDesktopState = {
 
 export type DesktopAccountSummary = {
   balance: string;
+};
+
+export type DesktopSubscription = {
+  id: number;
+  planId: number;
+  planCode: string;
+  planName: string;
+  status: string;
+  autoRenew: boolean;
+  cancelAtPeriodEnd: boolean;
+  fiveHourLimitMicros: number;
+  fiveHourUsedMicros: number;
+  fiveHourLimit: string;
+  fiveHourUsed: string;
+  fiveHourResetAt?: string;
+  weeklyLimitMicros: number;
+  weeklyUsedMicros: number;
+  weeklyLimit: string;
+  weeklyUsed: string;
+  weeklyResetAt?: string;
+  monthlyLimitMicros: number;
+  monthlyUsedMicros: number;
+  monthlyLimit: string;
+  monthlyUsed: string;
+  monthlyResetAt?: string;
+  availableMicros: number;
+  available: string;
+  startedAt: string;
+  renewsAt: string;
+};
+
+export type DesktopSubscriptionList = {
+  items: DesktopSubscription[];
 };
 
 export type DesktopNotification = {
@@ -374,6 +415,24 @@ export function installCodex(
   });
 }
 
+export function downloadCodexUpdate(
+  forceRedownload = false,
+): Promise<CodexUpdateDownloadResult> {
+  return invoke<CodexUpdateDownloadResult>("download_codex_update_command", {
+    forceRedownload,
+  });
+}
+
+export function applyCodexUpdate(downloadedVersion: string): Promise<CodexInstallResult> {
+  return invoke<CodexInstallResult>("apply_codex_update_command", {
+    downloadedVersion,
+  });
+}
+
+export function closeCodex(): Promise<void> {
+  return invoke<void>("close_codex");
+}
+
 export function openCodex(): Promise<void> {
   return invoke<void>("open_codex");
 }
@@ -395,12 +454,14 @@ export function restoreLatestCodexBackups(): Promise<RestoreResult> {
 
 export function openConsole(
   accessToken: string,
-  section?: "billing" | "support",
+  section?: "billing" | "support" | "usage" | "subscription",
+  locale?: "en" | "zh",
   originalUserAgent?: string,
 ): Promise<void> {
   return invoke<void>("open_console", {
     accessToken,
     section,
+    locale,
     originalUserAgent,
   });
 }
@@ -413,6 +474,14 @@ export function getDesktopAccountSummary(
   accessToken: string,
 ): Promise<DesktopAccountSummary> {
   return invoke<DesktopAccountSummary>("get_desktop_account_summary_command", {
+    accessToken,
+  });
+}
+
+export function getDesktopSubscriptions(
+  accessToken: string,
+): Promise<DesktopSubscriptionList> {
+  return invoke<DesktopSubscriptionList>("get_desktop_subscriptions_command", {
     accessToken,
   });
 }
@@ -483,11 +552,13 @@ export function exchangeDesktopAuthorization(
 export function openDesktopSignIn(
   challenge: string,
   state: string,
+  locale?: "en" | "zh",
   originalUserAgent?: string,
-): Promise<void> {
-  return invoke<void>("open_desktop_sign_in_command", {
+): Promise<string> {
+  return invoke<string>("open_desktop_sign_in_command", {
     challenge,
     state,
+    locale,
     originalUserAgent,
   });
 }

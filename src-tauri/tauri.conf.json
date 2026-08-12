@@ -41,7 +41,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' https://autogateway.cc https://api.autogateway.cc https://sg.autogateway.cc; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:15174 http://127.0.0.1:15174 http://localhost:18181 http://127.0.0.1:18181 https://autogateway.cc https://api.autogateway.cc https://sg.autogateway.cc; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
