@@ -36,6 +36,8 @@ export type CodexUpdateDownloadResult = {
   downloaded: boolean;
   version: string;
   message: string;
+  targetPath?: string;
+  targetVersion?: string;
 };
 
 export type CodexInstallProgress = {
@@ -44,6 +46,11 @@ export type CodexInstallProgress = {
     | "selecting-source"
     | "downloading"
     | "closing"
+    | "mounting"
+    | "copying"
+    | "verifying-signature"
+    | "replacing"
+    | "unmounting"
     | "installing"
     | "windows-installing"
     | "verifying"
@@ -423,14 +430,18 @@ export function downloadCodexUpdate(
   });
 }
 
-export function applyCodexUpdate(downloadedVersion: string): Promise<CodexInstallResult> {
+export function applyCodexUpdate(
+  downloadedVersion: string,
+  targetPath?: string,
+): Promise<CodexInstallResult> {
   return invoke<CodexInstallResult>("apply_codex_update_command", {
     downloadedVersion,
+    targetPath,
   });
 }
 
-export function closeCodex(): Promise<void> {
-  return invoke<void>("close_codex");
+export function closeCodex(targetPath?: string): Promise<void> {
+  return invoke<void>("close_codex", { targetPath });
 }
 
 export function openCodex(): Promise<void> {

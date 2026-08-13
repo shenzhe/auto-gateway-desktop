@@ -1503,7 +1503,7 @@ h1 {
 }
 .homeStatusPanel {
   display: grid;
-  grid-template-columns: 1.3fr 0.72fr 0.78fr auto;
+  grid-template-columns: minmax(0, 1.3fr) minmax(120px, 0.54fr) minmax(0, 0.86fr) auto;
   align-items: center;
   min-height: 168px;
   overflow: hidden;
@@ -1630,6 +1630,9 @@ h1 {
 .homeMetric button:hover {
   text-decoration: underline;
 }
+.homeBalanceMetric {
+  padding-inline: 18px;
+}
 .homeMetric .versionAction {
   margin-top: 5px;
   padding: 6px 10px;
@@ -1661,10 +1664,23 @@ h1 {
 .homeMetric .versionUpdateAction:hover {
   background: var(--primary-dark);
 }
-.homeOpenButton {
+.homeOpenActions {
+  display: grid;
   min-width: 170px;
+  gap: 8px;
   margin: 0 24px;
+}
+.homeOpenButton,
+.homeRestartButton {
+  width: 100%;
+}
+.homeOpenButton {
+  min-width: 0;
+  margin: 0;
   padding: 15px 20px;
+}
+.homeRestartButton {
+  padding: 10px 16px;
 }
 .homeCodexUpdateProgress {
   display: grid;
@@ -2422,7 +2438,7 @@ h1 {
   .homeMetric {
     border-bottom: 1px solid var(--line);
   }
-  .homeOpenButton {
+  .homeOpenActions {
     margin: 20px 24px;
   }
 }
@@ -2632,9 +2648,6 @@ h1 {
   }
   .homeHealth > div {
     align-items: flex-start;
-  }
-  .homeOpenButton {
-    width: calc(100% - 48px);
   }
   .quickActions button {
     padding: 16px;

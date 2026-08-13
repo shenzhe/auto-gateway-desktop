@@ -1052,7 +1052,7 @@ function HeaderControls({
           }
         >
           <TranslateIcon weight="bold" aria-hidden="true" />
-          <span>{locale === "zh" ? "简" : "EN"}</span>
+          <span>{locale === "zh" ? tr("chineseShort") : tr("englishShort")}</span>
           <CaretDownIcon className="headerMenuCaret" aria-hidden="true" />
         </button>
         {openMenu === "language" ? (
@@ -2233,6 +2233,12 @@ function App() {
               : tr("downloadingCodexProgress", { percent: payload.percent }),
           );
         if (payload.stage === "installing") setMessage(tr("replacingCodex"));
+        if (payload.stage === "mounting") setMessage(tr("mountingCodex"));
+        if (payload.stage === "copying") setMessage(tr("copyingCodex"));
+        if (payload.stage === "verifying-signature")
+          setMessage(tr("verifyingCodexSignature"));
+        if (payload.stage === "replacing") setMessage(tr("replacingCodex"));
+        if (payload.stage === "unmounting") setMessage(tr("unmountingCodex"));
         if (payload.stage === "windows-installing")
           setMessage(tr("windowsInstalling"));
         if (payload.stage === "verifying") setMessage(tr("verifyingCodex"));
@@ -2869,12 +2875,15 @@ function App() {
           }
           setInstallProgress({ stage: "closing", downloadedBytes: 0 });
           setMessage(tr("closingCodex"));
-          await closeCodex();
+          await closeCodex(downloadedUpdate.targetPath);
         }
 
         setInstallProgress({ stage: "installing", downloadedBytes: 0 });
         setMessage(tr("replacingCodex"));
-        await applyCodexUpdate(downloadedUpdate.version);
+        await applyCodexUpdate(
+          downloadedUpdate.version,
+          downloadedUpdate.targetPath,
+        );
         await refreshStatus(false);
         const reopened = await waitForCodexOpen();
         setCodexOpenPhase(reopened ? "opened" : "closed");
@@ -3118,6 +3127,27 @@ function App() {
     } catch (error) {
       setCodexOpenPhase("closed");
       setHomeActionError(tr("openCodexFailed", { error: String(error) }));
+    }
+  }
+
+  async function handleRestartCodex() {
+    setHomeActionError("");
+    if (!(await confirm(tr("restartCodexConfirm")))) return;
+    setCodexOpenPhase("opening");
+    setMessage(tr("restartingCodex"));
+    try {
+      await closeCodex();
+      await openCodex();
+      if (await waitForCodexOpen()) {
+        setCodexOpenPhase("opened");
+        setMessage(tr("codexRestarted"));
+      } else {
+        setCodexOpenPhase("closed");
+        setHomeActionError(tr("codexOpenTimeout"));
+      }
+    } catch (error) {
+      setCodexOpenPhase("closed");
+      setHomeActionError(tr("restartCodexFailed", { error: String(error) }));
     }
   }
 
@@ -6339,7 +6369,7 @@ function App() {
                   ) : null}
                 </div>
               </div>
-              <div className="homeMetric">
+              <div className="homeMetric homeBalanceMetric">
                 <span>{tr("accountBalance")}</span>
                 <strong
                   className="tooltipValue balanceValue"
@@ -6359,21 +6389,23 @@ function App() {
                 <strong>{version}</strong>
                 <small>{versionStatus}</small>
                 <div className="homeVersionActions">
-                  <button
-                    className="versionAction"
-                    disabled={checkingCodexUpdates || installingCodex}
-                    onClick={() =>
-                      appInstalled
-                        ? void handleCheckCodexUpdates()
-                        : openSetupFromHome()
-                    }
-                  >
-                    {!appInstalled
-                      ? tr("installNow")
-                      : checkingCodexUpdates
-                        ? tr("checkingCodexUpdates")
-                        : tr("checkNow")}
-                  </button>
+                  {!updateAvailable ? (
+                    <button
+                      className="versionAction"
+                      disabled={checkingCodexUpdates || installingCodex}
+                      onClick={() =>
+                        appInstalled
+                          ? void handleCheckCodexUpdates()
+                          : openSetupFromHome()
+                      }
+                    >
+                      {!appInstalled
+                        ? tr("installNow")
+                        : checkingCodexUpdates
+                          ? tr("checkingCodexUpdates")
+                          : tr("checkNow")}
+                    </button>
+                  ) : null}
                   {updateAvailable ? (
                     <button
                       className="versionAction versionUpdateAction"
@@ -6385,17 +6417,28 @@ function App() {
                   ) : null}
                 </div>
               </div>
-              <button
-                className="primaryButton homeOpenButton"
-                disabled={!appInstalled || codexOpenPhase === "opening"}
-                onClick={() => void handleOpenCodex()}
-              >
-                {codexOpenPhase === "opening"
-                  ? tr("openingCodex")
-                  : codexOpenPhase === "opened"
-                    ? tr("codexOpened")
-                    : tr("openCodex")}
-              </button>
+              <div className="homeOpenActions">
+                <button
+                  className="primaryButton homeOpenButton"
+                  disabled={!appInstalled || codexOpenPhase === "opening"}
+                  onClick={() => void handleOpenCodex()}
+                >
+                  {codexOpenPhase === "opening"
+                    ? tr("openingCodex")
+                    : codexOpenPhase === "opened"
+                      ? tr("codexOpened")
+                      : tr("openCodex")}
+                </button>
+                {codexOpenPhase === "opened" ? (
+                  <button
+                    className="secondaryButton homeRestartButton"
+                    disabled={installingCodex}
+                    onClick={() => void handleRestartCodex()}
+                  >
+                    {tr("restartCodex")}
+                  </button>
+                ) : null}
+              </div>
             </section>
             {installingCodex && installProgress ? (
               <div className="homeCodexUpdateProgress" aria-live="polite">
@@ -6428,6 +6471,16 @@ function App() {
                         ? tr("selectingDownloadSource")
                         : installProgress.stage === "closing"
                           ? tr("closingCodex")
+                          : installProgress.stage === "mounting"
+                            ? tr("mountingCodex")
+                            : installProgress.stage === "copying"
+                              ? tr("copyingCodex")
+                              : installProgress.stage === "verifying-signature"
+                                ? tr("verifyingCodexSignature")
+                                : installProgress.stage === "replacing"
+                                  ? tr("replacingCodex")
+                                  : installProgress.stage === "unmounting"
+                                    ? tr("unmountingCodex")
                           : installProgress.stage === "verifying"
                             ? tr("verifyingCodex")
                             : installProgress.stage === "opening"
@@ -6805,15 +6858,17 @@ function App() {
                       {appStatus?.latestVersion || tr("versionUnavailable")}
                     </strong>
                   </div>
-                  <button
-                    className="secondaryButton updateButton versionUpdateButton"
-                    disabled={checkingCodexUpdates || installingCodex}
-                    onClick={() => void handleCheckCodexUpdates()}
-                  >
-                    {checkingCodexUpdates
-                      ? tr("checkingCodexUpdates")
-                      : tr("checkNow")}
-                  </button>
+                  {!updateAvailable ? (
+                    <button
+                      className="secondaryButton updateButton versionUpdateButton"
+                      disabled={checkingCodexUpdates || installingCodex}
+                      onClick={() => void handleCheckCodexUpdates()}
+                    >
+                      {checkingCodexUpdates
+                        ? tr("checkingCodexUpdates")
+                        : tr("checkNow")}
+                    </button>
+                  ) : null}
                   {updateAvailable ? (
                     <button
                       className="secondaryButton primaryUpdateButton versionUpdateButton"
@@ -6885,6 +6940,11 @@ function App() {
               ) : null}
               {installingCodex &&
               (installProgress?.stage === "closing" ||
+                installProgress?.stage === "mounting" ||
+                installProgress?.stage === "copying" ||
+                installProgress?.stage === "verifying-signature" ||
+                installProgress?.stage === "replacing" ||
+                installProgress?.stage === "unmounting" ||
                 installProgress?.stage === "installing" ||
                 installProgress?.stage === "verifying" ||
                 installProgress?.stage === "opening") ? (
@@ -6900,6 +6960,16 @@ function App() {
                         ? tr("verifyingCodex")
                         : installProgress.stage === "opening"
                           ? tr("openingCodex")
+                          : installProgress.stage === "mounting"
+                            ? tr("mountingCodex")
+                            : installProgress.stage === "copying"
+                              ? tr("copyingCodex")
+                              : installProgress.stage === "verifying-signature"
+                                ? tr("verifyingCodexSignature")
+                                : installProgress.stage === "replacing"
+                                  ? tr("replacingCodex")
+                                  : installProgress.stage === "unmounting"
+                                    ? tr("unmountingCodex")
                           : installProgress.stage === "closing"
                             ? tr("closingCodex")
                           : tr("replacingCodex")}

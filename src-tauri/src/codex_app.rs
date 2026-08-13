@@ -16,7 +16,7 @@ use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Output;
 use std::sync::OnceLock;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -53,6 +53,19 @@ const DOWNLOAD_SOURCE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_SOURCE_PROBE_BYTES: usize = 512 * 1024;
 const CODEX_VERSION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const DOWNLOAD_SOURCE_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const CODEX_INSTALLER_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+#[cfg(target_os = "macos")]
+const MACOS_ATTACH_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+#[cfg(target_os = "macos")]
+const MACOS_COPY_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+#[cfg(target_os = "macos")]
+const MACOS_SIGNATURE_TIMEOUT: Duration = Duration::from_secs(2 * 60);
+#[cfg(target_os = "macos")]
+const MACOS_DETACH_TIMEOUT: Duration = Duration::from_secs(60);
+#[cfg(target_os = "macos")]
+const MACOS_QUIT_GRACE_PERIOD: Duration = Duration::from_secs(10);
+#[cfg(target_os = "macos")]
+const MACOS_QUIT_FORCE_PERIOD: Duration = Duration::from_secs(10);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +96,8 @@ pub struct CodexUpdateDownloadResult {
     pub downloaded: bool,
     pub version: String,
     pub message: String,
+    pub target_path: Option<String>,
+    pub target_version: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -155,13 +170,18 @@ struct CachedDownloadSources {
     ranked_urls: Vec<String>,
 }
 
+struct CachedInstaller {
+    path: PathBuf,
+    version: String,
+}
+
 static CODEX_RELEASE_CACHE: OnceLock<tokio::sync::Mutex<Option<CachedCodexRelease>>> =
     OnceLock::new();
 static DOWNLOAD_SOURCE_CACHE: OnceLock<tokio::sync::Mutex<Option<CachedDownloadSources>>> =
     OnceLock::new();
 
 pub fn local_status() -> CodexAppStatus {
-    let Some(installation) = local_installation() else {
+    let Some(installation) = update_target_installation() else {
         return CodexAppStatus {
             installed: false,
             cached_installer_available: completed_installer_available(),
@@ -218,7 +238,7 @@ pub async fn install(
     force_update: bool,
     force_redownload: bool,
 ) -> Result<CodexInstallResult, String> {
-    let existing_installation = local_installation();
+    let existing_installation = update_target_installation();
     if let Some(installation) = existing_installation.as_ref().filter(|_| !force_update) {
         return Ok(CodexInstallResult {
             installed: true,
@@ -331,7 +351,11 @@ pub async fn install(
                 return Err(format!("the update finished, but version {installed} is still installed; expected {expected}"));
             }
         }
-        open_installed_app()?;
+        open_installed_app_at(
+            existing_installation
+                .as_ref()
+                .map(|installation| installation.path.as_path()),
+        )?;
     }
     emit_install_progress(app, "complete", 0, None);
     Ok(CodexInstallResult {
@@ -354,37 +378,54 @@ pub async fn download_update(
     app: &AppHandle,
     force_redownload: bool,
 ) -> Result<CodexUpdateDownloadResult, String> {
+    let target_installation = update_target_installation();
+    let target_path = target_installation
+        .as_ref()
+        .map(|installation| installation.path.display().to_string());
+    let target_version = target_installation
+        .as_ref()
+        .and_then(|installation| installation.version.clone());
     let latest_release = latest_release().await.ok();
+    let extension = download_extension(&[]);
+    let latest_version = latest_release
+        .as_ref()
+        .map(|release| release.version.as_str());
+    if !force_redownload {
+        if let Some(cached) =
+            latest_version.and_then(|version| cached_installer_for_version(version, extension))
+        {
+            emit_cached_download_progress(app, &cached);
+            return Ok(CodexUpdateDownloadResult {
+                downloaded: true,
+                version: cached.version,
+                message: "The cached Codex installer is ready to install.".to_string(),
+                target_path: target_path.clone(),
+                target_version: target_version.clone(),
+            });
+        }
+        if latest_version.is_none() {
+            if let Some(cached) = newest_cached_installer(extension) {
+                emit_cached_download_progress(app, &cached);
+                return Ok(CodexUpdateDownloadResult {
+                    downloaded: true,
+                    version: cached.version,
+                    message: "The cached Codex installer is ready to install.".to_string(),
+                    target_path: target_path.clone(),
+                    target_version: target_version.clone(),
+                });
+            }
+        }
+    }
+
     let download_urls = download_urls(latest_release.as_ref())?;
-    let extension = download_extension(&download_urls);
-    let download_path = resumable_download_path(
-        latest_release
-            .as_ref()
-            .map(|release| release.version.as_str()),
-        extension,
-    );
-    if force_redownload && download_path.is_file() {
+    let download_path = resumable_download_path(latest_version, extension);
+    if force_redownload {
         let _ = fs::remove_file(&download_path);
         let _ = fs::remove_file(completed_download_marker(&download_path));
     }
 
     emit_install_progress(app, "preparing", 0, None);
-    if download_path.is_file() && completed_download_marker(&download_path).is_file() {
-        let downloaded_bytes = fs::metadata(&download_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or_default();
-        emit_download_progress(
-            app,
-            "downloading",
-            downloaded_bytes,
-            Some(downloaded_bytes),
-            "cached installer",
-            None,
-            None,
-        );
-    } else {
-        download_installer(app, &download_urls, &download_path).await?;
-    }
+    download_installer(app, &download_urls, &download_path).await?;
 
     Ok(CodexUpdateDownloadResult {
         downloaded: true,
@@ -392,13 +433,31 @@ pub async fn download_update(
             .map(|release| release.version)
             .unwrap_or_else(|| "latest".to_string()),
         message: "The verified Codex installer is ready to install.".to_string(),
+        target_path,
+        target_version,
     })
+}
+
+fn emit_cached_download_progress(app: &AppHandle, cached: &CachedInstaller) {
+    let downloaded_bytes = fs::metadata(&cached.path)
+        .map(|metadata| metadata.len())
+        .unwrap_or_default();
+    emit_download_progress(
+        app,
+        "downloading",
+        downloaded_bytes,
+        Some(downloaded_bytes),
+        "cached installer",
+        None,
+        None,
+    );
 }
 
 /// Install a previously downloaded update, then launch the refreshed app.
 pub async fn apply_update(
     app: &AppHandle,
     downloaded_version: String,
+    target_path: Option<String>,
 ) -> Result<CodexInstallResult, String> {
     let download_path =
         resumable_download_path(Some(downloaded_version.as_str()), download_extension(&[]));
@@ -408,7 +467,9 @@ pub async fn apply_update(
         );
     }
 
-    let preferred_destination = local_installation().map(|installation| installation.path);
+    let preferred_destination = target_path
+        .map(PathBuf::from)
+        .or_else(|| update_target_installation().map(|installation| installation.path));
     install_downloaded_path(app, &download_path, preferred_destination.as_deref()).await?;
     emit_install_progress(app, "verifying", 0, None);
     let status = status().await;
@@ -417,9 +478,13 @@ pub async fn apply_update(
             "the Codex installer finished, but the application could not be found".to_string(),
         );
     }
+    let installed_version = preferred_destination
+        .as_deref()
+        .and_then(installed_version_at_path)
+        .or_else(|| status.local_version.clone());
     if let (Some(expected), Some(installed)) = (
         (downloaded_version != "latest").then_some(downloaded_version.as_str()),
-        status.local_version.as_deref(),
+        installed_version.as_deref(),
     ) {
         if compare_versions(installed, expected) == Ordering::Less {
             return Err(format!(
@@ -429,11 +494,14 @@ pub async fn apply_update(
     }
     let _ = fs::remove_file(completed_download_marker(&download_path));
     emit_install_progress(app, "opening", 0, None);
-    open_installed_app()?;
+    open_installed_app_at(preferred_destination.as_deref())?;
     emit_install_progress(app, "complete", 0, None);
     Ok(CodexInstallResult {
         installed: true,
-        path: status.path,
+        path: preferred_destination
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .or(status.path),
         message: "ChatGPT and Codex were updated successfully.".to_string(),
         awaiting_installation: false,
         can_retry_cached_installer: false,
@@ -451,8 +519,13 @@ async fn install_downloaded_path(
     emit_install_progress(app, "windows-installing", 0, None);
     let installer_path = download_path.to_path_buf();
     let preferred_destination = preferred_destination.map(Path::to_path_buf);
+    let app_handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        install_downloaded_app(&installer_path, preferred_destination.as_deref())
+        install_downloaded_app(
+            &app_handle,
+            &installer_path,
+            preferred_destination.as_deref(),
+        )
     })
     .await
     .map_err(|error| format!("wait for the official ChatGPT installer: {error}"))?
@@ -601,27 +674,51 @@ fn completed_download_marker(download_path: &Path) -> PathBuf {
     PathBuf::from(marker)
 }
 
-fn completed_installer_available() -> bool {
+fn cached_installer_from_path(path: PathBuf, version: String) -> Option<CachedInstaller> {
+    let marker = completed_download_marker(&path);
+    let marker_age = marker.metadata().ok()?.modified().ok()?.elapsed().ok()?;
+    if path.is_file() && marker.is_file() && marker_age <= CODEX_INSTALLER_CACHE_TTL {
+        return Some(CachedInstaller { path, version });
+    }
+
+    if marker.exists() || path.exists() {
+        let _ = fs::remove_file(&marker);
+        let _ = fs::remove_file(&path);
+    }
+    None
+}
+
+fn cached_installer_for_version(version: &str, extension: &str) -> Option<CachedInstaller> {
+    cached_installer_from_path(
+        resumable_download_path(Some(version), extension),
+        version.to_string(),
+    )
+}
+
+fn newest_cached_installer(extension: &str) -> Option<CachedInstaller> {
     let prefix = format!(
         "autogateway-chatgpt-{}-{}-",
         std::env::consts::OS,
         native_architecture()
     );
-    let Ok(entries) = fs::read_dir(env::temp_dir()) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        let marker = entry.path();
-        let Some(name) = marker.file_name().and_then(|name| name.to_str()) else {
-            return false;
-        };
-        if !name.starts_with(&prefix) || !name.ends_with(".complete") {
-            return false;
-        }
-        let installer_name = name.trim_end_matches(".complete");
-        let installer = marker.with_file_name(installer_name);
-        installer.is_file() && marker.is_file()
-    })
+    let suffix = format!(".{extension}.complete");
+    let entries = fs::read_dir(env::temp_dir()).ok()?;
+    let mut candidates = entries
+        .flatten()
+        .filter_map(|entry| {
+            let marker = entry.path();
+            let name = marker.file_name()?.to_str()?;
+            let version = name.strip_prefix(&prefix)?.strip_suffix(&suffix)?;
+            let installer = marker.with_file_name(name.trim_end_matches(".complete"));
+            cached_installer_from_path(installer, version.to_string())
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| compare_versions(&left.version, &right.version));
+    candidates.pop()
+}
+
+fn completed_installer_available() -> bool {
+    newest_cached_installer(download_extension(&[])).is_some()
 }
 
 async fn rank_download_sources(download_urls: &[String]) -> Vec<String> {
@@ -767,10 +864,15 @@ fn emit_download_progress(
 }
 
 pub fn open_installed_app() -> Result<(), String> {
+    open_installed_app_at(None)
+}
+
+pub fn open_installed_app_at(target_path: Option<&Path>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let app = local_installation()
-            .map(|installation| installation.path)
+        let app = target_path
+            .map(Path::to_path_buf)
+            .or_else(|| update_target_installation().map(|installation| installation.path))
             .ok_or_else(|| "ChatGPT is not installed yet.".to_string())?;
         Command::new("open")
             .arg(&app)
@@ -823,33 +925,25 @@ pub fn is_installed_app_running() -> Result<bool, String> {
     Err("This desktop build supports macOS and Windows only.".to_string())
 }
 
-pub fn close_installed_app() -> Result<(), String> {
-    if !is_installed_app_running()? {
-        return Ok(());
-    }
-
+pub fn close_installed_app_at(target_path: Option<String>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        for application in ["ChatGPT", "Codex"] {
-            let script = format!("tell application \"{application}\" to quit");
-            let _ = Command::new("osascript")
-                .args(["-e", script.as_str()])
-                .output();
-        }
-        let deadline = Instant::now() + Duration::from_secs(20);
-        while Instant::now() < deadline {
-            if !is_installed_app_running()? {
-                return Ok(());
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-        return Err(
-            "Codex is still running. Quit Codex completely, then try the update again.".to_string(),
-        );
+        let app_paths = target_path
+            .map(PathBuf::from)
+            .map(|path| vec![path])
+            .unwrap_or_else(|| {
+                running_installation()
+                    .map(|installation| vec![installation.path])
+                    .unwrap_or_default()
+            });
+        return close_macos_app_processes(&app_paths);
     }
 
     #[cfg(target_os = "windows")]
     {
+        if !is_installed_app_running()? {
+            return Ok(());
+        }
         let script = "$processes = @(Get-Process -Name 'ChatGPT','Codex','OpenAI.Codex' -ErrorAction SilentlyContinue); foreach ($process in $processes) { if ($process.MainWindowHandle -ne 0) { $null = $process.CloseMainWindow() } }";
         Command::new("powershell.exe")
             .creation_flags(CREATE_NO_WINDOW)
@@ -1113,9 +1207,20 @@ fn numeric_version_parts(version: &str) -> Vec<u64> {
 
 #[cfg(target_os = "macos")]
 fn local_installation() -> Option<LocalInstallation> {
-    let path = installation_candidates()
+    installation_candidates()
         .into_iter()
-        .find(|path| path.exists())?;
+        .filter(|path| path.exists())
+        .map(read_macos_installation)
+        .max_by(|left, right| match (&left.version, &right.version) {
+            (Some(left), Some(right)) => compare_versions(left, right),
+            (Some(_), None) => Ordering::Greater,
+            (None, Some(_)) => Ordering::Less,
+            (None, None) => Ordering::Equal,
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_installation(path: PathBuf) -> LocalInstallation {
     let plist = path.join("Contents/Info.plist");
     let version = Command::new("/usr/libexec/PlistBuddy")
         .args(["-c", "Print :CFBundleShortVersionString"])
@@ -1125,7 +1230,66 @@ fn local_installation() -> Option<LocalInstallation> {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
         .filter(|value| !value.is_empty());
-    Some(LocalInstallation { path, version })
+    LocalInstallation { path, version }
+}
+
+#[cfg(target_os = "macos")]
+fn installed_version_at_path(path: &Path) -> Option<String> {
+    path.exists()
+        .then(|| read_macos_installation(path.to_path_buf()).version)
+        .flatten()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn installed_version_at_path(_path: &Path) -> Option<String> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn running_installation() -> Option<LocalInstallation> {
+    let output = Command::new("ps")
+        .args(["ax", "-o", "command="])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(macos_main_app_path)
+        .map(read_macos_installation)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_main_app_path(command: &str) -> Option<PathBuf> {
+    ["ChatGPT", "Codex"].into_iter().find_map(|executable| {
+        let marker = format!("/Contents/MacOS/{executable}");
+        let marker_start = command.find(&marker)?;
+        let marker_end = marker_start + marker.len();
+        if command[marker_end..]
+            .chars()
+            .next()
+            .is_some_and(|character| !character.is_whitespace() && character != '"')
+        {
+            return None;
+        }
+        let raw_path = command[..marker_start]
+            .trim()
+            .trim_start_matches('"')
+            .trim_end_matches('/');
+        let path = PathBuf::from(raw_path);
+        (path.extension().and_then(|extension| extension.to_str()) == Some("app")
+            && !raw_path.contains("/Contents/"))
+        .then_some(path)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn update_target_installation() -> Option<LocalInstallation> {
+    running_installation().or_else(local_installation)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn update_target_installation() -> Option<LocalInstallation> {
+    local_installation()
 }
 
 #[cfg(target_os = "windows")]
@@ -1200,38 +1364,86 @@ fn download_extension(_download_urls: &[String]) -> &'static str {
 }
 
 #[cfg(target_os = "macos")]
+fn run_macos_command_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+    description: &str,
+) -> Result<Output, String> {
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("start {description}: {error}"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child
+            .try_wait()
+            .map_err(|error| format!("wait for {description}: {error}"))?
+        {
+            Some(_) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| format!("read {description} output: {error}"));
+            }
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{description} timed out after {} seconds",
+                    timeout.as_secs()
+                ));
+            }
+            None => thread::sleep(Duration::from_millis(250)),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn install_downloaded_app(
+    app: &AppHandle,
     download_path: &Path,
     preferred_destination: Option<&Path>,
 ) -> Result<InstallerResult, String> {
-    let output = Command::new("hdiutil")
+    emit_install_progress(app, "mounting", 0, None);
+    let mut attach_command = Command::new("hdiutil");
+    attach_command
         .args(["attach", "-nobrowse", "-readonly"])
-        .arg(download_path)
-        .output()
-        .map_err(|error| format!("mount the official ChatGPT installer: {error}"))?;
+        .arg(download_path);
+    let output = run_macos_command_with_timeout(
+        &mut attach_command,
+        MACOS_ATTACH_TIMEOUT,
+        "mount the official ChatGPT installer",
+    )?;
     if !output.status.success() {
         return Err(format!(
             "mount the official ChatGPT installer: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    let mount_path = String::from_utf8_lossy(&output.stdout)
+    let mount_path = match String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter_map(|line| line.split('\t').last())
         .map(str::trim)
         .find(|value| value.starts_with("/Volumes/"))
         .map(PathBuf::from)
-        .ok_or_else(|| "locate the mounted ChatGPT installer.".to_string())?;
-    let source = [mount_path.join("ChatGPT.app"), mount_path.join("Codex.app")]
+    {
+        Some(path) => path,
+        None => {
+            return Err("locate the mounted ChatGPT installer.".to_string());
+        }
+    };
+    let source = match [mount_path.join("ChatGPT.app"), mount_path.join("Codex.app")]
         .into_iter()
         .find(|path| path.exists())
-        .ok_or_else(|| "locate ChatGPT in the mounted installer.".to_string())?;
-    let install_result = copy_macos_app(&source, preferred_destination);
-    let detach_result = Command::new("hdiutil")
-        .arg("detach")
-        .arg(&mount_path)
-        .output()
-        .map_err(|error| format!("unmount the official ChatGPT installer: {error}"));
+    {
+        Some(source) => source,
+        None => {
+            let _ = detach_macos_volume(&mount_path);
+            return Err("locate ChatGPT in the mounted installer.".to_string());
+        }
+    };
+    emit_install_progress(app, "copying", 0, None);
+    let install_result = copy_macos_app(app, &source, preferred_destination);
+    emit_install_progress(app, "unmounting", 0, None);
+    let detach_result = detach_macos_volume(&mount_path);
     match (install_result, detach_result) {
         (Ok(()), Ok(_)) => {
             let _ = fs::remove_file(download_path);
@@ -1243,24 +1455,41 @@ fn install_downloaded_app(
 }
 
 #[cfg(target_os = "macos")]
-fn copy_macos_app(source: &Path, preferred_destination: Option<&Path>) -> Result<(), String> {
-    let mut destinations = Vec::new();
-    if let Some(destination) = preferred_destination {
-        destinations.push(destination.to_path_buf());
+fn detach_macos_volume(mount_path: &Path) -> Result<Output, String> {
+    let mut detach_command = Command::new("hdiutil");
+    detach_command.arg("detach").arg(mount_path);
+    let output = run_macos_command_with_timeout(
+        &mut detach_command,
+        MACOS_DETACH_TIMEOUT,
+        "unmount the official ChatGPT installer",
+    )?;
+    if !output.status.success() {
+        return Err(format!(
+            "unmount the official ChatGPT installer: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
-    let system_destination = PathBuf::from("/Applications/ChatGPT.app");
-    if !destinations.contains(&system_destination) {
-        destinations.push(system_destination);
-    }
-    if let Some(home) = dirs::home_dir() {
-        let user_destination = home.join("Applications/ChatGPT.app");
-        if !destinations.contains(&user_destination) {
-            destinations.push(user_destination);
+    Ok(output)
+}
+
+#[cfg(target_os = "macos")]
+fn copy_macos_app(
+    app: &AppHandle,
+    source: &Path,
+    preferred_destination: Option<&Path>,
+) -> Result<(), String> {
+    let destinations = if let Some(destination) = preferred_destination {
+        vec![destination.to_path_buf()]
+    } else {
+        let mut destinations = vec![PathBuf::from("/Applications/ChatGPT.app")];
+        if let Some(home) = dirs::home_dir() {
+            destinations.push(home.join("Applications/ChatGPT.app"));
         }
-    }
+        destinations
+    };
     let mut last_error = String::new();
     for destination in destinations {
-        match replace_macos_app(source, &destination) {
+        match replace_macos_app_with_progress(Some(app), source, &destination) {
             Ok(()) => return Ok(()),
             Err(error) => {
                 last_error = error;
@@ -1272,6 +1501,15 @@ fn copy_macos_app(source: &Path, preferred_destination: Option<&Path>) -> Result
 
 #[cfg(target_os = "macos")]
 fn replace_macos_app(source: &Path, destination: &Path) -> Result<(), String> {
+    replace_macos_app_with_progress(None, source, destination)
+}
+
+#[cfg(target_os = "macos")]
+fn replace_macos_app_with_progress(
+    app: Option<&AppHandle>,
+    source: &Path,
+    destination: &Path,
+) -> Result<(), String> {
     let parent = destination
         .parent()
         .ok_or_else(|| "resolve the ChatGPT installation directory".to_string())?;
@@ -1281,11 +1519,22 @@ fn replace_macos_app(source: &Path, destination: &Path) -> Result<(), String> {
     let staged = parent.join(format!(".autogateway-chatgpt-{operation_id}.app"));
     let backup = parent.join(format!(".autogateway-chatgpt-{operation_id}.backup.app"));
 
-    let copy_output = Command::new("ditto")
-        .arg(source)
-        .arg(&staged)
-        .output()
-        .map_err(|error| format!("stage ChatGPT in Applications: {error}"))?;
+    if let Some(app) = app {
+        emit_install_progress(app, "replacing", 0, None);
+    }
+    let mut copy_command = Command::new("ditto");
+    copy_command.arg(source).arg(&staged);
+    let copy_output = match run_macos_command_with_timeout(
+        &mut copy_command,
+        MACOS_COPY_TIMEOUT,
+        "stage ChatGPT in Applications",
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staged);
+            return Err(error);
+        }
+    };
     if !copy_output.status.success() {
         let _ = fs::remove_dir_all(&staged);
         return Err(format!(
@@ -1294,11 +1543,24 @@ fn replace_macos_app(source: &Path, destination: &Path) -> Result<(), String> {
         ));
     }
 
-    let verify_output = Command::new("codesign")
+    if let Some(app) = app {
+        emit_install_progress(app, "verifying-signature", 0, None);
+    }
+    let mut verify_command = Command::new("codesign");
+    verify_command
         .args(["--verify", "--deep", "--strict"])
-        .arg(&staged)
-        .output()
-        .map_err(|error| format!("verify the official ChatGPT signature: {error}"))?;
+        .arg(&staged);
+    let verify_output = match run_macos_command_with_timeout(
+        &mut verify_command,
+        MACOS_SIGNATURE_TIMEOUT,
+        "verify the official ChatGPT signature",
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staged);
+            return Err(error);
+        }
+    };
     if !verify_output.status.success() {
         let _ = fs::remove_dir_all(&staged);
         return Err(format!(
@@ -1337,37 +1599,91 @@ fn quit_macos_app(app_path: &Path) -> Result<(), String> {
     if !macos_app_is_running(app_path) {
         return Ok(());
     }
-    for application in ["ChatGPT", "Codex"] {
-        let script = format!("tell application \"{application}\" to quit");
-        let _ = Command::new("osascript")
-            .args(["-e", script.as_str()])
-            .output();
+    let app_paths = [app_path.to_path_buf()];
+    close_macos_app_processes(&app_paths)
+}
+
+#[cfg(target_os = "macos")]
+fn close_macos_app_processes(app_paths: &[PathBuf]) -> Result<(), String> {
+    if !app_paths.iter().any(|path| macos_app_is_running(path)) {
+        return Ok(());
     }
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Signal only processes belonging to the selected bundle. A global
+    // AppleScript quit could close a second ChatGPT/Codex installation.
+    terminate_macos_app_processes(app_paths, "TERM");
+    let deadline = Instant::now() + MACOS_QUIT_GRACE_PERIOD;
     while Instant::now() < deadline {
-        if !macos_app_is_running(app_path) {
+        if !app_paths.iter().any(|path| macos_app_is_running(path)) {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(250));
     }
-    Err("Codex is still running. Quit Codex completely, then try the update again.".to_string())
+
+    terminate_macos_app_processes(app_paths, "TERM");
+    let deadline = Instant::now() + MACOS_QUIT_FORCE_PERIOD;
+    while Instant::now() < deadline {
+        if !app_paths.iter().any(|path| macos_app_is_running(path)) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+
+    terminate_macos_app_processes(app_paths, "KILL");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if !app_paths.iter().any(|path| macos_app_is_running(path)) {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    Err("Codex is still running after the close request. Quit Codex completely, then try the update again.".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn terminate_macos_app_processes(app_paths: &[PathBuf], signal: &str) {
+    for process_id in macos_app_process_ids(app_paths) {
+        let _ = Command::new("kill")
+            .args([format!("-{signal}"), process_id.to_string()])
+            .output();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_app_process_ids(app_paths: &[PathBuf]) -> Vec<u32> {
+    let prefixes = app_paths
+        .iter()
+        .map(|path| format!("{}/Contents/", path.display()))
+        .collect::<Vec<_>>();
+    let Ok(output) = Command::new("ps")
+        .args(["ax", "-o", "pid=,command="])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().splitn(2, char::is_whitespace);
+            let process_id = fields.next()?.parse::<u32>().ok()?;
+            let command = fields.next()?.trim().trim_start_matches('"');
+            prefixes
+                .iter()
+                .any(|prefix| command.starts_with(prefix))
+                .then_some(process_id)
+        })
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
 fn macos_app_is_running(app_path: &Path) -> bool {
-    let prefix = format!("{}/Contents/", app_path.display());
-    Command::new("ps")
-        .args(["ax", "-o", "command="])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .map(str::trim)
-                .any(|command| command.starts_with(&prefix))
-        })
-        .unwrap_or(false)
+    let app_paths = [app_path.to_path_buf()];
+    macos_app_process_ids(&app_paths)
+        .into_iter()
+        .next()
+        .is_some()
 }
 
 #[cfg(target_os = "windows")]
@@ -1508,6 +1824,7 @@ fn open_microsoft_store() -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn install_downloaded_app(
+    _app: &AppHandle,
     download_path: &Path,
     _preferred_destination: Option<&Path>,
 ) -> Result<InstallerResult, String> {
@@ -1597,6 +1914,7 @@ fn run_windows_command_with_timeout(
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn install_downloaded_app(
+    _app: &AppHandle,
     _download_path: &Path,
     _preferred_destination: Option<&Path>,
 ) -> Result<InstallerResult, String> {
@@ -1642,10 +1960,12 @@ fn missing_message() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_versions, is_trusted_windows_download_url, native_architecture,
-        windows_download_urls, PlatformVersion,
+        cached_installer_from_path, compare_versions, completed_download_marker,
+        is_trusted_windows_download_url, native_architecture, windows_download_urls,
+        PlatformVersion,
     };
     use std::cmp::Ordering;
+    use std::fs;
 
     #[test]
     fn compares_numeric_version_segments() {
@@ -1663,6 +1983,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn invalid_cached_installer_state_is_removed() {
+        let root = std::env::temp_dir().join(format!(
+            "autogateway-codex-cache-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&root).expect("create cache test directory");
+        let installer = root.join("ChatGPT.dmg");
+        let marker = completed_download_marker(&installer);
+        fs::write(&marker, b"complete").expect("write stale cache marker");
+
+        assert!(
+            cached_installer_from_path(installer.clone(), "26.803.81509".to_string()).is_none()
+        );
+        assert!(!marker.exists());
+        assert!(!installer.exists());
+
+        fs::remove_dir_all(root).expect("remove cache test directory");
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn prefers_the_direct_mirror_before_r2_and_the_official_fallback() {
@@ -1674,6 +2014,29 @@ mod tests {
         assert_eq!(urls[0], super::PREFERRED_DIRECT_DOWNLOAD_URL);
         assert_eq!(urls[1], "https://cdn.example.test/codex.dmg");
         assert_eq!(urls[2], "https://official.example.test/ChatGPT.dmg");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detects_the_running_macos_app_bundle_from_its_main_process() {
+        assert_eq!(
+            super::macos_main_app_path("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
+            Some(std::path::PathBuf::from("/Applications/ChatGPT.app"))
+        );
+        assert_eq!(
+            super::macos_main_app_path(
+                "\"/Users/example/Applications/Codex.app/Contents/MacOS/Codex\" --profile"
+            ),
+            Some(std::path::PathBuf::from(
+                "/Users/example/Applications/Codex.app"
+            ))
+        );
+        assert_eq!(
+            super::macos_main_app_path(
+                "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)"
+            ),
+            None
+        );
     }
 
     #[test]

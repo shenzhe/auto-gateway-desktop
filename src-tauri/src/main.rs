@@ -10,7 +10,7 @@ mod skill_hub;
 mod skills;
 
 use codex_app::{
-    apply_update as apply_codex_update, close_installed_app,
+    apply_update as apply_codex_update, close_installed_app_at,
     download_update as download_codex_update, install as install_codex_app,
     is_installed_app_running, local_status as local_codex_app_status, open_installed_app,
     status as codex_app_status, CodexAppStatus, CodexInstallResult, CodexUpdateDownloadResult,
@@ -272,13 +272,14 @@ async fn download_codex_update_command(
 async fn apply_codex_update_command(
     app: AppHandle,
     downloaded_version: String,
+    target_path: Option<String>,
 ) -> Result<CodexInstallResult, String> {
-    apply_codex_update(&app, downloaded_version).await
+    apply_codex_update(&app, downloaded_version, target_path).await
 }
 
 #[tauri::command]
-fn close_codex() -> Result<(), String> {
-    close_installed_app()
+fn close_codex(target_path: Option<String>) -> Result<(), String> {
+    close_installed_app_at(target_path)
 }
 
 #[tauri::command]
