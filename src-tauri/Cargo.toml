@@ -1,6 +1,6 @@
 [package]
 name = "autogateway-desktop"
-version = "0.1.48"
+version = "0.1.49"
 description = "AUTO Gateway desktop setup assistant"
 authors = ["AUTO Gateway"]
 edition = "2021"
@@ -27,7 +27,7 @@ tauri-plugin-notification = "2.3.3"
 tauri-plugin-process = "2.3"
 tauri-plugin-single-instance = "2.3"
 tauri-plugin-updater = "2.10"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "fs", "io-util"] }
 toml_edit = "0.22"
 url = "2.5"
 uuid = { version = "1.11", features = ["v4"] }

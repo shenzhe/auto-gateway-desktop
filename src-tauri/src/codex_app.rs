@@ -18,10 +18,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Output;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
+#[cfg(target_os = "macos")]
+use std::sync::Mutex;
 use std::sync::OnceLock;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::thread;
 use std::time::{Duration, Instant};
+#[cfg(target_os = "macos")]
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 #[cfg(any(target_os = "windows", test))]
 use url::Url;
@@ -66,6 +72,11 @@ const MACOS_DETACH_TIMEOUT: Duration = Duration::from_secs(60);
 const MACOS_QUIT_GRACE_PERIOD: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
 const MACOS_QUIT_FORCE_PERIOD: Duration = Duration::from_secs(10);
+#[cfg(target_os = "macos")]
+const CODEX_UPDATE_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+#[cfg(target_os = "macos")]
+static CODEX_UPDATE_LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -385,6 +396,16 @@ pub async fn download_update(
     let target_version = target_installation
         .as_ref()
         .and_then(|installation| installation.version.clone());
+    #[cfg(target_os = "macos")]
+    log_codex_update(
+        "info",
+        "download_requested",
+        format!(
+            "forceRedownload={force_redownload}; targetPath={}; targetVersion={}",
+            target_path.as_deref().unwrap_or("unknown"),
+            target_version.as_deref().unwrap_or("unknown"),
+        ),
+    );
     let latest_release = latest_release().await.ok();
     let extension = download_extension(&[]);
     let latest_version = latest_release
@@ -394,6 +415,12 @@ pub async fn download_update(
         if let Some(cached) =
             latest_version.and_then(|version| cached_installer_for_version(version, extension))
         {
+            #[cfg(target_os = "macos")]
+            log_codex_update(
+                "info",
+                "cached_installer_selected",
+                format!("version={}; path={}", cached.version, cached.path.display()),
+            );
             emit_cached_download_progress(app, &cached);
             return Ok(CodexUpdateDownloadResult {
                 downloaded: true,
@@ -405,6 +432,12 @@ pub async fn download_update(
         }
         if latest_version.is_none() {
             if let Some(cached) = newest_cached_installer(extension) {
+                #[cfg(target_os = "macos")]
+                log_codex_update(
+                    "warning",
+                    "offline_cached_installer_selected",
+                    format!("version={}; path={}", cached.version, cached.path.display()),
+                );
                 emit_cached_download_progress(app, &cached);
                 return Ok(CodexUpdateDownloadResult {
                     downloaded: true,
@@ -425,7 +458,20 @@ pub async fn download_update(
     }
 
     emit_install_progress(app, "preparing", 0, None);
-    download_installer(app, &download_urls, &download_path).await?;
+    download_installer(app, &download_urls, &download_path)
+        .await
+        .map_err(with_codex_update_log_location)?;
+
+    #[cfg(target_os = "macos")]
+    log_codex_update(
+        "info",
+        "download_completed",
+        format!(
+            "path={}; version={}",
+            download_path.display(),
+            latest_version.unwrap_or("latest")
+        ),
+    );
 
     Ok(CodexUpdateDownloadResult {
         downloaded: true,
@@ -459,6 +505,15 @@ pub async fn apply_update(
     downloaded_version: String,
     target_path: Option<String>,
 ) -> Result<CodexInstallResult, String> {
+    #[cfg(target_os = "macos")]
+    log_codex_update(
+        "info",
+        "apply_requested",
+        format!(
+            "downloadedVersion={downloaded_version}; targetPath={}",
+            target_path.as_deref().unwrap_or("automatic"),
+        ),
+    );
     let download_path =
         resumable_download_path(Some(downloaded_version.as_str()), download_extension(&[]));
     if !download_path.is_file() || !completed_download_marker(&download_path).is_file() {
@@ -470,7 +525,9 @@ pub async fn apply_update(
     let preferred_destination = target_path
         .map(PathBuf::from)
         .or_else(|| update_target_installation().map(|installation| installation.path));
-    install_downloaded_path(app, &download_path, preferred_destination.as_deref()).await?;
+    install_downloaded_path(app, &download_path, preferred_destination.as_deref())
+        .await
+        .map_err(with_codex_update_log_location)?;
     emit_install_progress(app, "verifying", 0, None);
     let status = status().await;
     if !status.installed {
@@ -496,6 +553,19 @@ pub async fn apply_update(
     emit_install_progress(app, "opening", 0, None);
     open_installed_app_at(preferred_destination.as_deref())?;
     emit_install_progress(app, "complete", 0, None);
+    #[cfg(target_os = "macos")]
+    log_codex_update(
+        "info",
+        "update_completed",
+        format!(
+            "installedVersion={}; targetPath={}",
+            installed_version.as_deref().unwrap_or("unknown"),
+            preferred_destination
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "automatic".to_string()),
+        ),
+    );
     Ok(CodexInstallResult {
         installed: true,
         path: preferred_destination
@@ -540,9 +610,32 @@ async fn download_installer(
     emit_install_progress(app, "selecting-source", 0, None);
     let ranked_urls = rank_download_sources(download_urls).await;
     for download_url in &ranked_urls {
+        #[cfg(target_os = "macos")]
+        log_codex_update(
+            "info",
+            "download_source_started",
+            format!("source={}", download_source_label(download_url)),
+        );
         match download_installer_from_url(app, download_url, download_path).await {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                #[cfg(target_os = "macos")]
+                log_codex_update(
+                    "info",
+                    "download_source_completed",
+                    format!("source={}", download_source_label(download_url)),
+                );
+                return Ok(());
+            }
             Err(error) => {
+                #[cfg(target_os = "macos")]
+                log_codex_update(
+                    "error",
+                    "download_source_failed",
+                    format!(
+                        "source={}; error={error}",
+                        download_source_label(download_url)
+                    ),
+                );
                 errors.push(format!("{download_url}: {error}"));
             }
         }
@@ -820,6 +913,12 @@ fn emit_install_progress(
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
 ) {
+    #[cfg(target_os = "macos")]
+    log_codex_update(
+        "info",
+        "progress_stage",
+        format!("stage={stage}; downloadedBytes={downloaded_bytes}; totalBytes={total_bytes:?}"),
+    );
     let percent = total_bytes
         .filter(|total| *total > 0)
         .map(|total| ((downloaded_bytes.saturating_mul(100) / total).min(100)) as u8);
@@ -874,6 +973,11 @@ pub fn open_installed_app_at(target_path: Option<&Path>) -> Result<(), String> {
             .map(Path::to_path_buf)
             .or_else(|| update_target_installation().map(|installation| installation.path))
             .ok_or_else(|| "ChatGPT is not installed yet.".to_string())?;
+        log_codex_update(
+            "info",
+            "opening_application",
+            format!("path={}", app.display()),
+        );
         Command::new("open")
             .arg(&app)
             .spawn()
@@ -936,7 +1040,24 @@ pub fn close_installed_app_at(target_path: Option<String>) -> Result<(), String>
                     .map(|installation| vec![installation.path])
                     .unwrap_or_default()
             });
-        return close_macos_app_processes(&app_paths);
+        log_codex_update(
+            "info",
+            "closing_application",
+            format!(
+                "paths={}",
+                app_paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        );
+        let result = close_macos_app_processes(&app_paths);
+        match &result {
+            Ok(()) => log_codex_update("info", "application_closed", "success"),
+            Err(error) => log_codex_update("error", "application_close_failed", error),
+        }
+        return result;
     }
 
     #[cfg(target_os = "windows")]
@@ -1364,14 +1485,118 @@ fn download_extension(_download_urls: &[String]) -> &'static str {
 }
 
 #[cfg(target_os = "macos")]
+fn codex_update_log_path() -> Option<PathBuf> {
+    #[cfg(test)]
+    return None;
+    #[cfg(not(test))]
+    dirs::home_dir()
+        .map(|home| home.join("Library/Logs/AUTO Gateway Desktop/logs/codex-update.jsonl"))
+}
+
+#[cfg(target_os = "macos")]
+fn rotate_codex_update_log_if_needed(path: &Path) {
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    if metadata.len() < CODEX_UPDATE_LOG_MAX_BYTES {
+        return;
+    }
+    let backup = path.with_extension("jsonl.1");
+    let _ = fs::remove_file(&backup);
+    let _ = fs::rename(path, backup);
+}
+
+#[cfg(target_os = "macos")]
+fn log_codex_update(level: &str, event: &str, message: impl AsRef<str>) {
+    let message = message.as_ref();
+    eprintln!("Codex update [{level}] {event}: {message}");
+    let Some(path) = codex_update_log_path() else {
+        return;
+    };
+    let lock = CODEX_UPDATE_LOG_LOCK.get_or_init(|| Mutex::new(()));
+    let Ok(_guard) = lock.lock() else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    rotate_codex_update_log_if_needed(&path);
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let record = serde_json::json!({
+        "timestampUnixMs": timestamp_ms,
+        "level": level,
+        "event": event,
+        "message": message,
+        "processId": std::process::id(),
+        "desktopVersion": env!("CARGO_PKG_VERSION"),
+    });
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{record}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn with_codex_update_log_location(error: String) -> String {
+    log_codex_update("error", "update_failed", &error);
+    match codex_update_log_path() {
+        Some(path) => format!("{error}. Update log: {}", path.display()),
+        None => error,
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn with_codex_update_log_location(error: String) -> String {
+    error
+}
+
+#[cfg(target_os = "macos")]
+fn compact_command_output(bytes: &[u8]) -> String {
+    const MAX_CHARS: usize = 4_000;
+    let text = String::from_utf8_lossy(bytes).trim().to_string();
+    if text.chars().count() <= MAX_CHARS {
+        return text;
+    }
+    let tail = text
+        .chars()
+        .rev()
+        .take(MAX_CHARS)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+    format!("...{tail}")
+}
+
+#[cfg(target_os = "macos")]
 fn run_macos_command_with_timeout(
     command: &mut Command,
     timeout: Duration,
     description: &str,
 ) -> Result<Output, String> {
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("start {description}: {error}"))?;
+    let command_summary = format!("{command:?}");
+    log_codex_update(
+        "info",
+        "command_started",
+        format!(
+            "{description}; command={command_summary}; timeout={}s",
+            timeout.as_secs()
+        ),
+    );
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| {
+        let message = format!("start {description}: {error}");
+        log_codex_update("error", "command_start_failed", &message);
+        message
+    })?;
     let deadline = Instant::now() + timeout;
     loop {
         match child
@@ -1379,21 +1604,78 @@ fn run_macos_command_with_timeout(
             .map_err(|error| format!("wait for {description}: {error}"))?
         {
             Some(_) => {
-                return child
+                let output = child
                     .wait_with_output()
-                    .map_err(|error| format!("read {description} output: {error}"));
+                    .map_err(|error| format!("read {description} output: {error}"))?;
+                log_codex_update(
+                    if output.status.success() {
+                        "info"
+                    } else {
+                        "error"
+                    },
+                    "command_finished",
+                    format!(
+                        "{description}; status={}; stdout={:?}; stderr={:?}",
+                        output.status,
+                        compact_command_output(&output.stdout),
+                        compact_command_output(&output.stderr),
+                    ),
+                );
+                return Ok(output);
             }
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!(
+                let message = format!(
                     "{description} timed out after {} seconds",
                     timeout.as_secs()
-                ));
+                );
+                log_codex_update("error", "command_timed_out", &message);
+                return Err(message);
             }
             None => thread::sleep(Duration::from_millis(250)),
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mounted_volume_for_image(image_path: &Path) -> Option<PathBuf> {
+    let output = Command::new("hdiutil").arg("info").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    mounted_volume_from_hdiutil_info(&String::from_utf8_lossy(&output.stdout), image_path)
+}
+
+#[cfg(target_os = "macos")]
+fn mounted_volume_from_hdiutil_info(info: &str, image_path: &Path) -> Option<PathBuf> {
+    let mut matching_image = false;
+    for line in info.lines() {
+        if line.starts_with("================================================") {
+            matching_image = false;
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("image-path") {
+            let value = value.trim_start_matches([' ', ':']).trim();
+            matching_image = paths_refer_to_same_file(Path::new(value), image_path);
+            continue;
+        }
+        if matching_image {
+            let mount_path = line.split('\t').last().map(str::trim).unwrap_or_default();
+            if mount_path.starts_with("/Volumes/") {
+                return Some(PathBuf::from(mount_path));
+            }
+        }
+    }
+    None
 }
 
 #[cfg(target_os = "macos")]
@@ -1402,6 +1684,31 @@ fn install_downloaded_app(
     download_path: &Path,
     preferred_destination: Option<&Path>,
 ) -> Result<InstallerResult, String> {
+    log_codex_update(
+        "info",
+        "installation_started",
+        format!(
+            "installer={}; destination={}",
+            download_path.display(),
+            preferred_destination
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "automatic".to_string()),
+        ),
+    );
+    if let Some(stale_mount) = mounted_volume_for_image(download_path) {
+        log_codex_update(
+            "warning",
+            "stale_mount_found",
+            format!(
+                "detaching stale installer volume at {}",
+                stale_mount.display()
+            ),
+        );
+        detach_macos_volume(&stale_mount).map_err(|error| {
+            log_codex_update("error", "stale_mount_cleanup_failed", &error);
+            error
+        })?;
+    }
     emit_install_progress(app, "mounting", 0, None);
     let mut attach_command = Command::new("hdiutil");
     attach_command
@@ -1427,9 +1734,29 @@ fn install_downloaded_app(
     {
         Some(path) => path,
         None => {
-            return Err("locate the mounted ChatGPT installer.".to_string());
+            let cleanup_message = if let Some(mount_path) = mounted_volume_for_image(download_path)
+            {
+                match detach_macos_volume(&mount_path) {
+                    Ok(_) => format!("; detached unexpected volume at {}", mount_path.display()),
+                    Err(error) => format!("; failed to detach unexpected volume: {error}"),
+                }
+            } else {
+                String::new()
+            };
+            let error = format!(
+                "locate the mounted ChatGPT installer{cleanup_message}. hdiutil stdout: {:?}; stderr: {:?}",
+                compact_command_output(&output.stdout),
+                compact_command_output(&output.stderr),
+            );
+            log_codex_update("error", "mount_path_missing", &error);
+            return Err(error);
         }
     };
+    log_codex_update(
+        "info",
+        "installer_mounted",
+        format!("mountPath={}", mount_path.display()),
+    );
     let source = match [mount_path.join("ChatGPT.app"), mount_path.join("Codex.app")]
         .into_iter()
         .find(|path| path.exists())
@@ -1447,10 +1774,33 @@ fn install_downloaded_app(
     match (install_result, detach_result) {
         (Ok(()), Ok(_)) => {
             let _ = fs::remove_file(download_path);
+            log_codex_update(
+                "info",
+                "installation_completed",
+                format!(
+                    "destination={}",
+                    preferred_destination.map_or_else(
+                        || "automatic".to_string(),
+                        |path| path.display().to_string()
+                    )
+                ),
+            );
             Ok(InstallerResult::Complete)
         }
-        (Err(error), Ok(_)) | (Err(error), Err(_)) => Err(error),
-        (Ok(()), Err(error)) => Err(error),
+        (Err(error), Ok(_)) => {
+            log_codex_update("error", "installation_failed", &error);
+            Err(error)
+        }
+        (Err(error), Err(detach_error)) => {
+            let combined =
+                format!("{error}; additionally failed to unmount installer: {detach_error}");
+            log_codex_update("error", "installation_and_cleanup_failed", &combined);
+            Err(combined)
+        }
+        (Ok(()), Err(error)) => {
+            log_codex_update("error", "installer_unmount_failed", &error);
+            Err(error)
+        }
     }
 }
 
@@ -1463,13 +1813,43 @@ fn detach_macos_volume(mount_path: &Path) -> Result<Output, String> {
         MACOS_DETACH_TIMEOUT,
         "unmount the official ChatGPT installer",
     )?;
-    if !output.status.success() {
+    if output.status.success() {
+        log_codex_update(
+            "info",
+            "installer_unmounted",
+            format!("mountPath={}", mount_path.display()),
+        );
+        return Ok(output);
+    }
+    log_codex_update(
+        "warning",
+        "installer_unmount_retry",
+        format!(
+            "normal detach failed for {}: {}",
+            mount_path.display(),
+            compact_command_output(&output.stderr),
+        ),
+    );
+    let mut force_command = Command::new("hdiutil");
+    force_command.args(["detach", "-force"]).arg(mount_path);
+    let force_output = run_macos_command_with_timeout(
+        &mut force_command,
+        MACOS_DETACH_TIMEOUT,
+        "force unmount the official ChatGPT installer",
+    )?;
+    if !force_output.status.success() {
         return Err(format!(
-            "unmount the official ChatGPT installer: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "unmount the official ChatGPT installer: {}; forced detach: {}",
+            compact_command_output(&output.stderr),
+            compact_command_output(&force_output.stderr),
         ));
     }
-    Ok(output)
+    log_codex_update(
+        "info",
+        "installer_force_unmounted",
+        format!("mountPath={}", mount_path.display()),
+    );
+    Ok(force_output)
 }
 
 #[cfg(target_os = "macos")]
@@ -1499,7 +1879,7 @@ fn copy_macos_app(
     Err(format!("install ChatGPT in Applications: {last_error}"))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", test))]
 fn replace_macos_app(source: &Path, destination: &Path) -> Result<(), String> {
     replace_macos_app_with_progress(None, source, destination)
 }
@@ -1510,6 +1890,15 @@ fn replace_macos_app_with_progress(
     source: &Path,
     destination: &Path,
 ) -> Result<(), String> {
+    log_codex_update(
+        "info",
+        "replacement_started",
+        format!(
+            "source={}; destination={}",
+            source.display(),
+            destination.display(),
+        ),
+    );
     let parent = destination
         .parent()
         .ok_or_else(|| "resolve the ChatGPT installation directory".to_string())?;
@@ -1591,6 +1980,11 @@ fn replace_macos_app_with_progress(
     if backup.exists() {
         let _ = fs::remove_dir_all(&backup);
     }
+    log_codex_update(
+        "info",
+        "replacement_completed",
+        format!("destination={}", destination.display()),
+    );
     Ok(())
 }
 
@@ -1966,6 +2360,12 @@ mod tests {
     };
     use std::cmp::Ordering;
     use std::fs;
+    #[cfg(target_os = "macos")]
+    use std::path::{Path, PathBuf};
+    #[cfg(target_os = "macos")]
+    use std::process::Command;
+    #[cfg(target_os = "macos")]
+    use std::time::Duration;
 
     #[test]
     fn compares_numeric_version_segments() {
@@ -2001,6 +2401,44 @@ mod tests {
         assert!(!installer.exists());
 
         fs::remove_dir_all(root).expect("remove cache test directory");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_timeout_command_captures_stdout_and_stderr() {
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "printf 'mounted-output'; printf 'diagnostic-output' >&2",
+        ]);
+
+        let output = super::run_macos_command_with_timeout(
+            &mut command,
+            Duration::from_secs(2),
+            "capture command output test",
+        )
+        .expect("run command with captured output");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"mounted-output");
+        assert_eq!(output.stderr, b"diagnostic-output");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finds_the_volume_mounted_for_the_requested_disk_image() {
+        let info = r#"================================================
+image-path      : /tmp/unrelated.dmg
+/dev/disk9s1	48465300-0000-11AA-AA11-00306543ECAC	/Volumes/Unrelated
+================================================
+image-path      : /tmp/ChatGPT.dmg
+/dev/disk10s1	48465300-0000-11AA-AA11-00306543ECAC	/Volumes/ChatGPT Installer
+"#;
+
+        assert_eq!(
+            super::mounted_volume_from_hdiutil_info(info, Path::new("/tmp/ChatGPT.dmg")),
+            Some(PathBuf::from("/Volumes/ChatGPT Installer")),
+        );
     }
 
     #[cfg(target_os = "macos")]

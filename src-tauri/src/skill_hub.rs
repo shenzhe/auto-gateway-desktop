@@ -1572,6 +1572,7 @@ async fn download_skill_archive(
         .map_err(|error| format!("create the Skill package file: {error}"))?;
     let mut hasher = Sha256::new();
     let mut downloaded = 0_u64;
+    let mut last_emit: u64 = 0;
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|error| format!("read the Skill package: {error}"))?;
@@ -1582,8 +1583,15 @@ async fn download_skill_archive(
         hasher.update(&chunk);
         file.write_all(&chunk)
             .map_err(|error| format!("save the Skill package: {error}"))?;
-        emit_skill_progress(app, "downloading", downloaded, Some(license.archive_size));
+        // 每 512 KiB 才跨 IPC 发一次进度，避免每个 chunk（约 8-16 KiB）
+        // 都触发一次事件导致前端 jank。
+        if downloaded - last_emit >= 512 * 1024 {
+            last_emit = downloaded;
+            emit_skill_progress(app, "downloading", downloaded, Some(license.archive_size));
+        }
     }
+    // 最终再发一次，确保前端拿到完整下载字节数。
+    emit_skill_progress(app, "downloading", downloaded, Some(license.archive_size));
     file.sync_all()
         .map_err(|error| format!("finish the Skill package download: {error}"))?;
     if license.archive_size > 0 && downloaded != license.archive_size {

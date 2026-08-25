@@ -41,18 +41,14 @@ use skills::{
     reorder_categories, restore_skill, scan_skills, set_skill_category, set_skill_tags,
     set_skills_category, validate_skill_source,
 };
-use std::{
-    fs::{self, File},
-    io::Write,
-    path::Path,
-    process::Command,
-    time::Duration,
-};
+use std::{fs, path::Path, process::Command, time::Duration};
 use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Rect, Size, WebviewUrl,
     WebviewWindowBuilder, WindowEvent,
 };
+use tokio::fs::File as AsyncFile;
+use tokio::io::AsyncWriteExt;
 use url::Url;
 
 const DISABLE_CONTEXT_MENU_SCRIPT: &str = r#"
@@ -195,7 +191,8 @@ async fn download_and_open_desktop_installer(
             );
         }
 
-        let mut file = File::create(&partial_destination)
+        let mut file = AsyncFile::create(&partial_destination)
+            .await
             .map_err(|error| format!("create the installer download: {error}"))?;
         let mut downloaded_bytes = 0_u64;
         let mut stream = response.bytes_stream();
@@ -207,14 +204,19 @@ async fn download_and_open_desktop_installer(
                     "the installer file is larger than the supported download limit".to_string(),
                 );
             }
+            // 使用 tokio 异步写，避免阻塞写盘占用 runtime worker（安装包最大 512 MiB）。
             file.write_all(&chunk)
+                .await
                 .map_err(|error| format!("save the installer download: {error}"))?;
         }
         if downloaded_bytes == 0 {
             return Err("the installer download was empty".to_string());
         }
         file.sync_all()
+            .await
             .map_err(|error| format!("finish saving the installer download: {error}"))?;
+        // 显式 drop，确保文件句柄在 rename 前关闭。
+        drop(file);
         Ok(())
     }
     .await;
@@ -234,9 +236,15 @@ async fn download_and_open_desktop_installer(
 }
 
 #[tauri::command]
-fn get_codex_status() -> Result<CodexStatus, String> {
-    let paths = default_codex_paths()?;
-    paths.status()
+async fn get_codex_status() -> Result<CodexStatus, String> {
+    // 读取并解析 config.toml + 列举 backup 文件属于同步磁盘 I/O，
+    // 放到阻塞线程池，避免占用 IPC/主线程。
+    tauri::async_runtime::spawn_blocking(|| {
+        let paths = default_codex_paths()?;
+        paths.status()
+    })
+    .await
+    .map_err(|error| format!("read the Codex status: {error}"))?
 }
 
 #[tauri::command]
@@ -278,13 +286,20 @@ async fn apply_codex_update_command(
 }
 
 #[tauri::command]
-fn close_codex(target_path: Option<String>) -> Result<(), String> {
-    close_installed_app_at(target_path)
+async fn close_codex(target_path: Option<String>) -> Result<(), String> {
+    // 关闭已安装应用会 spawn 外部进程（Windows 上还可能循环 sleep+重试），
+    // 放到阻塞线程池避免阻塞主线程。
+    tauri::async_runtime::spawn_blocking(move || close_installed_app_at(target_path))
+        .await
+        .map_err(|error| format!("close the installed app: {error}"))?
 }
 
 #[tauri::command]
-fn open_codex() -> Result<(), String> {
-    open_installed_app()
+async fn open_codex() -> Result<(), String> {
+    // 打开已安装应用会 spawn 外部进程，放到阻塞线程池避免阻塞主线程。
+    tauri::async_runtime::spawn_blocking(open_installed_app)
+        .await
+        .map_err(|error| format!("open the installed app: {error}"))?
 }
 
 #[tauri::command]
@@ -295,15 +310,25 @@ async fn is_codex_running() -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn configure_codex(api_key: String, endpoint: String) -> Result<ConfigurationResult, String> {
-    let paths = default_codex_paths()?;
-    apply_configuration(&paths, &api_key, &endpoint)
+async fn configure_codex(api_key: String, endpoint: String) -> Result<ConfigurationResult, String> {
+    // 写 config.toml + auth 文件（含 backup）属于同步磁盘 I/O，
+    // 放到阻塞线程池避免阻塞主线程。
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = default_codex_paths()?;
+        apply_configuration(&paths, &api_key, &endpoint)
+    })
+    .await
+    .map_err(|error| format!("configure Codex: {error}"))?
 }
 
 #[tauri::command]
-fn restore_latest_codex_backups() -> Result<RestoreResult, String> {
-    let paths = default_codex_paths()?;
-    restore_latest_backups(&paths)
+async fn restore_latest_codex_backups() -> Result<RestoreResult, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let paths = default_codex_paths()?;
+        restore_latest_backups(&paths)
+    })
+    .await
+    .map_err(|error| format!("restore Codex backups: {error}"))?
 }
 
 #[tauri::command]

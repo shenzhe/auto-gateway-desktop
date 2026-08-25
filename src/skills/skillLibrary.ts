@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { SkillInstallSummary } from "./desktop";
+import type { SkillInstallSummary } from "../shared/desktop";
 
 export type SkillScanRisk =
   | "none"

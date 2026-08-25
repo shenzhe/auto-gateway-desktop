@@ -3,7 +3,7 @@ use crate::codex_config::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -511,8 +511,12 @@ fn append_disabled_skills(index: &SkillIndex, result: &mut SkillScanResult) {
 }
 
 #[tauri::command]
-pub fn scan_skills(app: tauri::AppHandle) -> Result<SkillScanResult, String> {
-    reconciled_scan(&app)
+pub async fn scan_skills(app: tauri::AppHandle) -> Result<SkillScanResult, String> {
+    // 全树 read_dir + 解析每个 SKILL.md + TOML 解析属于同步阻塞 I/O，
+    // 放到 spawn_blocking 避免占用 IPC/主线程导致 UI 卡顿。
+    tauri::async_runtime::spawn_blocking(move || reconciled_scan(&app))
+        .await
+        .map_err(|e| format!("scan skills failed: {e}"))?
 }
 
 fn classify_file_kind(relative_path: &str) -> SkillFileKind {
@@ -548,6 +552,131 @@ fn walk_skill_files(root: &Path) -> (Vec<SkillFileEntry>, u64, bool) {
     walk_dir(root, root, 0, &mut files, &mut total_size, &mut truncated);
     files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
     (files, total_size, truncated)
+}
+
+/// Single-pass variant of [`walk_skill_files`] used by the detail view: while
+/// walking, it also reads each file's bytes into `bytes_cache` (so the checksum
+/// can be computed without a second disk read) and captures the `SKILL.md`
+/// manifest text (so its frontmatter body can be extracted without a third
+/// read). Byte caching stops once `MAX_CHECKSUM_BYTES` is exceeded — the
+/// checksum will then be `None`, matching the old behavior — but the manifest
+/// is always read since it is small and always needed.
+fn walk_skill_files_with_bytes(
+    root: &Path,
+) -> (
+    Vec<SkillFileEntry>,
+    u64,
+    bool,
+    HashMap<String, Vec<u8>>,
+    Option<String>,
+) {
+    let mut files = Vec::new();
+    let mut total_size = 0_u64;
+    let mut truncated = false;
+    let mut bytes_cache: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut cached_bytes: u64 = 0;
+    let mut manifest_text: Option<String> = None;
+    walk_dir_with_bytes(
+        root,
+        root,
+        0,
+        &mut files,
+        &mut total_size,
+        &mut truncated,
+        &mut bytes_cache,
+        &mut cached_bytes,
+        &mut manifest_text,
+    );
+    files.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    (files, total_size, truncated, bytes_cache, manifest_text)
+}
+
+fn walk_dir_with_bytes(
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    files: &mut Vec<SkillFileEntry>,
+    total_size: &mut u64,
+    truncated: &mut bool,
+    bytes_cache: &mut HashMap<String, Vec<u8>>,
+    cached_bytes: &mut u64,
+    manifest_text: &mut Option<String>,
+) {
+    if *truncated {
+        return;
+    }
+    if depth > MAX_DETAIL_DEPTH {
+        *truncated = true;
+        return;
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        if files.len() >= MAX_DETAIL_FILES {
+            *truncated = true;
+            return;
+        }
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            walk_dir_with_bytes(
+                root,
+                &path,
+                depth + 1,
+                files,
+                total_size,
+                truncated,
+                bytes_cache,
+                cached_bytes,
+                manifest_text,
+            );
+            if *truncated {
+                return;
+            }
+        } else if file_type.is_file() {
+            let relative_path = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            let size_bytes = metadata.len();
+            *total_size = total_size.saturating_add(size_bytes);
+            let is_manifest = relative_path == SKILL_MANIFEST_FILE;
+            // 缓存文件内容供 checksum 复用，仅在未超 MAX_CHECKSUM_BYTES 时进行。
+            if *cached_bytes <= MAX_CHECKSUM_BYTES {
+                if let Ok(bytes) = fs::read(&path) {
+                    *cached_bytes = cached_bytes.saturating_add(bytes.len() as u64);
+                    if *cached_bytes <= MAX_CHECKSUM_BYTES {
+                        bytes_cache.insert(relative_path.clone(), bytes);
+                    } else {
+                        // 超限：清空缓存，checksum 将返回 None，与旧行为一致。
+                        bytes_cache.clear();
+                    }
+                }
+            }
+            // SKILL.md 总是单独读取（小文件，detail 必需），即便 checksum 缓存已停。
+            if is_manifest && manifest_text.is_none() {
+                if let Ok(text) = fs::read_to_string(&path) {
+                    *manifest_text = Some(text);
+                }
+            }
+            files.push(SkillFileEntry {
+                relative_path: relative_path.clone(),
+                size_bytes,
+                is_executable: is_executable(&metadata),
+                kind: classify_file_kind(&relative_path),
+            });
+        }
+    }
 }
 
 fn walk_dir(
@@ -609,12 +738,14 @@ fn walk_dir(
 
 /// Deterministic content digest over the skill's files: SHA-256 of each file's
 /// relative path and bytes, in sorted path order. Returns `None` when the walk
-/// was truncated or the content exceeds the checksum size cap.
+/// was truncated or the content exceeds the checksum size cap. The file bytes
+/// are taken from `bytes_cache` (populated during the single walk pass) so this
+/// no longer re-reads files from disk.
 fn compute_checksum(
-    root: &Path,
     files: &[SkillFileEntry],
     total_size: u64,
     truncated: bool,
+    bytes_cache: &HashMap<String, Vec<u8>>,
 ) -> Option<String> {
     if truncated || total_size > MAX_CHECKSUM_BYTES {
         return None;
@@ -623,8 +754,9 @@ fn compute_checksum(
     for file in files {
         hasher.update(file.relative_path.as_bytes());
         hasher.update([0u8]);
-        let bytes = fs::read(root.join(&file.relative_path)).ok()?;
-        hasher.update(&bytes);
+        // bytes_cache 仅在累计未超 MAX_CHECKSUM_BYTES 时填充；缺失说明缓存被跳过。
+        let bytes = bytes_cache.get(&file.relative_path)?;
+        hasher.update(bytes);
     }
     let digest = hasher.finalize();
     Some(digest.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -665,20 +797,21 @@ fn frontmatter_body(markdown: &str) -> Option<String> {
 }
 
 /// Build full detail (file walk + checksum + body) for an already-resolved
-/// record. The record's install_path is treated as authoritative.
+/// record. The record's install_path is treated as authoritative. Performs a
+/// single pass over the skill tree: file bytes read during the walk are reused
+/// for the checksum, and the manifest text is captured in the same pass.
 fn build_skill_detail(mut record: SkillRecord) -> SkillDetail {
     let root = PathBuf::from(&record.install_path);
-    let (files, total_size, truncated) = walk_skill_files(&root);
+    let (files, total_size, truncated, bytes_cache, manifest_text) =
+        walk_skill_files_with_bytes(&root);
     let file_count = files.len();
     let scripts = files
         .iter()
         .filter(|file| file.kind == SkillFileKind::Script)
         .map(|file| file.relative_path.clone())
         .collect();
-    record.checksum = compute_checksum(&root, &files, total_size, truncated);
-    let markdown_body = fs::read_to_string(root.join(SKILL_MANIFEST_FILE))
-        .ok()
-        .and_then(|manifest| frontmatter_body(&manifest));
+    record.checksum = compute_checksum(&files, total_size, truncated, &bytes_cache);
+    let markdown_body = manifest_text.and_then(|manifest| frontmatter_body(&manifest));
 
     SkillDetail {
         record,
@@ -703,13 +836,19 @@ pub fn skill_detail_for(dir: &Path, id: &str) -> Result<SkillDetail, String> {
 }
 
 #[tauri::command]
-pub fn get_skill_detail(app: tauri::AppHandle, id: String) -> Result<SkillDetail, String> {
-    let record = reconciled_scan(&app)?
-        .skills
-        .into_iter()
-        .find(|skill| skill.id == id)
-        .ok_or_else(|| "the requested skill was not found".to_string())?;
-    Ok(build_skill_detail(record))
+pub async fn get_skill_detail(app: tauri::AppHandle, id: String) -> Result<SkillDetail, String> {
+    // 详情需要 reconciled_scan（全树扫描）+ 递归 walk + 逐文件 SHA-256，
+    // 是重 I/O+CPU 同步操作，放到阻塞线程池执行。
+    tauri::async_runtime::spawn_blocking(move || {
+        let record = reconciled_scan(&app)?
+            .skills
+            .into_iter()
+            .find(|skill| skill.id == id)
+            .ok_or_else(|| "the requested skill was not found".to_string())?;
+        Ok(build_skill_detail(record))
+    })
+    .await
+    .map_err(|e| format!("get skill detail failed: {e}"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -1321,169 +1460,186 @@ fn move_dir(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn disable_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let index_path = skill_index_path(&app)?;
-    let index = load_index_at(&index_path);
-    let entry = index
-        .entries
-        .get(&id)
-        .ok_or_else(|| "the requested skill was not found".to_string())?;
-    require_user_managed(entry)?;
-    if entry.removed {
-        return Err("the requested skill has been removed".to_string());
-    }
-    // Legacy desktop versions moved disabled skills into quarantine. Leave
-    // those entries untouched until the user enables them once.
-    if entry.disabled {
-        return Ok(());
-    }
-    let manifest = PathBuf::from(&entry.install_path).join(SKILL_MANIFEST_FILE);
-    if !manifest.is_file() {
-        return Err("the skill manifest was not found".to_string());
-    }
-    set_codex_skill_enabled(&manifest, false)
-}
-
-#[tauri::command]
-pub fn enable_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let index_path = skill_index_path(&app)?;
-    let mut index = load_index_at(&index_path);
-    let entry = index
-        .entries
-        .get(&id)
-        .ok_or_else(|| "the requested skill was not found".to_string())?;
-    require_user_managed(entry)?;
-    if entry.removed {
-        return Err("the requested skill has been removed".to_string());
-    }
-    if !entry.disabled {
+pub async fn disable_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let index_path = skill_index_path(&app)?;
+        let index = load_index_at(&index_path);
+        let entry = index
+            .entries
+            .get(&id)
+            .ok_or_else(|| "the requested skill was not found".to_string())?;
+        require_user_managed(entry)?;
+        if entry.removed {
+            return Err("the requested skill has been removed".to_string());
+        }
+        // Legacy desktop versions moved disabled skills into quarantine. Leave
+        // those entries untouched until the user enables them once.
+        if entry.disabled {
+            return Ok(());
+        }
         let manifest = PathBuf::from(&entry.install_path).join(SKILL_MANIFEST_FILE);
         if !manifest.is_file() {
             return Err("the skill manifest was not found".to_string());
         }
-        return set_codex_skill_enabled(&manifest, true);
-    }
-    let quarantine_path = entry
-        .quarantine_path
-        .clone()
-        .ok_or_else(|| "the disabled skill location is unknown".to_string())?;
-    let dir_name = entry
-        .original_relative_path
-        .clone()
-        .or_else(|| dir_name_of(&quarantine_path))
-        .ok_or_else(|| "the skill path is invalid".to_string())?;
-    let skills_dir = default_skills_dir()?;
-    let target = skills_dir.join(&dir_name);
-    if target.exists() {
-        return Err(
-            "a skill with this name already exists; resolve the conflict first".to_string(),
-        );
-    }
-    let quarantine = PathBuf::from(&quarantine_path);
-    reject_symlink(&quarantine)?;
-    move_dir(&quarantine, &target)?;
-
-    let entry = index.entries.get_mut(&id).unwrap();
-    entry.disabled = false;
-    entry.quarantine_path = None;
-    entry.install_path = target.to_string_lossy().to_string();
-    if let Err(error) = save_index_at(&index_path, &index) {
-        let _ = move_dir(&target, &quarantine);
-        return Err(error);
-    }
-    set_codex_skill_enabled(&target.join(SKILL_MANIFEST_FILE), true)
+        set_codex_skill_enabled(&manifest, false)
+    })
+    .await
+    .map_err(|e| format!("disable skill failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn remove_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let index_path = skill_index_path(&app)?;
-    let mut index = load_index_at(&index_path);
-    let entry = index
-        .entries
-        .get(&id)
-        .ok_or_else(|| "the requested skill was not found".to_string())?;
-    require_user_managed(entry)?;
-    if entry.removed {
-        return Ok(());
-    }
-    let source = if entry.disabled {
-        PathBuf::from(
-            entry
-                .quarantine_path
-                .clone()
-                .ok_or_else(|| "the disabled skill location is unknown".to_string())?,
-        )
-    } else {
-        let dir_name = dir_name_of(&entry.install_path)
+pub async fn enable_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let index_path = skill_index_path(&app)?;
+        let mut index = load_index_at(&index_path);
+        let entry = index
+            .entries
+            .get(&id)
+            .ok_or_else(|| "the requested skill was not found".to_string())?;
+        require_user_managed(entry)?;
+        if entry.removed {
+            return Err("the requested skill has been removed".to_string());
+        }
+        if !entry.disabled {
+            let manifest = PathBuf::from(&entry.install_path).join(SKILL_MANIFEST_FILE);
+            if !manifest.is_file() {
+                return Err("the skill manifest was not found".to_string());
+            }
+            return set_codex_skill_enabled(&manifest, true);
+        }
+        let quarantine_path = entry
+            .quarantine_path
+            .clone()
+            .ok_or_else(|| "the disabled skill location is unknown".to_string())?;
+        let dir_name = entry
+            .original_relative_path
+            .clone()
+            .or_else(|| dir_name_of(&quarantine_path))
             .ok_or_else(|| "the skill path is invalid".to_string())?;
-        default_skills_dir()?.join(dir_name)
-    };
-    reject_symlink(&source)?;
-    if !source.is_dir() {
-        return Err("the skill directory was not found".to_string());
-    }
-    let dir_name = dir_name_of(&source.to_string_lossy()).unwrap_or_else(|| "skill".to_string());
-    let stamp = now_millis();
-    let trash = trash_root(&app)?
-        .join(format!("{id}-{stamp}"))
-        .join(&dir_name);
-    move_dir(&source, &trash)?;
+        let skills_dir = default_skills_dir()?;
+        let target = skills_dir.join(&dir_name);
+        if target.exists() {
+            return Err(
+                "a skill with this name already exists; resolve the conflict first".to_string(),
+            );
+        }
+        let quarantine = PathBuf::from(&quarantine_path);
+        reject_symlink(&quarantine)?;
+        move_dir(&quarantine, &target)?;
 
-    let entry = index.entries.get_mut(&id).unwrap();
-    entry.removed = true;
-    entry.disabled = false;
-    entry.quarantine_path = None;
-    entry.trash_path = Some(trash.to_string_lossy().to_string());
-    entry.removed_at = Some(stamp);
-    entry.original_relative_path = Some(dir_name);
-    if let Err(error) = save_index_at(&index_path, &index) {
-        let _ = move_dir(&trash, &source);
-        return Err(error);
-    }
-    Ok(())
+        let entry = index.entries.get_mut(&id).unwrap();
+        entry.disabled = false;
+        entry.quarantine_path = None;
+        entry.install_path = target.to_string_lossy().to_string();
+        if let Err(error) = save_index_at(&index_path, &index) {
+            let _ = move_dir(&target, &quarantine);
+            return Err(error);
+        }
+        set_codex_skill_enabled(&target.join(SKILL_MANIFEST_FILE), true)
+    })
+    .await
+    .map_err(|e| format!("enable skill failed: {e}"))?
 }
 
 #[tauri::command]
-pub fn restore_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let index_path = skill_index_path(&app)?;
-    let mut index = load_index_at(&index_path);
-    let entry = index
-        .entries
-        .get(&id)
-        .ok_or_else(|| "the requested skill was not found".to_string())?;
-    require_user_managed(entry)?;
-    if !entry.removed {
-        return Ok(());
-    }
-    let trash_path = entry
-        .trash_path
-        .clone()
-        .ok_or_else(|| "the removed skill location is unknown".to_string())?;
-    let dir_name = entry
-        .original_relative_path
-        .clone()
-        .or_else(|| dir_name_of(&trash_path))
-        .ok_or_else(|| "the skill path is invalid".to_string())?;
-    let skills_dir = default_skills_dir()?;
-    let target = skills_dir.join(&dir_name);
-    if target.exists() {
-        return Err(
-            "a skill with this name already exists; resolve the conflict first".to_string(),
-        );
-    }
-    let trash = PathBuf::from(&trash_path);
-    reject_symlink(&trash)?;
-    move_dir(&trash, &target)?;
+pub async fn remove_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let index_path = skill_index_path(&app)?;
+        let mut index = load_index_at(&index_path);
+        let entry = index
+            .entries
+            .get(&id)
+            .ok_or_else(|| "the requested skill was not found".to_string())?;
+        require_user_managed(entry)?;
+        if entry.removed {
+            return Ok(());
+        }
+        let source = if entry.disabled {
+            PathBuf::from(
+                entry
+                    .quarantine_path
+                    .clone()
+                    .ok_or_else(|| "the disabled skill location is unknown".to_string())?,
+            )
+        } else {
+            let dir_name = dir_name_of(&entry.install_path)
+                .ok_or_else(|| "the skill path is invalid".to_string())?;
+            default_skills_dir()?.join(dir_name)
+        };
+        reject_symlink(&source)?;
+        if !source.is_dir() {
+            return Err("the skill directory was not found".to_string());
+        }
+        let dir_name =
+            dir_name_of(&source.to_string_lossy()).unwrap_or_else(|| "skill".to_string());
+        let stamp = now_millis();
+        let trash = trash_root(&app)?
+            .join(format!("{id}-{stamp}"))
+            .join(&dir_name);
+        move_dir(&source, &trash)?;
 
-    let entry = index.entries.get_mut(&id).unwrap();
-    entry.removed = false;
-    entry.trash_path = None;
-    entry.install_path = target.to_string_lossy().to_string();
-    if let Err(error) = save_index_at(&index_path, &index) {
-        let _ = move_dir(&target, &trash);
-        return Err(error);
-    }
-    Ok(())
+        let entry = index.entries.get_mut(&id).unwrap();
+        entry.removed = true;
+        entry.disabled = false;
+        entry.quarantine_path = None;
+        entry.trash_path = Some(trash.to_string_lossy().to_string());
+        entry.removed_at = Some(stamp);
+        entry.original_relative_path = Some(dir_name);
+        if let Err(error) = save_index_at(&index_path, &index) {
+            let _ = move_dir(&trash, &source);
+            return Err(error);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("remove skill failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn restore_skill(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let index_path = skill_index_path(&app)?;
+        let mut index = load_index_at(&index_path);
+        let entry = index
+            .entries
+            .get(&id)
+            .ok_or_else(|| "the requested skill was not found".to_string())?;
+        require_user_managed(entry)?;
+        if !entry.removed {
+            return Ok(());
+        }
+        let trash_path = entry
+            .trash_path
+            .clone()
+            .ok_or_else(|| "the removed skill location is unknown".to_string())?;
+        let dir_name = entry
+            .original_relative_path
+            .clone()
+            .or_else(|| dir_name_of(&trash_path))
+            .ok_or_else(|| "the skill path is invalid".to_string())?;
+        let skills_dir = default_skills_dir()?;
+        let target = skills_dir.join(&dir_name);
+        if target.exists() {
+            return Err(
+                "a skill with this name already exists; resolve the conflict first".to_string(),
+            );
+        }
+        let trash = PathBuf::from(&trash_path);
+        reject_symlink(&trash)?;
+        move_dir(&trash, &target)?;
+
+        let entry = index.entries.get_mut(&id).unwrap();
+        entry.removed = false;
+        entry.trash_path = None;
+        entry.install_path = target.to_string_lossy().to_string();
+        if let Err(error) = save_index_at(&index_path, &index) {
+            let _ = move_dir(&target, &trash);
+            return Err(error);
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("restore skill failed: {e}"))?
 }
 
 #[tauri::command]
@@ -2207,51 +2363,57 @@ fn scan_export_warnings(root: &Path, files: &[SkillFileEntry]) -> Vec<RiskFindin
 }
 
 #[tauri::command]
-pub fn export_skill(app: tauri::AppHandle, id: String) -> Result<ExportResult, String> {
-    let record = reconciled_scan(&app)?
-        .skills
-        .into_iter()
-        .find(|skill| skill.id == id)
-        .ok_or_else(|| "the requested skill was not found".to_string())?;
-    if record.ownership != Ownership::UserManaged
-        || matches!(record.source_type, SourceType::System | SourceType::Plugin)
-    {
-        return Err("only user-installed skills can be exported".to_string());
-    }
-    let root = PathBuf::from(&record.install_path);
-    let (files, total_size, truncated) = walk_skill_files(&root);
-    if truncated || files.len() > MAX_INSTALL_FILES || total_size > MAX_UNPACKED_BYTES {
-        return Err("the skill is too large to export".to_string());
-    }
-    if files.is_empty() {
-        return Err("the skill has no files to export".to_string());
-    }
-    let warnings = scan_export_warnings(&root, &files);
+pub async fn export_skill(app: tauri::AppHandle, id: String) -> Result<ExportResult, String> {
+    // 导出 = 全树扫描 + 递归 walk + 逐文件读 + ZIP 打包 + SHA-256，
+    // 是最重的同步操作，必须放到阻塞线程池，否则大技能导出会冻 UI。
+    tauri::async_runtime::spawn_blocking(move || {
+        let record = reconciled_scan(&app)?
+            .skills
+            .into_iter()
+            .find(|skill| skill.id == id)
+            .ok_or_else(|| "the requested skill was not found".to_string())?;
+        if record.ownership != Ownership::UserManaged
+            || matches!(record.source_type, SourceType::System | SourceType::Plugin)
+        {
+            return Err("only user-installed skills can be exported".to_string());
+        }
+        let root = PathBuf::from(&record.install_path);
+        let (files, total_size, truncated) = walk_skill_files(&root);
+        if truncated || files.len() > MAX_INSTALL_FILES || total_size > MAX_UNPACKED_BYTES {
+            return Err("the skill is too large to export".to_string());
+        }
+        if files.is_empty() {
+            return Err("the skill has no files to export".to_string());
+        }
+        let warnings = scan_export_warnings(&root, &files);
 
-    let downloads = app
-        .path()
-        .download_dir()
-        .map_err(|error| format!("find the Downloads folder: {error}"))?;
-    fs::create_dir_all(&downloads)
-        .map_err(|error| format!("create the Downloads folder: {error}"))?;
-    let stem = if is_valid_skill_name(&record.name) {
-        record.name.clone()
-    } else {
-        "skill".to_string()
-    };
-    let mut dest = downloads.join(format!("{stem}.zip"));
-    if dest.exists() {
-        dest = downloads.join(format!("{stem}-{}.zip", now_millis()));
-    }
-    write_skill_zip(&root, &files, &dest)?;
-    let sha256 = sha256_hex_of_file(&dest)?;
-    let size_bytes = fs::metadata(&dest).map(|meta| meta.len()).unwrap_or(0);
-    Ok(ExportResult {
-        zip_path: dest.to_string_lossy().to_string(),
-        sha256,
-        size_bytes,
-        warnings,
+        let downloads = app
+            .path()
+            .download_dir()
+            .map_err(|error| format!("find the Downloads folder: {error}"))?;
+        fs::create_dir_all(&downloads)
+            .map_err(|error| format!("create the Downloads folder: {error}"))?;
+        let stem = if is_valid_skill_name(&record.name) {
+            record.name.clone()
+        } else {
+            "skill".to_string()
+        };
+        let mut dest = downloads.join(format!("{stem}.zip"));
+        if dest.exists() {
+            dest = downloads.join(format!("{stem}-{}.zip", now_millis()));
+        }
+        write_skill_zip(&root, &files, &dest)?;
+        let sha256 = sha256_hex_of_file(&dest)?;
+        let size_bytes = fs::metadata(&dest).map(|meta| meta.len()).unwrap_or(0);
+        Ok(ExportResult {
+            zip_path: dest.to_string_lossy().to_string(),
+            sha256,
+            size_bytes,
+            warnings,
+        })
     })
+    .await
+    .map_err(|e| format!("export skill failed: {e}"))?
 }
 
 #[cfg(test)]
