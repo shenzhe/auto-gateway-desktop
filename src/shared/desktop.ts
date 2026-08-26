@@ -64,6 +64,14 @@ export type CodexInstallProgress = {
   estimatedRemainingSeconds?: number;
 };
 
+export function isCodexExternalInstallationComplete(
+  status: CodexAppStatus,
+  forceUpdate: boolean,
+): boolean {
+  if (!status.installed) return false;
+  return !forceUpdate || status.updateAvailable === false;
+}
+
 export type ConfigurationResult = {
   configPath: string;
   authPath: string;

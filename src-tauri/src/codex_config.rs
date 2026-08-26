@@ -1,5 +1,5 @@
+use crate::gateway_env::ensure_api_key_available;
 use serde::Serialize;
-use serde_json::{Map, Value as JsonValue};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -208,16 +208,14 @@ fn codex_home_dir() -> Result<PathBuf, String> {
 
 impl CodexPaths {
     pub fn status(&self) -> Result<CodexStatus, String> {
-        let mut content = read_optional(&self.config)?;
-        let (configured, provider_status) = classify_provider(content.as_deref());
-        if provider_status == CodexProviderStatus::Autogateway {
-            if let Some(current) = content.as_deref() {
-                if let Some(repaired) =
-                    repair_legacy_gateway_auth_requirement_at(&self.config, current)?
-                {
-                    content = Some(repaired);
-                }
-            }
+        let content = read_optional(&self.config)?;
+        let (mut configured, mut provider_status) = classify_provider(content.as_deref());
+        if provider_status == CodexProviderStatus::Autogateway
+            && ensure_api_key_available().is_err()
+            && !has_explicit_bearer_fallback(content.as_deref())
+        {
+            configured = false;
+            provider_status = CodexProviderStatus::Invalid;
         }
         let model_provider = content
             .as_deref()
@@ -243,48 +241,29 @@ impl CodexPaths {
     }
 }
 
-fn repair_legacy_gateway_auth_requirement_at(
-    config_path: &Path,
-    current: &str,
-) -> Result<Option<String>, String> {
-    let Some(repaired) = repair_legacy_gateway_auth_requirement(current)? else {
-        return Ok(None);
+fn has_explicit_bearer_fallback(content: Option<&str>) -> bool {
+    let Some(content) = content else {
+        return false;
     };
-    ensure_not_symlink(config_path)?;
-    let _backup = backup_if_exists(config_path)?;
-    if let Err(error) = atomic_write(config_path, repaired.as_bytes()) {
-        return Err(with_restore_result(
-            format!("repair Codex authentication configuration: {error}"),
-            restore_previous(config_path, Some(current)),
-        ));
-    }
-    Ok(Some(repaired))
-}
-
-fn repair_legacy_gateway_auth_requirement(current: &str) -> Result<Option<String>, String> {
-    let mut document = current
-        .parse::<DocumentMut>()
-        .map_err(|error| format!("existing config.toml is invalid: {error}"))?;
-    let is_autogateway = document
+    let Ok(document) = content.parse::<DocumentMut>() else {
+        return false;
+    };
+    document
         .get("model_provider")
         .and_then(Item::as_str)
-        .is_some_and(|provider| provider.trim() == "autogateway");
-    if !is_autogateway {
-        return Ok(None);
-    }
-    let Some(provider) = document
-        .get_mut("model_providers")
-        .and_then(Item::as_table_mut)
-        .and_then(|providers| providers.get_mut("autogateway"))
-        .and_then(Item::as_table_mut)
-    else {
-        return Ok(None);
-    };
-    if provider.get("requires_openai_auth").and_then(Item::as_bool) == Some(true) {
-        return Ok(None);
-    }
-    provider["requires_openai_auth"] = value(true);
-    Ok(Some(document.to_string()))
+        .is_some_and(|provider| provider.trim() == "autogateway")
+        && document
+            .get("model_providers")
+            .and_then(Item::as_table)
+            .and_then(|providers| providers.get("autogateway"))
+            .and_then(Item::as_table)
+            .is_some_and(|provider| {
+                provider.get("requires_openai_auth").and_then(Item::as_bool) == Some(false)
+                    && provider
+                        .get("experimental_bearer_token")
+                        .and_then(Item::as_str)
+                        .is_some_and(|token| !token.trim().is_empty())
+            })
 }
 
 fn classify_provider(content: Option<&str>) -> (bool, CodexProviderStatus) {
@@ -312,7 +291,17 @@ fn classify_provider(content: Option<&str>) -> (bool, CodexProviderStatus) {
                 .get("model_providers")
                 .and_then(Item::as_table)
                 .and_then(|providers| providers.get("autogateway"))
-                .is_some_and(Item::is_table);
+                .and_then(Item::as_table)
+                .is_some_and(|provider| {
+                    if provider.get("requires_openai_auth").and_then(Item::as_bool) != Some(false) {
+                        return false;
+                    }
+                    provider.get("env_key").and_then(Item::as_str) == Some("AUTO_GATEWAY_API_KEY")
+                        || provider
+                            .get("experimental_bearer_token")
+                            .and_then(Item::as_str)
+                            .is_some_and(|token| !token.trim().is_empty())
+                });
             if configured {
                 (true, CodexProviderStatus::Autogateway)
             } else {
@@ -329,14 +318,34 @@ pub fn apply_configuration(
     api_key: &str,
     endpoint: &str,
 ) -> Result<ConfigurationResult, String> {
+    apply_configuration_inner(paths, api_key, endpoint, false)
+}
+
+/// Apply the explicit bearer-token fallback when the platform environment
+/// cannot provide the key to Codex.
+pub fn apply_configuration_with_explicit_bearer(
+    paths: &CodexPaths,
+    api_key: &str,
+    endpoint: &str,
+) -> Result<ConfigurationResult, String> {
+    apply_configuration_inner(paths, api_key, endpoint, true)
+}
+
+fn apply_configuration_inner(
+    paths: &CodexPaths,
+    api_key: &str,
+    endpoint: &str,
+    use_explicit_bearer: bool,
+) -> Result<ConfigurationResult, String> {
     let clean_key = normalize_api_key(api_key)?;
     let clean_endpoint = normalize_endpoint(endpoint)?;
     ensure_not_symlink(&paths.config)?;
-    ensure_not_symlink(&paths.auth)?;
     let config_before = read_optional(&paths.config)?;
-    let auth_before = read_optional(&paths.auth)?;
-    let config_after = merge_config(config_before.as_deref(), &clean_endpoint)?;
-    let auth_after = merge_auth(auth_before.as_deref(), &clean_key)?;
+    let config_after = if use_explicit_bearer {
+        merge_config_with_explicit_bearer(config_before.as_deref(), &clean_endpoint, &clean_key)?
+    } else {
+        merge_config(config_before.as_deref(), &clean_endpoint, &clean_key)?
+    };
 
     let parent = paths
         .config
@@ -344,7 +353,6 @@ pub fn apply_configuration(
         .ok_or_else(|| "unable to determine the Codex directory".to_string())?;
     fs::create_dir_all(parent).map_err(|error| format!("create Codex directory: {error}"))?;
     let config_backup = backup_if_exists(&paths.config)?;
-    let auth_backup = backup_if_exists(&paths.auth)?;
 
     if let Err(error) = atomic_write(&paths.config, config_after.as_bytes()) {
         return Err(with_restore_result(
@@ -352,23 +360,12 @@ pub fn apply_configuration(
             restore_previous(&paths.config, config_before.as_deref()),
         ));
     }
-    if let Err(error) = atomic_write(&paths.auth, auth_after.as_bytes()) {
-        let config_restore = restore_previous(&paths.config, config_before.as_deref());
-        let auth_restore = restore_previous(&paths.auth, auth_before.as_deref());
-        return Err(with_restore_result(
-            with_restore_result(
-                format!("write Codex authentication file: {error}"),
-                config_restore,
-            ),
-            auth_restore,
-        ));
-    }
 
     Ok(ConfigurationResult {
         config_path: paths.config.display().to_string(),
         auth_path: paths.auth.display().to_string(),
         config_backup_path: config_backup.map(|path| path.display().to_string()),
-        auth_backup_path: auth_backup.map(|path| path.display().to_string()),
+        auth_backup_path: None,
     })
 }
 
@@ -444,7 +441,24 @@ fn normalize_endpoint(raw: &str) -> Result<String, String> {
     Ok(value.to_string())
 }
 
-fn merge_config(existing: Option<&str>, endpoint: &str) -> Result<String, String> {
+fn merge_config(existing: Option<&str>, endpoint: &str, api_key: &str) -> Result<String, String> {
+    merge_config_inner(existing, endpoint, api_key, false)
+}
+
+fn merge_config_with_explicit_bearer(
+    existing: Option<&str>,
+    endpoint: &str,
+    api_key: &str,
+) -> Result<String, String> {
+    merge_config_inner(existing, endpoint, api_key, true)
+}
+
+fn merge_config_inner(
+    existing: Option<&str>,
+    endpoint: &str,
+    api_key: &str,
+    use_explicit_bearer: bool,
+) -> Result<String, String> {
     let mut document = match existing {
         Some(content) => content
             .parse::<DocumentMut>()
@@ -471,7 +485,12 @@ fn merge_config(existing: Option<&str>, endpoint: &str) -> Result<String, String
     provider["name"] = value("AUTO Gateway");
     provider["base_url"] = value(format!("{endpoint}/v1"));
     provider["wire_api"] = value("responses");
-    provider["requires_openai_auth"] = value(true);
+    provider["requires_openai_auth"] = value(false);
+    provider["env_key"] = value("AUTO_GATEWAY_API_KEY");
+    provider.remove("experimental_bearer_token");
+    if use_explicit_bearer {
+        provider["experimental_bearer_token"] = value(api_key);
+    }
     let mut headers = toml_edit::InlineTable::new();
     headers.insert(
         "x-openai-actor-authorization",
@@ -483,25 +502,6 @@ fn merge_config(existing: Option<&str>, endpoint: &str) -> Result<String, String
         .ok_or_else(|| "model_providers must be a TOML table".to_string())?;
     providers["autogateway"] = Item::Table(provider);
     Ok(document.to_string())
-}
-
-fn merge_auth(existing: Option<&str>, api_key: &str) -> Result<String, String> {
-    let mut object = match existing {
-        Some(content) => match serde_json::from_str::<JsonValue>(content)
-            .map_err(|error| format!("existing auth.json is invalid: {error}"))?
-        {
-            JsonValue::Object(object) => object,
-            _ => return Err("existing auth.json must contain a JSON object".to_string()),
-        },
-        None => Map::new(),
-    };
-    object.insert(
-        "OPENAI_API_KEY".to_string(),
-        JsonValue::String(api_key.to_string()),
-    );
-    serde_json::to_string_pretty(&JsonValue::Object(object))
-        .map(|content| format!("{content}\n"))
-        .map_err(|error| format!("encode auth.json: {error}"))
 }
 
 fn read_optional(path: &Path) -> Result<Option<String>, String> {
@@ -688,8 +688,8 @@ fn set_private_permissions(_path: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_if_exists, backup_paths, classify_provider, merge_auth, merge_config,
-        normalize_endpoint, repair_legacy_gateway_auth_requirement, restore_from_backup,
+        apply_configuration, apply_configuration_with_explicit_bearer, backup_if_exists,
+        backup_paths, classify_provider, merge_config, normalize_endpoint, restore_from_backup,
         set_skill_enabled_at, skill_enablement_overrides_at, CodexPaths, CodexProviderStatus,
     };
     use std::fs;
@@ -708,8 +708,12 @@ args = ["-y", "docs-mcp"]
 name = "Other"
 base_url = "https://example.com/v1"
 "#;
-        let merged = merge_config(Some(existing), "https://api.autogateway.cc")
-            .expect("merge configuration");
+        let merged = merge_config(
+            Some(existing),
+            "https://api.autogateway.cc",
+            "agk_example_secret",
+        )
+        .expect("merge configuration");
         assert!(merged.contains("[mcp_servers.docs]"));
         assert!(merged.contains("[model_providers.other]"));
         assert!(merged.contains("model_provider = \"autogateway\""));
@@ -719,8 +723,12 @@ base_url = "https://example.com/v1"
     #[test]
     fn merges_gateway_provider_when_model_providers_are_missing() {
         let existing = "model = \"gpt-5.6-sol\"\n";
-        let merged = merge_config(Some(existing), "https://api.autogateway.cc")
-            .expect("merge configuration");
+        let merged = merge_config(
+            Some(existing),
+            "https://api.autogateway.cc",
+            "agk_example_secret",
+        )
+        .expect("merge configuration");
         let document = merged
             .parse::<toml_edit::DocumentMut>()
             .expect("parse merged configuration");
@@ -741,17 +749,18 @@ base_url = "https://example.com/v1"
                 .and_then(Item::as_table)
                 .and_then(|provider| provider.get("requires_openai_auth"))
                 .and_then(Item::as_bool),
-            Some(true)
+            Some(false)
         );
-    }
-
-    #[test]
-    fn merges_auth_without_removing_other_values() {
-        let merged = merge_auth(Some(r#"{ "CUSTOM_FIELD": "kept" }"#), "agk_example_secret")
-            .expect("merge auth");
-        assert!(merged.contains("CUSTOM_FIELD"));
-        assert!(merged.contains("OPENAI_API_KEY"));
-        assert!(merged.contains("agk_example_secret"));
+        assert_eq!(
+            document
+                .get("model_providers")
+                .and_then(Item::as_table)
+                .and_then(|providers| providers.get("autogateway"))
+                .and_then(Item::as_table)
+                .and_then(|provider| provider.get("env_key"))
+                .and_then(Item::as_str),
+            Some("AUTO_GATEWAY_API_KEY")
+        );
     }
 
     #[test]
@@ -883,7 +892,7 @@ base_url = "https://example.com/v1"
     }
 
     #[test]
-    fn status_repairs_legacy_gateway_auth_requirement_once_and_preserves_backup() {
+    fn status_marks_legacy_autogateway_auth_as_unconfigured() {
         let directory = std::env::temp_dir().join(format!(
             "autogateway-codex-auth-repair-test-{}",
             std::process::id()
@@ -900,49 +909,102 @@ command = "npx"
 name = "AUTO Gateway"
 base_url = "https://api.autogateway.cc/v1"
 wire_api = "responses"
-requires_openai_auth = false
+requires_openai_auth = true
+"#;
+        let legacy_auth = r#"{
+  "OPENAI_API_KEY": "agk_legacy_example",
+  "tokens": { "keep": "unchanged" }
+}
 "#;
         fs::write(&config, legacy).expect("write legacy config");
+        fs::write(&auth, legacy_auth).expect("write legacy auth");
 
         let paths = CodexPaths {
             config: config.clone(),
-            auth,
+            auth: auth.clone(),
         };
-        let status = paths.status().expect("repair legacy config");
-        assert!(status.configured);
-        assert_eq!(status.provider_status, CodexProviderStatus::Autogateway);
+        let status = paths.status().expect("read legacy config");
+        assert!(!status.configured);
+        assert_eq!(status.provider_status, CodexProviderStatus::Invalid);
 
-        let repaired = fs::read_to_string(&config).expect("read repaired config");
-        assert!(repaired.contains("requires_openai_auth = true"));
-        assert!(repaired.contains("[mcp_servers.docs]"));
-        let backups = backup_paths(&config).expect("list config backups");
-        assert_eq!(backups.len(), 1);
         assert_eq!(
-            fs::read_to_string(&backups[0]).expect("read config backup"),
+            fs::read_to_string(&config).expect("read unchanged config"),
             legacy
         );
-
-        paths.status().expect("read already repaired config");
         assert_eq!(
-            backup_paths(&config)
-                .expect("list config backups again")
-                .len(),
-            1
+            fs::read_to_string(&auth).expect("read unchanged auth"),
+            legacy_auth
         );
+        assert!(backup_paths(&config)
+            .expect("list config backups")
+            .is_empty());
+        assert!(backup_paths(&auth).expect("list auth backups").is_empty());
 
         fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
-    fn legacy_gateway_repair_ignores_other_providers() {
-        let openai = "model_provider = \"openai\"\n\n[model_providers.openai]\nrequires_openai_auth = false\n";
-        assert_eq!(
-            repair_legacy_gateway_auth_requirement(openai).expect("inspect OpenAI config"),
-            None
-        );
+    fn configures_env_key_without_overwriting_auth_json() {
+        let directory = std::env::temp_dir().join(format!(
+            "autogateway-codex-bearer-config-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create test directory");
+        let config = directory.join("config.toml");
+        let auth = directory.join("auth.json");
+        let auth_content = r#"{ "auth_mode": "chatgpt", "OPENAI_API_KEY": null }
+"#;
+        fs::write(&auth, auth_content).expect("write auth");
 
-        let invalid = "model_provider = [\n";
-        assert!(repair_legacy_gateway_auth_requirement(invalid).is_err());
+        let result = apply_configuration(
+            &CodexPaths {
+                config: config.clone(),
+                auth: auth.clone(),
+            },
+            "agk_new_example",
+            "https://api.autogateway.cc/",
+        )
+        .expect("apply configuration");
+
+        let configured = fs::read_to_string(&config).expect("read config");
+        assert!(configured.contains("requires_openai_auth = false"));
+        assert!(configured.contains("env_key = \"AUTO_GATEWAY_API_KEY\""));
+        assert!(!configured.contains("experimental_bearer_token"));
+        assert_eq!(fs::read_to_string(&auth).expect("read auth"), auth_content);
+        assert!(result.auth_backup_path.is_none());
+        assert!(backup_paths(&auth).expect("list auth backups").is_empty());
+        fs::remove_dir_all(directory).expect("remove test directory");
+    }
+
+    #[test]
+    fn configures_explicit_bearer_fallback_without_overwriting_auth_json() {
+        let directory = std::env::temp_dir().join(format!(
+            "autogateway-codex-explicit-bearer-fallback-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create test directory");
+        let config = directory.join("config.toml");
+        let auth = directory.join("auth.json");
+        let auth_content = r#"{ "auth_mode": "chatgpt" }
+"#;
+        fs::write(&auth, auth_content).expect("write auth");
+
+        apply_configuration_with_explicit_bearer(
+            &CodexPaths {
+                config: config.clone(),
+                auth: auth.clone(),
+            },
+            "agk_fallback_example",
+            "https://api.autogateway.cc/",
+        )
+        .expect("apply explicit bearer fallback");
+
+        let configured = fs::read_to_string(&config).expect("read config");
+        assert!(configured.contains("requires_openai_auth = false"));
+        assert!(configured.contains("env_key = \"AUTO_GATEWAY_API_KEY\""));
+        assert!(configured.contains("experimental_bearer_token = \"agk_fallback_example\""));
+        assert_eq!(fs::read_to_string(&auth).expect("read auth"), auth_content);
+        fs::remove_dir_all(directory).expect("remove test directory");
     }
 
     #[test]
@@ -985,7 +1047,25 @@ requires_openai_auth = false
     #[test]
     fn classifies_autogateway_provider() {
         let (configured, provider) = classify_provider(Some(
-            "model_provider = \"autogateway\"\n\n[model_providers.autogateway]\n",
+            "model_provider = \"autogateway\"\n\n[model_providers.autogateway]\nrequires_openai_auth = false\nenv_key = \"AUTO_GATEWAY_API_KEY\"\n",
+        ));
+        assert!(configured);
+        assert_eq!(provider, CodexProviderStatus::Autogateway);
+    }
+
+    #[test]
+    fn classifies_incomplete_autogateway_provider_as_invalid() {
+        let (configured, provider) = classify_provider(Some(
+            "model_provider = \"autogateway\"\n\n[model_providers.autogateway]\nexperimental_bearer_token = \"legacy\"\n",
+        ));
+        assert!(!configured);
+        assert_eq!(provider, CodexProviderStatus::Invalid);
+    }
+
+    #[test]
+    fn classifies_explicit_bearer_fallback_provider() {
+        let (configured, provider) = classify_provider(Some(
+            "model_provider = \"autogateway\"\n\n[model_providers.autogateway]\nrequires_openai_auth = false\nenv_key = \"AUTO_GATEWAY_API_KEY\"\nexperimental_bearer_token = \"fallback\"\n",
         ));
         assert!(configured);
         assert_eq!(provider, CodexProviderStatus::Autogateway);

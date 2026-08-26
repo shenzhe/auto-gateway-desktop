@@ -8,8 +8,8 @@ This directory contains the Tauri desktop application for onboarding AUTO Gatewa
 - A one-time server authorization-code exchange, followed by idempotent default-key bootstrap and automatic Codex configuration.
 - Open the official AUTO Gateway registration page and official ChatGPT/Codex download page.
 - Detect the official ChatGPT desktop application and local Codex configuration paths.
-- Back up and merge the AUTO Gateway provider into `config.toml`.
-- Back up and merge `OPENAI_API_KEY` into `auth.json`, with an explicit restore-latest-backup action.
+- Back up and merge the AUTO Gateway provider into `config.toml` using `env_key = "AUTO_GATEWAY_API_KEY"` while leaving `auth.json` unchanged, with an explicit restore-latest-backup action.
+- If the platform environment cannot be persisted, fall back to an explicit bearer token in the private `config.toml` file so Codex can still authenticate.
 - Open the existing AUTO Gateway console in a separate, capability-isolated WebView using a short-lived, single-use sign-in ticket.
 - Check for signed AUTO Gateway Desktop updates at launch and every five minutes, with a manual check action, then download, verify, install, and restart from the home screen.
 

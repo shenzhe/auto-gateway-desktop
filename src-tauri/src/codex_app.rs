@@ -18,15 +18,15 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Output;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Stdio;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::sync::Mutex;
 use std::sync::OnceLock;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::thread;
 use std::time::{Duration, Instant};
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 #[cfg(any(target_os = "windows", test))]
@@ -53,6 +53,10 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const WINDOWS_MSIX_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 #[cfg(target_os = "windows")]
 const WINDOWS_STORE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+#[cfg(target_os = "windows")]
+const WINDOWS_QUIT_GRACE_PERIOD: Duration = Duration::from_secs(8);
+#[cfg(target_os = "windows")]
+const WINDOWS_QUIT_FORCE_PERIOD: Duration = Duration::from_secs(12);
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const DOWNLOAD_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const DOWNLOAD_SOURCE_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -72,10 +76,10 @@ const MACOS_DETACH_TIMEOUT: Duration = Duration::from_secs(60);
 const MACOS_QUIT_GRACE_PERIOD: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
 const MACOS_QUIT_FORCE_PERIOD: Duration = Duration::from_secs(10);
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const CODEX_UPDATE_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 static CODEX_UPDATE_LOG_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Serialize)]
@@ -396,7 +400,7 @@ pub async fn download_update(
     let target_version = target_installation
         .as_ref()
         .and_then(|installation| installation.version.clone());
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     log_codex_update(
         "info",
         "download_requested",
@@ -415,7 +419,7 @@ pub async fn download_update(
         if let Some(cached) =
             latest_version.and_then(|version| cached_installer_for_version(version, extension))
         {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             log_codex_update(
                 "info",
                 "cached_installer_selected",
@@ -432,7 +436,7 @@ pub async fn download_update(
         }
         if latest_version.is_none() {
             if let Some(cached) = newest_cached_installer(extension) {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 log_codex_update(
                     "warning",
                     "offline_cached_installer_selected",
@@ -462,7 +466,7 @@ pub async fn download_update(
         .await
         .map_err(with_codex_update_log_location)?;
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     log_codex_update(
         "info",
         "download_completed",
@@ -505,7 +509,7 @@ pub async fn apply_update(
     downloaded_version: String,
     target_path: Option<String>,
 ) -> Result<CodexInstallResult, String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     log_codex_update(
         "info",
         "apply_requested",
@@ -525,9 +529,19 @@ pub async fn apply_update(
     let preferred_destination = target_path
         .map(PathBuf::from)
         .or_else(|| update_target_installation().map(|installation| installation.path));
-    install_downloaded_path(app, &download_path, preferred_destination.as_deref())
-        .await
-        .map_err(with_codex_update_log_location)?;
+    if let Err(error) =
+        install_downloaded_path(app, &download_path, preferred_destination.as_deref()).await
+    {
+        #[cfg(target_os = "windows")]
+        {
+            log_codex_update("error", "direct_msix_update_failed", &error);
+            return install_with_microsoft_store_fallback(app, true, &error)
+                .await
+                .map_err(with_codex_update_log_location);
+        }
+        #[cfg(not(target_os = "windows"))]
+        return Err(with_codex_update_log_location(error));
+    }
     emit_install_progress(app, "verifying", 0, None);
     let status = status().await;
     if !status.installed {
@@ -553,7 +567,7 @@ pub async fn apply_update(
     emit_install_progress(app, "opening", 0, None);
     open_installed_app_at(preferred_destination.as_deref())?;
     emit_install_progress(app, "complete", 0, None);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     log_codex_update(
         "info",
         "update_completed",
@@ -610,7 +624,7 @@ async fn download_installer(
     emit_install_progress(app, "selecting-source", 0, None);
     let ranked_urls = rank_download_sources(download_urls).await;
     for download_url in &ranked_urls {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         log_codex_update(
             "info",
             "download_source_started",
@@ -618,7 +632,7 @@ async fn download_installer(
         );
         match download_installer_from_url(app, download_url, download_path).await {
             Ok(()) => {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 log_codex_update(
                     "info",
                     "download_source_completed",
@@ -627,7 +641,7 @@ async fn download_installer(
                 return Ok(());
             }
             Err(error) => {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 log_codex_update(
                     "error",
                     "download_source_failed",
@@ -913,7 +927,7 @@ fn emit_install_progress(
     downloaded_bytes: u64,
     total_bytes: Option<u64>,
 ) {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     log_codex_update(
         "info",
         "progress_stage",
@@ -966,10 +980,10 @@ pub fn open_installed_app() -> Result<(), String> {
     open_installed_app_at(None)
 }
 
-pub fn open_installed_app_at(target_path: Option<&Path>) -> Result<(), String> {
+pub fn open_installed_app_at(_target_path: Option<&Path>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let app = target_path
+        let app = _target_path
             .map(Path::to_path_buf)
             .or_else(|| update_target_installation().map(|installation| installation.path))
             .ok_or_else(|| "ChatGPT is not installed yet.".to_string())?;
@@ -987,6 +1001,11 @@ pub fn open_installed_app_at(target_path: Option<&Path>) -> Result<(), String> {
     {
         let app_user_model_id = windows_app_user_model_id()?;
         let shell_target = format!("shell:AppsFolder\\{app_user_model_id}");
+        log_codex_update(
+            "info",
+            "opening_application",
+            format!("appUserModelId={app_user_model_id}"),
+        );
         Command::new("explorer.exe")
             .creation_flags(CREATE_NO_WINDOW)
             .arg(shell_target)
@@ -999,6 +1018,10 @@ pub fn open_installed_app_at(target_path: Option<&Path>) -> Result<(), String> {
 }
 
 pub fn is_installed_app_running() -> Result<bool, String> {
+    is_installed_app_running_at(None)
+}
+
+fn is_installed_app_running_at(_target_path: Option<&str>) -> Result<bool, String> {
     #[cfg(target_os = "macos")]
     {
         for process_name in ["ChatGPT", "Codex"] {
@@ -1010,10 +1033,13 @@ pub fn is_installed_app_running() -> Result<bool, String> {
     }
     #[cfg(target_os = "windows")]
     {
-        let script = "$process = Get-Process -Name 'ChatGPT','Codex','OpenAI.Codex' -ErrorAction SilentlyContinue | Select-Object -First 1; if ($null -eq $process) { exit 1 }; exit 0";
+        let script = format!(
+            "{}\nif ($processes.Count -eq 0) {{ exit 1 }}; $processes | ForEach-Object {{ Write-Output ($_.Id.ToString() + '|' + $_.ProcessName + '|' + $_.Path) }}; exit 0",
+            windows_codex_process_selector(_target_path),
+        );
         let output = Command::new("powershell.exe")
             .creation_flags(CREATE_NO_WINDOW)
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
             .map_err(|error| format!("check whether ChatGPT is open: {error}"))?;
         return match output.status.code() {
@@ -1062,30 +1088,116 @@ pub fn close_installed_app_at(target_path: Option<String>) -> Result<(), String>
 
     #[cfg(target_os = "windows")]
     {
-        if !is_installed_app_running()? {
+        if !is_installed_app_running_at(target_path.as_deref())? {
+            log_codex_update("info", "application_closed", "already stopped");
             return Ok(());
         }
-        let script = "$processes = @(Get-Process -Name 'ChatGPT','Codex','OpenAI.Codex' -ErrorAction SilentlyContinue); foreach ($process in $processes) { if ($process.MainWindowHandle -ne 0) { $null = $process.CloseMainWindow() } }";
-        Command::new("powershell.exe")
+        log_codex_update(
+            "info",
+            "closing_application",
+            format!(
+                "targetPath={}",
+                target_path.as_deref().unwrap_or("automatic")
+            ),
+        );
+        let script = format!(
+            "{}\nforeach ($process in $processes) {{ if ($process.MainWindowHandle -ne 0) {{ $closed = $process.CloseMainWindow(); Write-Output ('close-window|' + $process.Id + '|' + $process.ProcessName + '|' + $closed) }} else {{ Write-Output ('background-process|' + $process.Id + '|' + $process.ProcessName) }} }}",
+            windows_codex_process_selector(target_path.as_deref()),
+        );
+        let output = Command::new("powershell.exe")
             .creation_flags(CREATE_NO_WINDOW)
-            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .output()
             .map_err(|error| format!("request ChatGPT to close: {error}"))?;
-        let deadline = Instant::now() + Duration::from_secs(20);
+        log_codex_update(
+            if output.status.success() {
+                "info"
+            } else {
+                "error"
+            },
+            "application_close_requested",
+            format!(
+                "status={}; stdout={:?}; stderr={:?}",
+                output.status,
+                compact_command_output(&output.stdout),
+                compact_command_output(&output.stderr),
+            ),
+        );
+        let deadline = Instant::now() + WINDOWS_QUIT_GRACE_PERIOD;
         while Instant::now() < deadline {
-            if !is_installed_app_running()? {
+            if !is_installed_app_running_at(target_path.as_deref())? {
+                log_codex_update("info", "application_closed", "success");
                 return Ok(());
             }
             thread::sleep(Duration::from_millis(250));
         }
-        return Err(
-            "ChatGPT is still running. Quit ChatGPT completely, then try the update again."
-                .to_string(),
+
+        let force_script = format!(
+            "{}\nforeach ($process in $processes) {{ Write-Output ('force-stop|' + $process.Id + '|' + $process.ProcessName + '|' + $process.Path); Stop-Process -Id $process.Id -Force -ErrorAction Continue }}",
+            windows_codex_process_selector(target_path.as_deref()),
         );
+        let mut force_command = Command::new("powershell.exe");
+        force_command.creation_flags(CREATE_NO_WINDOW).args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &force_script,
+        ]);
+        run_windows_command_with_timeout(
+            &mut force_command,
+            Duration::from_secs(30),
+            "force remaining ChatGPT processes to stop",
+        )?;
+        log_codex_update(
+            "warning",
+            "application_force_close_requested",
+            format!(
+                "targetPath={}",
+                target_path.as_deref().unwrap_or("automatic")
+            ),
+        );
+
+        let deadline = Instant::now() + WINDOWS_QUIT_FORCE_PERIOD;
+        while Instant::now() < deadline {
+            if !is_installed_app_running_at(target_path.as_deref())? {
+                log_codex_update("info", "application_closed", "forced success");
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        let error = "ChatGPT processes are still running after both graceful and forced shutdown. Close ChatGPT from Task Manager, then try again."
+            .to_string();
+        log_codex_update("error", "application_close_failed", &error);
+        return Err(with_codex_update_log_location(error));
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Err("This desktop build supports macOS and Windows only.".to_string())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_codex_process_selector(target_path: Option<&str>) -> String {
+    let escaped_target_path = target_path.unwrap_or_default().replace('\'', "''");
+    format!(
+        r#"$requestedPath = '{escaped_target_path}'
+$installRoot = $requestedPath
+if ([string]::IsNullOrWhiteSpace($installRoot)) {{
+    $package = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object {{ $_.Name -match '^(?i:OpenAI\.)?(ChatGPT|Codex)$' }} | Select-Object -First 1
+    if ($null -ne $package) {{ $installRoot = $package.InstallLocation }}
+}}
+if (-not [string]::IsNullOrWhiteSpace($installRoot) -and [System.IO.Path]::GetExtension($installRoot) -eq '.exe') {{
+    $installRoot = Split-Path -Parent $installRoot
+}}
+$rootPrefix = if ([string]::IsNullOrWhiteSpace($installRoot)) {{ '' }} else {{ $installRoot.TrimEnd('\') + '\' }}
+$processes = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {{
+    $processPath = try {{ $_.Path }} catch {{ $null }}
+    if (-not [string]::IsNullOrWhiteSpace($rootPrefix)) {{
+        -not [string]::IsNullOrWhiteSpace($processPath) -and ($processPath.Equals($installRoot, [System.StringComparison]::OrdinalIgnoreCase) -or $processPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase))
+    }} else {{
+        $_.ProcessName -eq 'ChatGPT'
+    }}
+}})"#
+    )
 }
 
 #[cfg(target_os = "macos")]
@@ -1484,16 +1596,19 @@ fn download_extension(_download_urls: &[String]) -> &'static str {
     "installer"
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn codex_update_log_path() -> Option<PathBuf> {
     #[cfg(test)]
     return None;
-    #[cfg(not(test))]
-    dirs::home_dir()
-        .map(|home| home.join("Library/Logs/AUTO Gateway Desktop/logs/codex-update.jsonl"))
+    #[cfg(all(not(test), target_os = "macos"))]
+    return dirs::home_dir()
+        .map(|home| home.join("Library/Logs/AUTO Gateway Desktop/logs/codex-update.jsonl"));
+    #[cfg(all(not(test), target_os = "windows"))]
+    return dirs::data_local_dir()
+        .map(|base| base.join("AUTO Gateway Desktop/logs/codex-update.jsonl"));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn rotate_codex_update_log_if_needed(path: &Path) {
     let Ok(metadata) = fs::metadata(path) else {
         return;
@@ -1506,7 +1621,7 @@ fn rotate_codex_update_log_if_needed(path: &Path) {
     let _ = fs::rename(path, backup);
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn log_codex_update(level: &str, event: &str, message: impl AsRef<str>) {
     let message = message.as_ref();
     eprintln!("Codex update [{level}] {event}: {message}");
@@ -1541,7 +1656,7 @@ fn log_codex_update(level: &str, event: &str, message: impl AsRef<str>) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn with_codex_update_log_location(error: String) -> String {
     log_codex_update("error", "update_failed", &error);
     match codex_update_log_path() {
@@ -1550,12 +1665,12 @@ fn with_codex_update_log_location(error: String) -> String {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn with_codex_update_log_location(error: String) -> String {
     error
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn compact_command_output(bytes: &[u8]) -> String {
     const MAX_CHARS: usize = 4_000;
     let text = String::from_utf8_lossy(bytes).trim().to_string();
@@ -2104,6 +2219,14 @@ fn install_with_winget(force_update: bool) -> Result<(), String> {
 
     let mut last_error = None;
     for arguments in attempts {
+        log_codex_update(
+            "info",
+            "winget_attempt_started",
+            format!(
+                "operation={}; productId={WINDOWS_STORE_PRODUCT_ID}",
+                arguments[0]
+            ),
+        );
         let mut command = Command::new("winget.exe");
         command
             .creation_flags(CREATE_NO_WINDOW)
@@ -2119,11 +2242,22 @@ fn install_with_winget(force_update: bool) -> Result<(), String> {
             "Microsoft Store installation command",
         )?;
         if output.status.success() {
+            log_codex_update(
+                "info",
+                "winget_attempt_completed",
+                format!("operation={}", arguments[0]),
+            );
             return Ok(());
         }
         let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        last_error = Some(if details.is_empty() { stdout } else { details });
+        let error = if details.is_empty() { stdout } else { details };
+        log_codex_update(
+            "error",
+            "winget_attempt_failed",
+            format!("operation={}; error={error}", arguments[0]),
+        );
+        last_error = Some(error);
     }
 
     Err(last_error
@@ -2137,6 +2271,11 @@ async fn install_with_microsoft_store_fallback(
     force_update: bool,
     mirror_error: &str,
 ) -> Result<CodexInstallResult, String> {
+    log_codex_update(
+        "warning",
+        "store_fallback_started",
+        format!("forceUpdate={force_update}; directError={mirror_error}"),
+    );
     emit_install_progress(app, "installing", 0, None);
     let winget_result =
         tauri::async_runtime::spawn_blocking(move || install_with_winget(force_update))
@@ -2144,6 +2283,9 @@ async fn install_with_microsoft_store_fallback(
             .map_err(|error| format!("wait for the Microsoft Store installation: {error}"))?;
 
     if winget_result.is_err() {
+        if let Err(error) = &winget_result {
+            log_codex_update("error", "winget_fallback_failed", error);
+        }
         open_microsoft_store()?;
         let reason = mirror_error.trim();
         let message = if reason.is_empty() {
@@ -2208,6 +2350,11 @@ async fn install_with_microsoft_store_fallback(
 #[cfg(target_os = "windows")]
 fn open_microsoft_store() -> Result<(), String> {
     let store_uri = format!("ms-windows-store://pdp/?productid={WINDOWS_STORE_PRODUCT_ID}");
+    log_codex_update(
+        "info",
+        "microsoft_store_opening",
+        format!("productId={WINDOWS_STORE_PRODUCT_ID}"),
+    );
     Command::new("explorer.exe")
         .creation_flags(CREATE_NO_WINDOW)
         .arg(store_uri)
@@ -2228,6 +2375,11 @@ fn install_downloaded_app(
 
 #[cfg(target_os = "windows")]
 fn install_windows_msix(download_path: &Path) -> Result<(), String> {
+    log_codex_update(
+        "info",
+        "msix_installation_started",
+        format!("path={}", download_path.display()),
+    );
     let escaped_path = download_path.display().to_string().replace('\'', "''");
     let script = format!(
         r#"
@@ -2264,12 +2416,13 @@ Add-AppxPackage -LiteralPath '{escaped_path}' -ForceApplicationShutdown -ErrorAc
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let details = if stderr.is_empty() { stdout } else { stderr };
-        return Err(format!(
-            "install the official ChatGPT MSIX package: {details}"
-        ));
+        let error = format!("install the official ChatGPT MSIX package: {details}");
+        log_codex_update("error", "msix_installation_failed", &error);
+        return Err(error);
     }
     fs::remove_file(download_path)
         .map_err(|error| format!("remove the downloaded ChatGPT MSIX package: {error}"))?;
+    log_codex_update("info", "msix_installation_completed", "success");
     Ok(())
 }
 
@@ -2279,9 +2432,24 @@ fn run_windows_command_with_timeout(
     timeout: Duration,
     description: &str,
 ) -> Result<Output, String> {
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("start {description}: {error}"))?;
+    let command_summary = format!("{command:?}");
+    log_codex_update(
+        "info",
+        "command_started",
+        format!(
+            "{description}; command={command_summary}; timeout={}s",
+            timeout.as_secs()
+        ),
+    );
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(|error| {
+        let message = format!("start {description}: {error}");
+        log_codex_update("error", "command_start_failed", &message);
+        message
+    })?;
     let deadline = Instant::now() + timeout;
     loop {
         match child
@@ -2289,17 +2457,34 @@ fn run_windows_command_with_timeout(
             .map_err(|error| format!("wait for {description}: {error}"))?
         {
             Some(_) => {
-                return child
+                let output = child
                     .wait_with_output()
-                    .map_err(|error| format!("read {description} output: {error}"));
+                    .map_err(|error| format!("read {description} output: {error}"))?;
+                log_codex_update(
+                    if output.status.success() {
+                        "info"
+                    } else {
+                        "error"
+                    },
+                    "command_finished",
+                    format!(
+                        "{description}; status={}; stdout={:?}; stderr={:?}",
+                        output.status,
+                        compact_command_output(&output.stdout),
+                        compact_command_output(&output.stderr),
+                    ),
+                );
+                return Ok(output);
             }
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait_with_output();
-                return Err(format!(
+                let message = format!(
                     "{description} timed out after {} minutes. Try again, or complete the installation in Microsoft Store.",
                     timeout.as_secs() / 60
-                ));
+                );
+                log_codex_update("error", "command_timed_out", &message);
+                return Err(message);
             }
             None => thread::sleep(Duration::from_millis(500)),
         }
@@ -2520,6 +2705,26 @@ image-path      : /tmp/ChatGPT.dmg
         assert!(!is_trusted_windows_download_url(
             "http://codexapp.agentsmirror.com/latest/win-x64"
         ));
+    }
+
+    #[test]
+    fn windows_process_selector_targets_the_selected_installation() {
+        let script = super::windows_codex_process_selector(Some(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.818.8289.0_x64",
+        ));
+
+        assert!(script.contains("OpenAI.Codex_26.818.8289.0_x64"));
+        assert!(script.contains("StartsWith($rootPrefix"));
+        assert!(!script.contains("Get-Process -Name"));
+        assert!(!script.contains("$_.ProcessName -eq 'Codex'"));
+    }
+
+    #[test]
+    fn windows_process_selector_escapes_single_quotes_in_paths() {
+        let script =
+            super::windows_codex_process_selector(Some(r"C:\Users\O'Brien\Apps\ChatGPT.exe"));
+
+        assert!(script.contains(r"C:\Users\O''Brien\Apps\ChatGPT.exe"));
     }
 
     #[cfg(target_os = "macos")]

@@ -14,6 +14,7 @@ import {
   getCodexStatus,
   getSkillDetail,
   installSkill,
+  isCodexExternalInstallationComplete,
   openCodex,
   scanSkills,
   validateSkillSource,
@@ -119,5 +120,36 @@ describe("desktop.ts invoke wrappers", () => {
   it("propagates invoke rejections", async () => {
     invokeMock.mockRejectedValue(new Error("boom"));
     await expect(scanSkills()).rejects.toThrow("boom");
+  });
+});
+
+describe("Codex external installation completion", () => {
+  const installedStatus = {
+    installed: true,
+    platformMessage: "installed",
+  };
+
+  it("completes a first-time installation when the app is present", () => {
+    expect(isCodexExternalInstallationComplete(installedStatus, false)).toBe(
+      true,
+    );
+  });
+
+  it("keeps waiting for an update while the old version remains", () => {
+    expect(
+      isCodexExternalInstallationComplete(
+        { ...installedStatus, updateAvailable: true },
+        true,
+      ),
+    ).toBe(false);
+  });
+
+  it("completes an update only after the latest version is installed", () => {
+    expect(
+      isCodexExternalInstallationComplete(
+        { ...installedStatus, updateAvailable: false },
+        true,
+      ),
+    ).toBe(true);
   });
 });

@@ -4,6 +4,7 @@ mod codex_app;
 mod codex_config;
 mod codex_skill_advisor;
 mod desktop_auth;
+mod gateway_env;
 mod http_client;
 mod runtime;
 mod skill_hub;
@@ -16,8 +17,8 @@ use codex_app::{
     status as codex_app_status, CodexAppStatus, CodexInstallResult, CodexUpdateDownloadResult,
 };
 use codex_config::{
-    apply_configuration, default_codex_paths, restore_latest_backups, CodexStatus,
-    ConfigurationResult, RestoreResult,
+    apply_configuration, apply_configuration_with_explicit_bearer, default_codex_paths,
+    restore_latest_backups, CodexStatus, ConfigurationResult, RestoreResult,
 };
 use desktop_auth::{
     bootstrap_desktop_key, clear_desktop_session, clear_stored_desktop_api_key,
@@ -28,6 +29,7 @@ use desktop_auth::{
     StoredDesktopState,
 };
 use futures_util::StreamExt;
+use gateway_env::persist_api_key;
 use runtime::AUTO_GATEWAY_CONSOLE_BASE_URL;
 use skill_hub::{
     delete_ag_skill_advisor_conversation, delete_ag_skill_advisor_thread, install_ag_skill,
@@ -311,11 +313,15 @@ async fn is_codex_running() -> Result<bool, String> {
 
 #[tauri::command]
 async fn configure_codex(api_key: String, endpoint: String) -> Result<ConfigurationResult, String> {
-    // 写 config.toml + auth 文件（含 backup）属于同步磁盘 I/O，
-    // 放到阻塞线程池避免阻塞主线程。
+    // Writing config.toml and creating its backup performs synchronous disk I/O.
+    // Run it on the blocking thread pool so the main thread stays responsive.
     tauri::async_runtime::spawn_blocking(move || {
         let paths = default_codex_paths()?;
-        apply_configuration(&paths, &api_key, &endpoint)
+        let result = apply_configuration(&paths, &api_key, &endpoint)?;
+        match persist_api_key(&api_key) {
+            Ok(()) => Ok(result),
+            Err(_) => apply_configuration_with_explicit_bearer(&paths, &api_key, &endpoint),
+        }
     })
     .await
     .map_err(|error| format!("configure Codex: {error}"))?

@@ -49,6 +49,7 @@ import {
   getLocalCodexAppStatus,
   applyCodexUpdate,
   installCodex,
+  isCodexExternalInstallationComplete,
   isCodexRunning,
   isAuthenticationRequired,
   openDesktopSignIn,
@@ -614,7 +615,12 @@ function App() {
         const nextAppStatus = await getLocalCodexAppStatus();
         if (!active) return;
         const startedAt = externalInstallationStartedAt.current;
-        if (nextAppStatus.installed) {
+        if (
+          isCodexExternalInstallationComplete(
+            nextAppStatus,
+            storeInstallForceUpdate,
+          )
+        ) {
           completeExternalInstallation(nextAppStatus);
         } else if (
           startedAt !== null &&
@@ -1204,10 +1210,24 @@ function App() {
 
         setInstallProgress({ stage: "installing", downloadedBytes: 0 });
         setMessage(tr("replacingCodex"));
-        await applyCodexUpdate(
+        const result = await applyCodexUpdate(
           downloadedUpdate.version,
           downloadedUpdate.targetPath,
         );
+        if (result.awaitingInstallation) {
+          waitingForExternalInstallation = true;
+          externalInstallationStartedAt.current = Date.now();
+          storeAutoRetryAttempted.current = true;
+          setAwaitingExternalInstallation(true);
+          setCanRetryCachedInstaller(result.canRetryCachedInstaller);
+          setExternalInstallationMessage(result.message);
+          setInstallProgress({
+            stage: "windows-installing",
+            downloadedBytes: 0,
+          });
+          setMessage(result.message);
+          return;
+        }
         await refreshStatus(false);
         const reopened = await waitForCodexOpen();
         setCodexOpenPhase(reopened ? "opened" : "closed");
@@ -1460,7 +1480,7 @@ function App() {
     setCodexOpenPhase("opening");
     setMessage(tr("restartingCodex"));
     try {
-      await closeCodex();
+      await closeCodex(appStatus?.path);
       await openCodex();
       if (await waitForCodexOpen()) {
         setCodexOpenPhase("opened");
