@@ -556,6 +556,10 @@ export function getInstallationID(): Promise<string> {
   return invoke<string>("get_installation_id");
 }
 
+export function getPendingDesktopUrls(): Promise<string[]> {
+  return invoke<string[]>("get_pending_desktop_urls");
+}
+
 export function exchangeDesktopAuthorization(
   code: string,
   codeVerifier: string,

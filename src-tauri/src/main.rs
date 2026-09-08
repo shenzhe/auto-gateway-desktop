@@ -43,12 +43,18 @@ use skills::{
     reorder_categories, restore_skill, scan_skills, set_skill_category, set_skill_tags,
     set_skills_category, validate_skill_source,
 };
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::{fs, path::Path, process::Command, time::Duration};
+use tauri::menu::{Menu, MenuItemBuilder, Submenu};
 use tauri::tray::{MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Position, Rect, Size, WebviewUrl,
     WebviewWindowBuilder, WindowEvent,
 };
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use tauri_plugin_deep_link::DeepLinkExt;
 use tokio::fs::File as AsyncFile;
 use tokio::io::AsyncWriteExt;
 use url::Url;
@@ -59,6 +65,147 @@ const DISABLE_CONTEXT_MENU_SCRIPT: &str = r#"
 const DESKTOP_INSTALLER_HOST: &str = "cdn.autogateway.cc";
 const DESKTOP_INSTALLER_PATH_PREFIX: &str = "/downloads/desktop/";
 const MAX_DESKTOP_INSTALLER_BYTES: u64 = 512 * 1024 * 1024;
+const CHECK_DESKTOP_UPDATES_MENU_ID: &str = "check-desktop-updates";
+
+#[cfg(target_os = "macos")]
+const LSREGISTER_PATH: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+#[cfg(target_os = "macos")]
+const AUTO_GATEWAY_BUNDLE_IDENTIFIERS: [&str; 2] =
+    ["cc.autogateway.desktop", "cc.autogateway.desktop.dev"];
+
+struct DesktopUrlInbox {
+    frontend_ready: bool,
+    urls: Vec<String>,
+}
+
+static DESKTOP_URL_INBOX: OnceLock<Mutex<DesktopUrlInbox>> = OnceLock::new();
+
+fn desktop_url_inbox() -> &'static Mutex<DesktopUrlInbox> {
+    DESKTOP_URL_INBOX.get_or_init(|| {
+        Mutex::new(DesktopUrlInbox {
+            frontend_ready: false,
+            urls: Vec::new(),
+        })
+    })
+}
+
+fn queue_desktop_urls(app: &AppHandle, urls: impl IntoIterator<Item = String>) {
+    let urls = urls
+        .into_iter()
+        .filter(|url| {
+            Url::parse(url)
+                .map(|parsed| parsed.scheme().eq_ignore_ascii_case("autogateway"))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>();
+    if urls.is_empty() {
+        return;
+    }
+
+    if let Ok(mut inbox) = desktop_url_inbox().lock() {
+        if !inbox.frontend_ready {
+            inbox.urls.extend(urls.iter().cloned());
+        }
+    }
+    let _ = app.emit("desktop-open-url", urls);
+}
+
+#[tauri::command]
+fn get_pending_desktop_urls() -> Vec<String> {
+    desktop_url_inbox()
+        .lock()
+        .map(|mut inbox| {
+            inbox.frontend_ready = true;
+            std::mem::take(&mut inbox.urls)
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "macos")]
+fn current_macos_bundle_path() -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let bundle = executable.parent()?.parent()?.parent()?;
+    (bundle
+        .extension()
+        .is_some_and(|extension| extension == "app"))
+    .then(|| fs::canonicalize(bundle).unwrap_or_else(|_| bundle.to_path_buf()))
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_registered_bundle_paths(output: &str) -> Vec<PathBuf> {
+    let mut current_path = None;
+    let mut paths = Vec::new();
+
+    for line in output.lines() {
+        let line = line.trim_start();
+        if let Some(value) = line.strip_prefix("path:") {
+            let value = value.trim();
+            let path = value
+                .split_once(" (0x")
+                .map(|(path, _)| path)
+                .unwrap_or(value);
+            current_path = path.ends_with(".app").then(|| PathBuf::from(path));
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("identifier:") {
+            if AUTO_GATEWAY_BUNDLE_IDENTIFIERS
+                .iter()
+                .any(|identifier| *identifier == value.trim())
+            {
+                if let Some(path) = current_path.as_ref() {
+                    paths.push(path.clone());
+                }
+            }
+        }
+    }
+
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+#[cfg(target_os = "macos")]
+fn cleanup_stale_macos_deep_link_registrations() -> Result<(), String> {
+    let Some(current_bundle) = current_macos_bundle_path() else {
+        return Ok(());
+    };
+    if !Path::new(LSREGISTER_PATH).exists() {
+        return Err("macOS LaunchServices registration tool is unavailable".to_string());
+    }
+
+    let dump = Command::new(LSREGISTER_PATH)
+        .arg("-dump")
+        .output()
+        .map_err(|error| format!("read macOS LaunchServices registrations: {error}"))?;
+    if !dump.status.success() {
+        return Err(format!(
+            "read macOS LaunchServices registrations: command exited with {}",
+            dump.status
+        ));
+    }
+
+    for registered_bundle in
+        parse_macos_registered_bundle_paths(&String::from_utf8_lossy(&dump.stdout))
+    {
+        if registered_bundle == current_bundle {
+            continue;
+        }
+        let path = registered_bundle.to_string_lossy().into_owned();
+        let result = Command::new(LSREGISTER_PATH)
+            .args(["-u", path.as_str()])
+            .status();
+        if let Err(error) = result {
+            eprintln!("remove stale AUTO Gateway LaunchServices registration {path}: {error}");
+        }
+    }
+
+    let current_path = current_bundle.to_string_lossy().into_owned();
+    Command::new(LSREGISTER_PATH)
+        .args(["-f", current_path.as_str()])
+        .status()
+        .map_err(|error| format!("register the current AUTO Gateway app with macOS: {error}"))?;
+    Ok(())
+}
 
 fn desktop_installer_filename(url: &Url) -> Result<String, String> {
     if url.scheme() != "https"
@@ -148,6 +295,32 @@ mod desktop_installer_tests {
         let url = Url::parse("https://example.com/downloads/desktop/update.dmg").unwrap();
 
         assert!(desktop_installer_filename(&url).is_err());
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_deep_link_tests {
+    use super::parse_macos_registered_bundle_paths;
+    use std::path::PathBuf;
+
+    #[test]
+    fn collects_only_auto_gateway_bundle_registrations() {
+        let dump = r#"
+path: /Users/test/AUTO Gateway Desktop Dev.app (0x1)
+identifier: cc.autogateway.desktop.dev
+path: /Applications/AUTO Gateway Desktop.app (0x2)
+identifier: cc.autogateway.desktop
+path: /Applications/Other.app (0x3)
+identifier: com.example.other
+"#;
+
+        assert_eq!(
+            parse_macos_registered_bundle_paths(dump),
+            vec![
+                PathBuf::from("/Applications/AUTO Gateway Desktop.app"),
+                PathBuf::from("/Users/test/AUTO Gateway Desktop Dev.app"),
+            ]
+        );
     }
 }
 
@@ -409,7 +582,7 @@ async fn open_desktop_sign_in_command(
                 && url.host_str() == Some("auth")
                 && url.path() == "/callback";
             if is_callback {
-                let _ = app_handle.emit("desktop-open-url", vec![url.as_str().to_string()]);
+                queue_desktop_urls(&app_handle, [url.as_str().to_string()]);
                 if let Some(window) = app_handle.get_webview_window("auth") {
                     let _ = window.close();
                 }
@@ -753,6 +926,14 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             fit_main_window_to_work_area(app.handle());
+            let menu = Menu::default(app.handle())?;
+            let check_updates_item =
+                MenuItemBuilder::with_id(CHECK_DESKTOP_UPDATES_MENU_ID, "Check for Updates")
+                    .accelerator("CmdOrCtrl+Shift+U")
+                    .build(app)?;
+            let updates_menu = Submenu::with_items(app, "Updates", true, &[&check_updates_item])?;
+            menu.append(&updates_menu)?;
+            app.set_menu(menu)?;
             let mut tray = TrayIconBuilder::with_id("main-tray")
                 .tooltip("AUTO Gateway")
                 .show_menu_on_left_click(false)
@@ -770,6 +951,27 @@ fn main() {
                 tray = tray.icon(icon.clone());
             }
             tray.build(app)?;
+            #[cfg(target_os = "windows")]
+            if let Err(error) = app.handle().deep_link().register_all() {
+                eprintln!("failed to register the autogateway deep-link scheme: {error}");
+            }
+            #[cfg(target_os = "macos")]
+            {
+                if let Err(error) = cleanup_stale_macos_deep_link_registrations() {
+                    eprintln!("failed to refresh the autogateway deep-link registration: {error}");
+                }
+                let app_handle = app.handle().clone();
+                app.handle().deep_link().on_open_url(move |event| {
+                    queue_desktop_urls(
+                        &app_handle,
+                        event
+                            .urls()
+                            .into_iter()
+                            .map(|url| url.to_string())
+                            .collect::<Vec<_>>(),
+                    );
+                });
+            }
             Ok(())
         })
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -778,9 +980,7 @@ fn main() {
                 .filter(|argument| argument.to_ascii_lowercase().starts_with("autogateway://"))
                 .collect::<Vec<_>>();
             let _ = reveal_main_window(app);
-            if !urls.is_empty() {
-                let _ = app.emit("desktop-open-url", urls);
-            }
+            queue_desktop_urls(app, urls);
         }))
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
@@ -793,6 +993,11 @@ fn main() {
                 .expect("failed to configure the desktop updater user agent")
                 .build(),
         )
+        .on_menu_event(|app, event| {
+            if event.id() == CHECK_DESKTOP_UPDATES_MENU_ID {
+                let _ = app.emit("desktop-check-updates", ());
+            }
+        })
         .on_window_event(|window, event| match (window.label(), event) {
             ("main", WindowEvent::CloseRequested { api, .. }) => {
                 api.prevent_close();
@@ -816,6 +1021,7 @@ fn main() {
             configure_codex,
             restore_latest_codex_backups,
             get_installation_id,
+            get_pending_desktop_urls,
             exchange_desktop_authorization_command,
             open_desktop_sign_in_command,
             bootstrap_desktop_key_command,

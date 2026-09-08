@@ -12,6 +12,7 @@ import {
   configureCodex,
   exportSkill,
   getCodexStatus,
+  getPendingDesktopUrls,
   getSkillDetail,
   installSkill,
   isCodexExternalInstallationComplete,
@@ -39,6 +40,12 @@ describe("desktop.ts invoke wrappers", () => {
     invokeMock.mockResolvedValue({ configured: true });
     await getCodexStatus();
     expect(invokeMock).toHaveBeenCalledWith("get_codex_status");
+  });
+
+  it("getPendingDesktopUrls calls invoke with get_pending_desktop_urls", async () => {
+    invokeMock.mockResolvedValue([]);
+    await getPendingDesktopUrls();
+    expect(invokeMock).toHaveBeenCalledWith("get_pending_desktop_urls");
   });
 
   it("getSkillDetail passes the id under { id }", async () => {

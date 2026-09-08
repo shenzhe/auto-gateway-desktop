@@ -48,6 +48,7 @@ import {
   getDesktopSubscriptions,
   getLocalCodexAppStatus,
   applyCodexUpdate,
+  getPendingDesktopUrls,
   installCodex,
   isCodexExternalInstallationComplete,
   isCodexRunning,
@@ -81,10 +82,13 @@ import { SkillsView } from "./skills/SkillsView";
 import { NotificationDetailWindow } from "./windows/NotificationDetailWindow";
 import { TrayPopup } from "./windows/TrayPopup";
 import {
+  buildDesktopSignInUrl,
+  clearPendingAuthorization,
   createChallenge,
   createState,
   createVerifier,
   readPendingAuthorization,
+  savePendingAuthorization,
 } from "./shared/auth";
 import { notifyBalanceAlerts } from "./shared/balanceAlerts";
 import {
@@ -109,8 +113,6 @@ import "./styles.css";
 
 const defaultEndpoint = import.meta.env.VITE_AUTO_GATEWAY_API_BASE_URL;
 const consoleBaseUrl = import.meta.env.VITE_AUTO_GATEWAY_CONSOLE_BASE_URL;
-const pendingAuthorizationStorageKey =
-  "autogateway.desktop.pending-authorization";
 const setupCompletedStoragePrefix = "autogateway.desktop.setup-completed";
 const notificationPageSize = 5;
 const externalInstallationTimeoutMs = 5 * 60 * 1000;
@@ -324,7 +326,7 @@ function App() {
         : 4;
 
   function resetSessionState(nextMessage: string) {
-    window.sessionStorage.removeItem(pendingAuthorizationStorageKey);
+    clearPendingAuthorization();
     configurationRun.current = false;
     authorizationExchangeInProgress.current = false;
     setBusy(false);
@@ -463,6 +465,25 @@ function App() {
       if (manual) setMessage(tr("desktopUpdateCheckUnavailable"));
     }
   }
+
+  useEffect(() => {
+    if (designPreviewState) return;
+    let active = true;
+    let unlisten: (() => void) | undefined;
+    void listen("desktop-check-updates", () => {
+      if (active) void checkDesktopUpdate(true);
+    }).then((nextUnlisten) => {
+      if (!active) {
+        nextUnlisten();
+        return;
+      }
+      unlisten = nextUnlisten;
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [desktopUpdatePhase, designPreviewState]);
 
   useEffect(() => {
     if (!designPreviewState) return;
@@ -970,16 +991,14 @@ function App() {
       if (!callback) return;
       const code = callback.searchParams.get("code") ?? "";
       const state = callback.searchParams.get("state") ?? "";
+      // Native and plugin listeners may deliver the same callback more than once.
+      if (code && completedAuthorizationCode.current === code) return;
       const pending = readPendingAuthorization();
       if (!code || !pending || pending.state !== state) {
         setMessage(tr("callbackInvalid"));
         return;
       }
-      if (
-        authorizationExchangeInProgress.current ||
-        completedAuthorizationCode.current === code
-      )
-        return;
+      if (authorizationExchangeInProgress.current) return;
       authorizationExchangeInProgress.current = true;
       setBusy(true);
       try {
@@ -994,7 +1013,7 @@ function App() {
         const setupWasCompleted = hasCompletedSetup(session);
         setSetupCompleted(setupWasCompleted);
         setSelectedStep(setupWasCompleted ? 4 : 2);
-        window.sessionStorage.removeItem(pendingAuthorizationStorageKey);
+        clearPendingAuthorization();
         completedAuthorizationCode.current = code;
         setMessage(tr("signedIn"));
       } catch (error) {
@@ -1006,7 +1025,7 @@ function App() {
     }
     let activeDeepLink = true;
     void onOpenUrl(receiveDesktopAuthorization).then((nextUnlisten) => {
-      // 若 cleanup 已先于 listen resolve 执行，立即注销，避免泄漏。
+      // Dispose a listener that resolves after this effect has been cleaned up.
       if (!activeDeepLink) {
         nextUnlisten();
         return;
@@ -1021,7 +1040,12 @@ function App() {
         return;
       }
       unlistenSingleInstance = nextUnlisten;
-    });
+      return getPendingDesktopUrls();
+    })
+      .then((urls) => {
+        if (activeDeepLink && urls?.length) void receiveDesktopAuthorization(urls);
+      })
+      .catch(() => undefined);
     void getCurrent()
       .then((urls) => {
         if (urls) void receiveDesktopAuthorization(urls);
@@ -1040,17 +1064,21 @@ function App() {
       const verifier = createVerifier();
       const challenge = await createChallenge(verifier);
       const state = createState();
-      window.sessionStorage.setItem(
-        pendingAuthorizationStorageKey,
-        JSON.stringify({ verifier, state }),
+      const fallbackUrl = buildDesktopSignInUrl(
+        consoleBaseUrl,
+        challenge,
+        state,
+        locale,
       );
+      savePendingAuthorization({ verifier, state });
+      setDesktopSignInUrl(fallbackUrl);
       const signInUrl = await openDesktopSignIn(
         challenge,
         state,
         locale,
         navigator.userAgent,
       );
-      setDesktopSignInUrl(signInUrl);
+      setDesktopSignInUrl(signInUrl || fallbackUrl);
       setMessage(tr("completeInApp"));
     } catch (error) {
       setMessage(tr("startSignInFailed", { error: String(error) }));
@@ -1534,6 +1562,73 @@ function App() {
     }
   }
 
+  function renderDesktopUpdateNotice() {
+    if (desktopUpdate && desktopUpdatePhase !== "manual") {
+      return (
+        <section className="notice warning desktopUpdateNotice">
+          <strong>{tr("desktopUpdateAvailable")}</strong>
+          <span>
+            {tr("desktopUpdateDescription", {
+              version: desktopUpdate.version,
+            })}
+          </span>
+          <button
+            className="secondaryButton"
+            disabled={desktopUpdatePhase === "downloading"}
+            onClick={() => void handleInstallDesktopUpdate()}
+          >
+            {desktopUpdatePhase === "downloading"
+              ? tr("desktopUpdating", {
+                  percent: desktopUpdateProgress ?? "…",
+                })
+              : tr("desktopUpdateNow")}
+          </button>
+        </section>
+      );
+    }
+    if (desktopUpdatePhase === "error") {
+      return (
+        <section className="notice warning desktopUpdateNotice">
+          <strong>{tr("desktopUpdateCheckUnavailable")}</strong>
+          <span>
+            {desktopUpdateError || tr("desktopUpdateCheckUnavailable")}
+          </span>
+          <button
+            className="secondaryButton"
+            onClick={() => void checkDesktopUpdate(true)}
+          >
+            {tr("desktopUpdateCheckNow")}
+          </button>
+        </section>
+      );
+    }
+    if (desktopUpdatePhase === "manual") {
+      return (
+        <section className="notice warning desktopUpdateNotice">
+          <strong>{tr("desktopUpdateManualTitle")}</strong>
+          <span>{tr("desktopUpdateManualDescription")}</span>
+          {desktopUpdateError ? (
+            <small className="desktopUpdateErrorDetail">
+              {tr("desktopUpdateFailureDetail", {
+                error: desktopUpdateError,
+              })}
+            </small>
+          ) : null}
+          <button
+            className="secondaryButton"
+            disabled={!desktopInstallerUrl || openingDesktopInstaller}
+            onClick={() => void openManualDesktopInstaller(desktopUpdate)}
+          >
+            {openingDesktopInstaller
+              ? tr("desktopUpdateManualOpening")
+              : tr("desktopUpdateManualOpen")}
+          </button>
+        </section>
+      );
+    }
+    return null;
+  }
+
   function renderHomeContent() {
     const version = appStatus?.localVersion || tr("versionUnavailable");
     const buildTime = formatBuildTime(locale);
@@ -1801,63 +1896,7 @@ function App() {
             <p className="sectionKicker">{tr("workspace")}</p>
             <h1>{tr("homeTitle")}</h1>
             <p className="lead homeLead">{tr("homeLead")}</p>
-            {desktopUpdate && desktopUpdatePhase !== "manual" ? (
-              <section className="notice warning desktopUpdateNotice">
-                <strong>{tr("desktopUpdateAvailable")}</strong>
-                <span>
-                  {tr("desktopUpdateDescription", {
-                    version: desktopUpdate.version,
-                  })}
-                </span>
-                <button
-                  className="secondaryButton"
-                  disabled={desktopUpdatePhase === "downloading"}
-                  onClick={() => void handleInstallDesktopUpdate()}
-                >
-                  {desktopUpdatePhase === "downloading"
-                    ? tr("desktopUpdating", {
-                        percent: desktopUpdateProgress ?? "…",
-                      })
-                    : tr("desktopUpdateNow")}
-                </button>
-              </section>
-            ) : null}
-            {desktopUpdatePhase === "error" ? (
-              <section className="notice warning desktopUpdateNotice">
-                <strong>{tr("desktopUpdateCheckUnavailable")}</strong>
-                <span>
-                  {desktopUpdateError || tr("desktopUpdateCheckUnavailable")}
-                </span>
-                <button
-                  className="secondaryButton"
-                  onClick={() => void checkDesktopUpdate(true)}
-                >
-                  {tr("desktopUpdateCheckNow")}
-                </button>
-              </section>
-            ) : null}
-            {desktopUpdatePhase === "manual" ? (
-              <section className="notice warning desktopUpdateNotice">
-                <strong>{tr("desktopUpdateManualTitle")}</strong>
-                <span>{tr("desktopUpdateManualDescription")}</span>
-                {desktopUpdateError ? (
-                  <small className="desktopUpdateErrorDetail">
-                    {tr("desktopUpdateFailureDetail", {
-                      error: desktopUpdateError,
-                    })}
-                  </small>
-                ) : null}
-                <button
-                  className="secondaryButton"
-                  disabled={!desktopInstallerUrl || openingDesktopInstaller}
-                  onClick={() => void openManualDesktopInstaller(desktopUpdate)}
-                >
-                  {openingDesktopInstaller
-                    ? tr("desktopUpdateManualOpening")
-                    : tr("desktopUpdateManualOpen")}
-                </button>
-              </section>
-            ) : null}
+            {renderDesktopUpdateNotice()}
             {homeActionError ? (
               <p className="homeActionMessage" role="alert">
                 {homeActionError}
@@ -2388,6 +2427,7 @@ function App() {
             <p className="sectionKicker">{tr("secureSignIn")}</p>
             <h1>{tr("connectTitle")}</h1>
             <p className="lead">{tr("connectLead")}</p>
+            {renderDesktopUpdateNotice()}
             <div
               className={`notice setupNotice ${accountConnected ? "success" : ""}`}
             >

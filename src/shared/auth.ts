@@ -1,11 +1,18 @@
-// PKCE / OAuth 授权辅助函数：verifier/challenge/state 生成 + pending 授权存储。
-// 从 main.tsx 提取的纯工具函数，无 React 依赖。
+// PKCE generation and pending authorization storage shared by both sign-in paths.
 export type PendingAuthorization = {
   verifier: string;
   state: string;
 };
 
-const pendingAuthorizationStorageKey = "autogateway.desktop.pending-auth";
+const pendingAuthorizationStorageKey = "autogateway.desktop.pending-authorization";
+
+export function savePendingAuthorization(value: PendingAuthorization): void {
+  window.sessionStorage.setItem(pendingAuthorizationStorageKey, JSON.stringify(value));
+}
+
+export function clearPendingAuthorization(): void {
+  window.sessionStorage.removeItem(pendingAuthorizationStorageKey);
+}
 
 function base64URL(bytes: Uint8Array): string {
   let binary = "";
@@ -36,12 +43,28 @@ export function createState(): string {
   return base64URL(bytes);
 }
 
+export function buildDesktopSignInUrl(
+  baseUrl: string,
+  challenge: string,
+  state: string,
+  locale?: "en" | "zh",
+): string {
+  const url = new URL("/login", baseUrl);
+  url.searchParams.set("desktopCodeChallenge", challenge);
+  url.searchParams.set("desktopState", state);
+  if (locale) url.searchParams.set("locale", locale);
+  return url.toString();
+}
+
 export function readPendingAuthorization(): PendingAuthorization | null {
   try {
     const raw = window.sessionStorage.getItem(pendingAuthorizationStorageKey);
     if (!raw) return null;
-    const value = JSON.parse(raw) as PendingAuthorization;
-    return value.verifier && value.state ? value : null;
+    const value = JSON.parse(raw) as Partial<PendingAuthorization> | null;
+    return typeof value?.verifier === "string" && value.verifier.length > 0 &&
+      typeof value.state === "string" && value.state.length > 0
+      ? { verifier: value.verifier, state: value.state }
+      : null;
   } catch {
     return null;
   }
