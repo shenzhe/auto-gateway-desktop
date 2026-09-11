@@ -982,10 +982,10 @@ pub fn open_installed_app() -> Result<(), String> {
     open_installed_app_at(None)
 }
 
-pub fn open_installed_app_at(_target_path: Option<&Path>) -> Result<(), String> {
+pub fn open_installed_app_at(target_path: Option<&Path>) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let app = _target_path
+        let app = target_path
             .map(Path::to_path_buf)
             .or_else(|| update_target_installation().map(|installation| installation.path))
             .ok_or_else(|| "ChatGPT is not installed yet.".to_string())?;
@@ -1001,12 +1001,19 @@ pub fn open_installed_app_at(_target_path: Option<&Path>) -> Result<(), String> 
     }
     #[cfg(target_os = "windows")]
     {
-        let app_user_model_id = windows_app_user_model_id()?;
+        let target = target_path
+            .map(Path::to_path_buf)
+            .or_else(|| update_target_installation().map(|installation| installation.path))
+            .ok_or_else(|| "ChatGPT is not installed yet.".to_string())?;
+        let app_user_model_id = windows_app_user_model_id(Some(&target))?;
         let shell_target = format!("shell:AppsFolder\\{app_user_model_id}");
         log_codex_update(
             "info",
             "opening_application",
-            format!("appUserModelId={app_user_model_id}"),
+            format!(
+                "appUserModelId={app_user_model_id}; targetPath={}",
+                target.display()
+            ),
         );
         Command::new("explorer.exe")
             .creation_flags(CREATE_NO_WINDOW)
@@ -1033,9 +1040,17 @@ fn is_installed_app_running_at(_target_path: Option<&str>) -> Result<bool, Strin
     }
     #[cfg(target_os = "windows")]
     {
+        let inferred_target_path = _target_path
+            .is_none()
+            .then(|| {
+                update_target_installation()
+                    .map(|installation| installation.path.display().to_string())
+            })
+            .flatten();
+        let process_target_path = _target_path.or(inferred_target_path.as_deref());
         let script = format!(
             "{}\nif ($processes.Count -eq 0) {{ exit 1 }}; $processes | ForEach-Object {{ Write-Output ($_.Id.ToString() + '|' + $_.ProcessName + '|' + $_.Path) }}; exit 0",
-            windows_codex_process_selector(_target_path),
+            windows_codex_process_selector(process_target_path),
         );
         let output = Command::new("powershell.exe")
             .creation_flags(CREATE_NO_WINDOW)
@@ -1194,31 +1209,54 @@ $processes = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {{
     if (-not [string]::IsNullOrWhiteSpace($rootPrefix)) {{
         -not [string]::IsNullOrWhiteSpace($processPath) -and ($processPath.Equals($installRoot, [System.StringComparison]::OrdinalIgnoreCase) -or $processPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase))
     }} else {{
-        $_.ProcessName -eq 'ChatGPT'
+        $false
     }}
 }})"#
     )
 }
 
 #[cfg(target_os = "windows")]
-fn windows_app_user_model_id() -> Result<String, String> {
-    let script = "$package = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)(chatgpt|codex)' } | Select-Object -First 1; if ($null -eq $package) { exit 1 }; $manifest = Get-AppxPackageManifest -Package $package; $application = $manifest.Package.Applications.Application | Select-Object -First 1; if ($null -eq $application) { exit 1 }; Write-Output ($package.PackageFamilyName + '!' + $application.Id)";
+fn windows_app_user_model_id(target_path: Option<&Path>) -> Result<String, String> {
+    let script = windows_app_user_model_id_script(target_path);
     let output = Command::new("powershell.exe")
         .creation_flags(CREATE_NO_WINDOW)
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .map_err(|error| format!("query the installed ChatGPT package: {error}"))?;
     if !output.status.success() {
-        return Err(
-            "ChatGPT is not installed yet, or Windows could not find its packaged app entry."
+        return Err(with_codex_update_log_location(
+            "ChatGPT is not installed yet, or Windows could not find the packaged app at the managed installation path."
                 .to_string(),
-        );
+        ));
     }
     let app_user_model_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if app_user_model_id.is_empty() {
         return Err("Windows returned an empty ChatGPT app identity. Open ChatGPT once from the Start menu, then try again.".to_string());
     }
     Ok(app_user_model_id)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_app_user_model_id_script(target_path: Option<&Path>) -> String {
+    let escaped_target_path = target_path
+        .map(|path| path.display().to_string().replace('\'', "''"))
+        .unwrap_or_default();
+    format!(
+        r#"$requestedPath = '{escaped_target_path}'
+$package = Get-AppxPackage -ErrorAction SilentlyContinue |
+    Where-Object {{
+        $_.Name -match '^(?i:OpenAI\.)?(ChatGPT|Codex)$' -and
+        ([string]::IsNullOrWhiteSpace($requestedPath) -or
+            $_.InstallLocation.TrimEnd('\') -eq $requestedPath.TrimEnd('\'))
+    }} |
+    Sort-Object Version -Descending |
+    Select-Object -First 1
+if ($null -eq $package) {{ exit 1 }}
+$manifest = Get-AppxPackageManifest -Package $package
+$application = $manifest.Package.Applications.Application | Select-Object -First 1
+if ($null -eq $application) {{ exit 1 }}
+Write-Output ($package.PackageFamilyName + '!' + $application.Id)"#
+    )
 }
 
 async fn latest_release() -> Result<PlatformVersion, String> {
@@ -1474,7 +1512,7 @@ fn update_target_installation() -> Option<LocalInstallation> {
 
 #[cfg(target_os = "windows")]
 fn local_installation() -> Option<LocalInstallation> {
-    let script = "$package = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '(?i)(chatgpt|codex)' } | Select-Object -First 1; if ($null -ne $package) { Write-Output $package.Version.ToString(); Write-Output $package.InstallLocation }";
+    let script = "$package = Get-AppxPackage -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^(?i:OpenAI\\.)?(ChatGPT|Codex)$' } | Sort-Object Version -Descending | Select-Object -First 1; if ($null -ne $package) { Write-Output $package.Version.ToString(); Write-Output $package.InstallLocation }";
     if let Ok(output) = Command::new("powershell.exe")
         .creation_flags(CREATE_NO_WINDOW)
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
@@ -2888,6 +2926,19 @@ image-path      : /tmp/ChatGPT.dmg
             super::windows_codex_process_selector(Some(r"C:\Users\O'Brien\Apps\ChatGPT.exe"));
 
         assert!(script.contains(r"C:\Users\O''Brien\Apps\ChatGPT.exe"));
+    }
+
+    #[test]
+    fn windows_app_identity_query_is_bound_to_the_selected_installation() {
+        let script = super::windows_app_user_model_id_script(Some(Path::new(
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.903.9818.0_x64",
+        )));
+
+        assert!(script.contains("InstallLocation.TrimEnd('\\') -eq $requestedPath.TrimEnd('\\')"));
+        assert!(script.contains("Sort-Object Version -Descending"));
+        assert!(!script.contains(
+            "Where-Object { $_.Name -match '(?i)(chatgpt|codex)' } | Select-Object -First 1"
+        ));
     }
 
     #[cfg(target_os = "macos")]
