@@ -11,8 +11,6 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
-#[cfg(target_os = "windows")]
-use std::io::Read;
 use std::io::Write;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -2385,31 +2383,45 @@ fn run_windows_command_with_timeout(
             timeout.as_secs()
         ),
     );
+    command.stdin(Stdio::null());
+    // Capture command output in files instead of pipes. PowerShell and WinGet
+    // can spawn descendants that inherit pipe handles, making a reader thread
+    // wait for EOF even after the parent command has exited.
+    let output_prefix = env::temp_dir().join(format!(
+        "autogateway-codex-command-{}-{}",
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    ));
+    let stdout_path = output_prefix.with_extension("stdout");
+    let stderr_path = output_prefix.with_extension("stderr");
+    let stdout_file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&stdout_path)
+        .map_err(|error| format!("capture standard output from {description}: {error}"))?;
+    let stderr_file = match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&stderr_path)
+    {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = fs::remove_file(&stdout_path);
+            return Err(format!(
+                "capture standard error from {description}: {error}"
+            ));
+        }
+    };
     command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stdout(Stdio::from(stdout_file))
+        .stderr(Stdio::from(stderr_file));
     let mut child = command.spawn().map_err(|error| {
         let message = format!("start {description}: {error}");
         log_codex_update("error", "command_start_failed", &message);
+        let _ = fs::remove_file(&stdout_path);
+        let _ = fs::remove_file(&stderr_path);
         message
     })?;
-    let mut stdout = child.stdout.take().ok_or_else(|| {
-        format!("capture standard output from {description}: pipe was not available")
-    })?;
-    let mut stderr = child.stderr.take().ok_or_else(|| {
-        format!("capture standard error from {description}: pipe was not available")
-    })?;
-    // Drain both pipes while the command runs. Waiting for process exit before
-    // reading can deadlock when PowerShell or WinGet fills a pipe with progress output.
-    let stdout_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let stderr_reader = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
     let started_at = Instant::now();
     let deadline = started_at + timeout;
     let mut next_heartbeat = started_at + Duration::from_secs(30);
@@ -2422,8 +2434,8 @@ fn run_windows_command_with_timeout(
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let stdout = collect_windows_command_stream(stdout_reader, description, "stdout")?;
-                let stderr = collect_windows_command_stream(stderr_reader, description, "stderr")?;
+                let (stdout, stderr) =
+                    read_windows_command_output(&stdout_path, &stderr_path, description)?;
                 let message = format!(
                     "{description} timed out after {} minutes; stdout={:?}; stderr={:?}. The installer will switch to the next Windows installation method.",
                     timeout.as_secs() / 60,
@@ -2450,8 +2462,7 @@ fn run_windows_command_with_timeout(
             }
         }
     };
-    let stdout = collect_windows_command_stream(stdout_reader, description, "stdout")?;
-    let stderr = collect_windows_command_stream(stderr_reader, description, "stderr")?;
+    let (stdout, stderr) = read_windows_command_output(&stdout_path, &stderr_path, description)?;
     let output = Output {
         status,
         stdout,
@@ -2475,15 +2486,18 @@ fn run_windows_command_with_timeout(
 }
 
 #[cfg(target_os = "windows")]
-fn collect_windows_command_stream(
-    reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+fn read_windows_command_output(
+    stdout_path: &Path,
+    stderr_path: &Path,
     description: &str,
-    stream_name: &str,
-) -> Result<Vec<u8>, String> {
-    reader
-        .join()
-        .map_err(|_| format!("read {stream_name} from {description}: reader thread panicked"))?
-        .map_err(|error| format!("read {stream_name} from {description}: {error}"))
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let stdout =
+        fs::read(stdout_path).map_err(|error| format!("read stdout from {description}: {error}"));
+    let stderr =
+        fs::read(stderr_path).map_err(|error| format!("read stderr from {description}: {error}"));
+    let _ = fs::remove_file(stdout_path);
+    let _ = fs::remove_file(stderr_path);
+    Ok((stdout?, stderr?))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
