@@ -12,6 +12,8 @@ use std::env;
 use std::fs;
 use std::fs::OpenOptions;
 use std::io::Write;
+#[cfg(any(target_os = "windows", test))]
+use std::io::{Read, Seek, SeekFrom};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -2322,26 +2324,7 @@ fn install_windows_msix(download_path: &Path) -> Result<(), String> {
         "msix_installation_started",
         format!("path={}", download_path.display()),
     );
-    let escaped_path = download_path.display().to_string().replace('\'', "''");
-    let script = format!(
-        r#"
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-$archive = [System.IO.Compression.ZipFile]::OpenRead('{escaped_path}')
-try {{
-    $entry = $archive.GetEntry('AppxManifest.xml')
-    if ($null -eq $entry) {{ throw 'the downloaded MSIX package does not contain AppxManifest.xml' }}
-    $reader = New-Object System.IO.StreamReader($entry.Open())
-    try {{ [xml]$manifest = $reader.ReadToEnd() }} finally {{ $reader.Dispose() }}
-    if ($manifest.Package.Identity.Name -notmatch '^(OpenAI\.)?(ChatGPT|Codex)$') {{
-        throw 'the downloaded MSIX package is not the official OpenAI.Codex package'
-    }}
-}} finally {{
-    $archive.Dispose()
-}}
-Add-AppxPackage -LiteralPath '{escaped_path}' -ForceApplicationShutdown -ErrorAction Stop
-"#
-    );
+    let script = windows_msix_install_script(download_path);
     let mut command = Command::new("powershell.exe");
     command.creation_flags(CREATE_NO_WINDOW).args([
         "-NoProfile",
@@ -2355,20 +2338,57 @@ Add-AppxPackage -LiteralPath '{escaped_path}' -ForceApplicationShutdown -ErrorAc
         "ChatGPT MSIX installation",
     )?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let details = if stderr.is_empty() { stdout } else { stderr };
-        let error = format!("install the official ChatGPT MSIX package: {details}");
+        let error = format!(
+            "install the official ChatGPT MSIX package: status={}; stdout={}; stderr={}",
+            output.status,
+            compact_command_output(&output.stdout),
+            compact_command_output(&output.stderr),
+        );
         log_codex_update("error", "msix_installation_failed", &error);
         return Err(error);
     }
-    fs::remove_file(download_path)
-        .map_err(|error| format!("remove the downloaded ChatGPT MSIX package: {error}"))?;
+    if let Err(error) = fs::remove_file(download_path) {
+        log_codex_update("warning", "installer_cleanup_failed", error.to_string());
+    }
     log_codex_update("info", "msix_installation_completed", "success");
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
+fn windows_msix_install_script(download_path: &Path) -> String {
+    let escaped_path = download_path.display().to_string().replace('\'', "''");
+    format!(
+        r#"
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
+try {{
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::OpenRead('{escaped_path}')
+try {{
+    $entry = $archive.GetEntry('AppxManifest.xml')
+    if ($null -eq $entry) {{ throw 'the downloaded MSIX package does not contain AppxManifest.xml' }}
+    $reader = New-Object System.IO.StreamReader($entry.Open())
+    try {{ [xml]$manifest = $reader.ReadToEnd() }} finally {{ $reader.Dispose() }}
+    if ($manifest.Package.Identity.Name -notmatch '^(OpenAI\.)?(ChatGPT|Codex)$') {{
+        throw 'the downloaded MSIX package is not the official OpenAI.Codex package'
+    }}
+}} finally {{
+    $archive.Dispose()
+}}
+Write-Output ('msix-registering|' + $manifest.Package.Identity.Name + '|' + $manifest.Package.Identity.Version)
+Add-AppxPackage -Path '{escaped_path}' -ForceApplicationShutdown -ErrorAction Stop
+Write-Output 'msix-registered'
+}} catch {{
+    [Console]::Error.WriteLine(($_ | Format-List * -Force | Out-String -Width 240))
+    [Console]::Error.WriteLine(('HRESULT=0x{{0:X8}}' -f $_.Exception.HResult))
+    exit 1
+}}
+"#
+    )
+}
+
+#[cfg(any(target_os = "windows", test))]
 fn run_windows_command_with_timeout(
     command: &mut Command,
     timeout: Duration,
@@ -2406,6 +2426,7 @@ fn run_windows_command_with_timeout(
     {
         Ok(file) => file,
         Err(error) => {
+            drop(stdout_file);
             let _ = fs::remove_file(&stdout_path);
             return Err(format!(
                 "capture standard error from {description}: {error}"
@@ -2415,7 +2436,11 @@ fn run_windows_command_with_timeout(
     command
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));
-    let mut child = command.spawn().map_err(|error| {
+    let spawned = command.spawn();
+    // Command retains its handles after spawn; release them before cleanup,
+    // especially on Windows where open file handles can prevent removal.
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    let mut child = spawned.map_err(|error| {
         let message = format!("start {description}: {error}");
         log_codex_update("error", "command_start_failed", &message);
         let _ = fs::remove_file(&stdout_path);
@@ -2426,26 +2451,31 @@ fn run_windows_command_with_timeout(
     let deadline = started_at + timeout;
     let mut next_heartbeat = started_at + Duration::from_secs(30);
     let status = loop {
-        match child
-            .try_wait()
-            .map_err(|error| format!("wait for {description}: {error}"))?
-        {
-            Some(status) => break status,
-            None if Instant::now() >= deadline => {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = read_windows_command_output(&stdout_path, &stderr_path, description);
+                let message = format!("wait for {description}: {error}");
+                log_codex_update("error", "command_wait_failed", &message);
+                return Err(message);
+            }
+            Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
                 let (stdout, stderr) =
-                    read_windows_command_output(&stdout_path, &stderr_path, description)?;
+                    read_windows_command_output(&stdout_path, &stderr_path, description);
                 let message = format!(
-                    "{description} timed out after {} minutes; stdout={:?}; stderr={:?}. The installer will switch to the next Windows installation method.",
-                    timeout.as_secs() / 60,
+                    "{description} timed out after {} seconds; stdout={:?}; stderr={:?}",
+                    timeout.as_secs(),
                     compact_command_output(&stdout),
                     compact_command_output(&stderr),
                 );
                 log_codex_update("error", "command_timed_out", &message);
                 return Err(message);
             }
-            None => {
+            Ok(None) => {
                 if Instant::now() >= next_heartbeat {
                     log_codex_update(
                         "info",
@@ -2462,7 +2492,7 @@ fn run_windows_command_with_timeout(
             }
         }
     };
-    let (stdout, stderr) = read_windows_command_output(&stdout_path, &stderr_path, description)?;
+    let (stdout, stderr) = read_windows_command_output(&stdout_path, &stderr_path, description);
     let output = Output {
         status,
         stdout,
@@ -2476,8 +2506,9 @@ fn run_windows_command_with_timeout(
         },
         "command_finished",
         format!(
-            "{description}; status={}; stdout={:?}; stderr={:?}",
+            "{description}; status={}; elapsed={}s; stdout={:?}; stderr={:?}",
             output.status,
+            started_at.elapsed().as_secs(),
             compact_command_output(&output.stdout),
             compact_command_output(&output.stderr),
         ),
@@ -2485,19 +2516,37 @@ fn run_windows_command_with_timeout(
     Ok(output)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn read_windows_command_output(
     stdout_path: &Path,
     stderr_path: &Path,
     description: &str,
-) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let stdout =
-        fs::read(stdout_path).map_err(|error| format!("read stdout from {description}: {error}"));
-    let stderr =
-        fs::read(stderr_path).map_err(|error| format!("read stderr from {description}: {error}"));
+) -> (Vec<u8>, Vec<u8>) {
+    let read_stream = |path: &Path| {
+        let result = (|| -> std::io::Result<Vec<u8>> {
+            let mut file = fs::File::open(path)?;
+            let length = file.metadata()?.len();
+            let start = length.saturating_sub(64 * 1024);
+            file.seek(SeekFrom::Start(start))?;
+            let mut bytes = Vec::new();
+            file.take(length - start).read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })();
+        result.unwrap_or_else(|error| {
+            // Diagnostics must not turn a successful installation into failure.
+            log_codex_update(
+                "warning",
+                "command_output_read_failed",
+                format!("{description}; path={}; error={error}", path.display()),
+            );
+            Vec::new()
+        })
+    };
+    let stdout = read_stream(stdout_path);
+    let stderr = read_stream(stderr_path);
     let _ = fs::remove_file(stdout_path);
     let _ = fs::remove_file(stderr_path);
-    Ok((stdout?, stderr?))
+    (stdout, stderr)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -2548,12 +2597,137 @@ mod tests {
     };
     use std::cmp::Ordering;
     use std::fs;
+    use std::path::Path;
     #[cfg(target_os = "macos")]
-    use std::path::{Path, PathBuf};
-    #[cfg(target_os = "macos")]
+    use std::path::PathBuf;
     use std::process::Command;
-    #[cfg(target_os = "macos")]
     use std::time::Duration;
+
+    fn test_command(unix_script: &str, windows_script: &str) -> Command {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            let _ = unix_script;
+            let mut command = Command::new("powershell.exe");
+            command.creation_flags(super::CREATE_NO_WINDOW).args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                windows_script,
+            ]);
+            command
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = windows_script;
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", unix_script]);
+            command
+        }
+    }
+
+    #[test]
+    fn windows_command_capture_keeps_the_real_failure_and_both_streams() {
+        let mut command = test_command(
+            "printf before-error; printf deployment-failed >&2; exit 7",
+            "[Console]::Out.Write('before-error'); [Console]::Error.Write('deployment-failed'); exit 7",
+        );
+        let output = super::run_windows_command_with_timeout(
+            &mut command,
+            Duration::from_secs(10),
+            "capture failure test",
+        )
+        .expect("capture command outcome");
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout, b"before-error");
+        assert_eq!(output.stderr, b"deployment-failed");
+    }
+
+    #[test]
+    fn windows_command_capture_handles_output_larger_than_a_pipe_buffer() {
+        let mut command = test_command(
+            "i=0; while [ $i -lt 10000 ]; do printf 0123456789abcdef; printf fedcba9876543210 >&2; i=$((i+1)); done",
+            "[Console]::Out.Write(('0123456789abcdef' * 10000)); [Console]::Error.Write(('fedcba9876543210' * 10000))",
+        );
+        let output = super::run_windows_command_with_timeout(
+            &mut command,
+            Duration::from_secs(15),
+            "large output test",
+        )
+        .expect("large output must not stall the process");
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 64 * 1024);
+        assert_eq!(output.stderr.len(), 64 * 1024);
+        assert!(output.stdout.ends_with(b"0123456789abcdef"));
+        assert!(output.stderr.ends_with(b"fedcba9876543210"));
+    }
+
+    #[test]
+    fn windows_command_capture_respects_the_timeout() {
+        let mut command = test_command("sleep 4", "Start-Sleep -Seconds 4");
+        let started = std::time::Instant::now();
+        let error = super::run_windows_command_with_timeout(
+            &mut command,
+            Duration::from_millis(500),
+            "timeout test",
+        )
+        .expect_err("the sleeping process must time out");
+        assert!(error.contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn missing_diagnostic_file_does_not_discard_the_other_output() {
+        let root = std::env::temp_dir().join(format!("ag-output-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let stdout = root.join("missing.stdout");
+        let stderr = root.join("test.stderr");
+        fs::write(&stderr, b"deployment-details").unwrap();
+        let (out, err) = super::read_windows_command_output(&stdout, &stderr, "missing file test");
+        assert!(out.is_empty());
+        assert_eq!(err, b"deployment-details");
+        assert!(!stderr.exists());
+        fs::remove_dir(&root).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn msix_script_parameters_match_the_installed_windows_appx_module() {
+        let script =
+            super::windows_msix_install_script(Path::new(r"C:\Users\O'Brien\Test [package].msix"));
+        let escaped = script.replace('\'', "''");
+        let check = format!(
+            r#"
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput('{escaped}', [ref]$tokens, [ref]$errors)
+if ($errors.Count -ne 0) {{ throw ($errors | Out-String) }}
+$parameters = (Get-Command Appx\Add-AppxPackage).Parameters
+$commands = $ast.FindAll({{param($node) $node -is [System.Management.Automation.Language.CommandAst] -and $node.GetCommandName() -eq 'Add-AppxPackage'}}, $true)
+if ($commands.Count -ne 1) {{ throw 'expected one package deployment command' }}
+foreach ($element in $commands[0].CommandElements) {{
+    if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and -not $parameters.ContainsKey($element.ParameterName)) {{
+        throw ('Unsupported Appx parameter: ' + $element.ParameterName)
+    }}
+}}
+Write-Output 'parameters-validated'
+"#
+        );
+        let mut command = test_command("", &check);
+        let output = super::run_windows_command_with_timeout(
+            &mut command,
+            Duration::from_secs(30),
+            "Appx parameter contract test",
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("parameters-validated"));
+    }
 
     #[test]
     fn compares_numeric_version_segments() {

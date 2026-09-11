@@ -69,9 +69,27 @@ export type CodexInstallProgress = {
 export function isCodexExternalInstallationComplete(
   status: CodexAppStatus,
   forceUpdate: boolean,
+  targetVersion?: string,
 ): boolean {
   if (!status.installed) return false;
-  return !forceUpdate || status.updateAvailable === false;
+  if (!forceUpdate) return true;
+  if (!targetVersion) return status.updateAvailable === false;
+  // The local-only status endpoint does not return updateAvailable. Compare
+  // against the version selected before starting this installation instead.
+  if (
+    !/^\d+(\.\d+)*$/.test(targetVersion) ||
+    !status.localVersion ||
+    !/^\d+(\.\d+)*$/.test(status.localVersion)
+  ) {
+    return false;
+  }
+  const installed = status.localVersion.split(".").map(Number);
+  const expected = targetVersion.split(".").map(Number);
+  for (let index = 0; index < Math.max(installed.length, expected.length); index++) {
+    const difference = (installed[index] ?? 0) - (expected[index] ?? 0);
+    if (difference !== 0) return difference > 0;
+  }
+  return true;
 }
 
 export type ConfigurationResult = {

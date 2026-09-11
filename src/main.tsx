@@ -115,7 +115,7 @@ const defaultEndpoint = import.meta.env.VITE_AUTO_GATEWAY_API_BASE_URL;
 const consoleBaseUrl = import.meta.env.VITE_AUTO_GATEWAY_CONSOLE_BASE_URL;
 const setupCompletedStoragePrefix = "autogateway.desktop.setup-completed";
 const notificationPageSize = 5;
-const externalInstallationTimeoutMs = 5 * 60 * 1000;
+const externalInstallationTimeoutMs = 15 * 60 * 1000;
 const designPreviewState = import.meta.env.DEV
   ? new URLSearchParams(window.location.search).get("preview")
   : null;
@@ -214,6 +214,7 @@ function App() {
   const [externalInstallationMessage, setExternalInstallationMessage] =
     useState("");
   const externalInstallationStartedAt = useRef<number | null>(null);
+  const externalInstallationTargetVersion = useRef<string | undefined>(undefined);
   const storeAutoRetryAttempted = useRef(false);
   const [setupCompleted, setSetupCompleted] = useState(false);
   const [accountBalance, setAccountBalance] = useState("");
@@ -249,6 +250,7 @@ function App() {
   const [desktopInstallerUrl, setDesktopInstallerUrl] = useState("");
   const [openingDesktopInstaller, setOpeningDesktopInstaller] = useState(false);
   const [homeActionError, setHomeActionError] = useState("");
+  const [codexInstallNotice, setCodexInstallNotice] = useState("");
   const [codexOpenPhase, setCodexOpenPhase] =
     useState<CodexOpenPhase>("closed");
   const [selectedStep, setSelectedStep] = useState<WizardStep>(1);
@@ -388,6 +390,8 @@ function App() {
     storeAutoRetryAttempted.current = false;
     setSelectedStep(1);
     setHomeActionError("");
+    setCodexInstallNotice("");
+    externalInstallationTargetVersion.current = undefined;
     setMessage(nextMessage);
     void updateTrayStatus("", tr("trayUnavailable"));
   }
@@ -654,7 +658,7 @@ function App() {
     return () => window.clearInterval(interval);
   }, [installingCodex, installProgress?.stage]);
 
-  function completeExternalInstallation(nextAppStatus: CodexAppStatus) {
+  async function completeExternalInstallation(nextAppStatus: CodexAppStatus) {
     externalInstallationStartedAt.current = null;
     setAppStatus(nextAppStatus);
     setAwaitingExternalInstallation(false);
@@ -663,9 +667,21 @@ function App() {
     setCanRetryCachedInstaller(false);
     setExternalInstallationMessage("");
     setInstallationTimedOut(false);
-    setMessage(
-      tr(storeInstallForceUpdate ? "updatedReady" : "installedReady"),
+    const completedMessage = tr(
+      storeInstallForceUpdate ? "updatedReady" : "installedReady",
     );
+    setMessage(completedMessage);
+    setCodexInstallNotice(completedMessage);
+    if (storeInstallForceUpdate) {
+      try {
+        await openCodex();
+        const reopened = await waitForCodexOpen();
+        setCodexOpenPhase(reopened ? "opened" : "closed");
+        if (!reopened) setHomeActionError(tr("codexUpdatedReopenFailed"));
+      } catch {
+        setHomeActionError(tr("codexUpdatedReopenFailed"));
+      }
+    }
   }
 
   function timeoutExternalInstallation(nextAppStatus: CodexAppStatus) {
@@ -680,6 +696,7 @@ function App() {
     );
     setExternalInstallationMessage("");
     setMessage(tr("windowsInstallationTimedOut"));
+    setHomeActionError(tr("windowsInstallationTimedOut"));
   }
 
   useEffect(() => {
@@ -690,16 +707,20 @@ function App() {
       if (checking) return;
       checking = true;
       try {
-        const nextAppStatus = await getLocalCodexAppStatus();
+        const nextAppStatus =
+          storeInstallForceUpdate && !externalInstallationTargetVersion.current
+            ? await getCodexAppStatus()
+            : await getLocalCodexAppStatus();
         if (!active) return;
         const startedAt = externalInstallationStartedAt.current;
         if (
           isCodexExternalInstallationComplete(
             nextAppStatus,
             storeInstallForceUpdate,
+            externalInstallationTargetVersion.current,
           )
         ) {
-          completeExternalInstallation(nextAppStatus);
+          await completeExternalInstallation(nextAppStatus);
         } else if (
           startedAt !== null &&
           Date.now() - startedAt >= externalInstallationTimeoutMs
@@ -1260,6 +1281,12 @@ function App() {
     automaticRetry = false,
     forceRedownload = false,
   ) {
+    if (installingCodex) return;
+    setHomeActionError("");
+    setCodexInstallNotice("");
+    externalInstallationTargetVersion.current = forceUpdate
+      ? appStatus?.latestVersion
+      : undefined;
     externalInstallationStartedAt.current = null;
     setAwaitingExternalInstallation(false);
     setStoreInstallForceUpdate(forceUpdate);
@@ -1281,11 +1308,15 @@ function App() {
     try {
       if (forceUpdate) {
         const downloadedUpdate = await downloadCodexUpdate(forceRedownload);
+        if (/^\d+(\.\d+)*$/.test(downloadedUpdate.version)) {
+          externalInstallationTargetVersion.current = downloadedUpdate.version;
+        }
         setMessage(tr("downloadReadyForCodexUpdate"));
 
         if (await isCodexRunning()) {
           if (!(await confirm(tr("codexCloseConfirm")))) {
             setMessage(tr("codexUpdateCancelled"));
+            setCodexInstallNotice(tr("codexUpdateCancelled"));
             return;
           }
           setInstallProgress({ stage: "closing", downloadedBytes: 0 });
@@ -1313,18 +1344,21 @@ function App() {
           setCanRetryCachedInstaller(result.canRetryCachedInstaller);
           setExternalInstallationMessage(result.message);
           setInstallProgress({
-            stage: "windows-installing",
+            stage: "windows-store",
             downloadedBytes: 0,
           });
           setMessage(result.message);
           return;
         }
+        if (!result.installed) throw new Error(result.message);
         await refreshStatus(false);
         const reopened = await waitForCodexOpen();
         setCodexOpenPhase(reopened ? "opened" : "closed");
         setMessage(
           tr(reopened ? "codexUpdatedAndReopened" : "codexUpdatedReopenFailed"),
         );
+        setCodexInstallNotice(tr("updatedReady"));
+        if (!reopened) setHomeActionError(tr("codexUpdatedReopenFailed"));
         return;
       }
 
@@ -1337,19 +1371,23 @@ function App() {
         setCanRetryCachedInstaller(result.canRetryCachedInstaller);
         setExternalInstallationMessage(result.message);
         setInstallProgress({
-          stage: "windows-installing",
+          stage: "windows-store",
           downloadedBytes: 0,
         });
         setMessage(result.message);
         return;
       }
+      if (!result.installed) throw new Error(result.message);
       setAwaitingExternalInstallation(false);
       setCanRetryCachedInstaller(false);
       setExternalInstallationMessage("");
       await refreshStatus();
       setMessage(tr(forceUpdate ? "updatedReady" : "installedReady"));
+      setCodexInstallNotice(tr(forceUpdate ? "updatedReady" : "installedReady"));
     } catch (error) {
-      setMessage(tr("installationFailed", { error: String(error) }));
+      const failure = tr("installationFailed", { error: String(error) });
+      setMessage(failure);
+      setHomeActionError(failure);
     } finally {
       if (!waitingForExternalInstallation) {
         setInstallingCodex(false);
@@ -1454,9 +1492,18 @@ function App() {
 
   async function checkExternalInstallation() {
     try {
-      const nextAppStatus = await getLocalCodexAppStatus();
-      if (nextAppStatus.installed) {
-        completeExternalInstallation(nextAppStatus);
+      const nextAppStatus =
+        storeInstallForceUpdate && !externalInstallationTargetVersion.current
+          ? await getCodexAppStatus()
+          : await getLocalCodexAppStatus();
+      if (
+        isCodexExternalInstallationComplete(
+          nextAppStatus,
+          storeInstallForceUpdate,
+          externalInstallationTargetVersion.current,
+        )
+      ) {
+        await completeExternalInstallation(nextAppStatus);
       } else if (
         externalInstallationStartedAt.current !== null &&
         Date.now() - externalInstallationStartedAt.current >=
@@ -1469,6 +1516,7 @@ function App() {
       }
     } catch (error) {
       setMessage(tr("readStatusFailed", { error: String(error) }));
+      setHomeActionError(tr("readStatusFailed", { error: String(error) }));
     }
   }
 
@@ -1965,6 +2013,9 @@ function App() {
                 {homeActionError}
               </p>
             ) : null}
+            {codexInstallNotice ? (
+              <p role="status">{codexInstallNotice}</p>
+            ) : null}
             {accountSubscription ? (
               <section
                 className="homeSubscriptionCard"
@@ -2219,7 +2270,9 @@ function App() {
                   <>
                     <div className="progressStatusRow">
                       <span className="progressSpinner" aria-hidden="true" />
-                      <small>{installStageLabel(installProgress.stage)}</small>
+                      <small>
+                        {externalInstallationMessage || installStageLabel(installProgress.stage)}
+                      </small>
                     </div>
                     <div
                       className="indeterminateProgressTrack"
@@ -2540,6 +2593,11 @@ function App() {
             <p className="sectionKicker">{tr("officialDesktopApp")}</p>
             <h1>{tr("installTitle")}</h1>
             <p className="lead">{tr("installLead")}</p>
+            {homeActionError ? (
+              <p className="homeActionMessage" role="alert">
+                {homeActionError}
+              </p>
+            ) : null}
             <div
               className={
                 appInstalled && !updateAvailable

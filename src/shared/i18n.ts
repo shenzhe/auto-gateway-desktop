@@ -87,12 +87,12 @@ const dictionaries = {
     windowsInstallingElapsed:
       "Windows is registering the downloaded Codex package. Elapsed: {elapsed}. This step can take several minutes; keep the app open.",
     windowsFallbackInstalling:
-      "Direct registration took too long. Trying the Windows package manager automatically…",
+      "Direct installation could not finish. Trying the Windows package manager automatically…",
     windowsStoreOpening:
       "The automatic installers could not finish. Opening Microsoft Store to complete the update…",
     windowsInstallationTimedOutTitle: "Windows registration is taking too long",
     windowsInstallationTimedOut:
-      "Windows did not finish registering ChatGPT within 5 minutes. Download the installer again and retry.",
+      "The installation could not be confirmed within 15 minutes. Check its status in Microsoft Store before retrying.",
     retryCodexInstallation: "Download and install again",
     verifyingCodex: "Verifying the installed Codex version…",
     downloadPercent: "{percent}% downloaded",
@@ -691,12 +691,12 @@ const dictionaries = {
     windowsInstallingElapsed:
       "Windows 正在注册已下载的 Codex 安装包，已等待 {elapsed}。此步骤可能持续数分钟，请勿关闭应用。",
     windowsFallbackInstalling:
-      "直接安装耗时过长，正在自动尝试 Windows 软件包管理器…",
+      "直接安装未能完成，正在自动尝试 Windows 软件包管理器…",
     windowsStoreOpening:
       "自动安装未能完成，正在打开 Microsoft Store 继续更新…",
     windowsInstallationTimedOutTitle: "Windows 注册超时",
     windowsInstallationTimedOut:
-      "Windows 在 5 分钟内没有完成 ChatGPT 注册。请重新下载安装包并重试。",
+      "等待 15 分钟后仍未能确认安装完成。请先在 Microsoft Store 查看安装状态，再决定是否重试。",
     retryCodexInstallation: "重新下载并安装",
     verifyingCodex: "正在验证已安装的 Codex 版本…",
     downloadPercent: "已下载 {percent}%",

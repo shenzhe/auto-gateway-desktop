@@ -159,4 +159,25 @@ describe("Codex external installation completion", () => {
       ),
     ).toBe(true);
   });
+
+  it.each([
+    ["26.803.10989.0", "26.818.8289.0", false],
+    ["26.818.8289.0", "26.818.8289.0", true],
+    ["26.909.1000.0", "26.818.8289.0", true],
+    ["26.9.10.0", "26.10.1.0", false],
+    ["26.818.8289", "26.818.8289.0", true],
+    [undefined, "26.818.8289.0", false],
+    ["unknown", "26.818.8289.0", false],
+  ])("checks local-only version %s against target %s", (localVersion, targetVersion, complete) => {
+    expect(isCodexExternalInstallationComplete(
+      { ...installedStatus, localVersion }, true, targetVersion,
+    )).toBe(complete);
+  });
+
+  it("does not let a stale latest flag override the selected update version", () => {
+    expect(isCodexExternalInstallationComplete(
+      { ...installedStatus, localVersion: "26.803.10989.0", updateAvailable: false },
+      true, "26.818.8289.0",
+    )).toBe(false);
+  });
 });

@@ -93,3 +93,7 @@ jobs:
         run: |
           npm ci
           npm run tauri build -- --target x86_64-pc-windows-msvc --bundles nsis --no-sign --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      - name: Test Windows installer commands
+        working-directory: src-tauri
+        run: cargo test codex_app::tests
