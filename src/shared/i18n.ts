@@ -83,7 +83,13 @@ const dictionaries = {
     codexUpdatedReopenFailed:
       "Codex was updated, but it did not reopen automatically. Open Codex to finish.",
     windowsInstalling:
-      "Windows is registering ChatGPT. This can take several minutes; keep this page open.",
+      "Windows is registering the downloaded Codex package. This can take several minutes; keep this page open.",
+    windowsInstallingElapsed:
+      "Windows is registering the downloaded Codex package. Elapsed: {elapsed}. This step can take several minutes; keep the app open.",
+    windowsFallbackInstalling:
+      "Direct registration took too long. Trying the Windows package manager automatically…",
+    windowsStoreOpening:
+      "The automatic installers could not finish. Opening Microsoft Store to complete the update…",
     windowsInstallationTimedOutTitle: "Windows registration is taking too long",
     windowsInstallationTimedOut:
       "Windows did not finish registering ChatGPT within 5 minutes. Download the installer again and retry.",
@@ -171,6 +177,7 @@ const dictionaries = {
     updateCheckUnavailable:
       "The local installation was found, but the latest version could not be checked right now.",
     localVersion: "Installed version",
+    managedCodexPath: "Managed installation: {path}",
     latestVersion: "Latest version",
     versionUnavailable: "Unavailable",
     notInstalled: "Codex is not installed yet",
@@ -179,7 +186,7 @@ const dictionaries = {
     checkingInstallation: "Checking installation status…",
     previous: "Previous",
     next: "Next",
-    installAutomatically: "Install Codex automatically",
+    autoInstall: "Install automatically",
     installingCodex: "Installing Codex…",
     updateNow: "Update Codex",
     updatingCodex: "Updating Codex…",
@@ -680,7 +687,13 @@ const dictionaries = {
     codexUpdatedReopenFailed:
       "Codex 已更新，但未能自动重新打开。请手动打开 Codex 完成操作。",
     windowsInstalling:
-      "Windows 正在注册 ChatGPT，可能需要几分钟；请保持此页面打开。",
+      "Windows 正在注册已下载的 Codex 安装包，可能需要几分钟；请保持此页面打开。",
+    windowsInstallingElapsed:
+      "Windows 正在注册已下载的 Codex 安装包，已等待 {elapsed}。此步骤可能持续数分钟，请勿关闭应用。",
+    windowsFallbackInstalling:
+      "直接安装耗时过长，正在自动尝试 Windows 软件包管理器…",
+    windowsStoreOpening:
+      "自动安装未能完成，正在打开 Microsoft Store 继续更新…",
     windowsInstallationTimedOutTitle: "Windows 注册超时",
     windowsInstallationTimedOut:
       "Windows 在 5 分钟内没有完成 ChatGPT 注册。请重新下载安装包并重试。",
@@ -758,6 +771,7 @@ const dictionaries = {
     installedDescription: "已安装官方 ChatGPT 桌面应用，其中包含 Codex。",
     updateCheckUnavailable: "已发现本地安装，但当前无法检查最新版本。",
     localVersion: "本机版本",
+    managedCodexPath: "管理安装位置：{path}",
     latestVersion: "最新版本",
     versionUnavailable: "暂不可用",
     notInstalled: "尚未安装 Codex",
@@ -765,7 +779,7 @@ const dictionaries = {
     checkingInstallation: "正在检查安装状态…",
     previous: "上一步",
     next: "下一步",
-    installAutomatically: "自动安装 Codex",
+    autoInstall: "自动安装",
     installingCodex: "正在安装 Codex…",
     updateNow: "更新 Codex",
     updatingCodex: "正在更新 Codex…",

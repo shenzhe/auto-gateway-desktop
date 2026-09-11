@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::fs::OpenOptions;
+#[cfg(target_os = "windows")]
+use std::io::Read;
 use std::io::Write;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -1024,12 +1026,10 @@ pub fn is_installed_app_running() -> Result<bool, String> {
 fn is_installed_app_running_at(_target_path: Option<&str>) -> Result<bool, String> {
     #[cfg(target_os = "macos")]
     {
-        for process_name in ["ChatGPT", "Codex"] {
-            if process_name_running(process_name)? {
-                return Ok(true);
-            }
-        }
-        return Ok(false);
+        let Some(installation) = update_target_installation() else {
+            return Ok(false);
+        };
+        return Ok(macos_app_is_running(&installation.path));
     }
     #[cfg(target_os = "windows")]
     {
@@ -1062,7 +1062,7 @@ pub fn close_installed_app_at(target_path: Option<String>) -> Result<(), String>
             .map(PathBuf::from)
             .map(|path| vec![path])
             .unwrap_or_else(|| {
-                running_installation()
+                update_target_installation()
                     .map(|installation| vec![installation.path])
                     .unwrap_or_default()
             });
@@ -1198,22 +1198,6 @@ $processes = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {{
     }}
 }})"#
     )
-}
-
-#[cfg(target_os = "macos")]
-fn process_name_running(process_name: &str) -> Result<bool, String> {
-    let output = Command::new("pgrep")
-        .args(["-x", process_name])
-        .output()
-        .map_err(|error| format!("check whether {process_name} is open: {error}"))?;
-    match output.status.code() {
-        Some(0) => Ok(true),
-        Some(1) => Ok(false),
-        _ => Err(format!(
-            "check whether {process_name} is open: pgrep exited with {}",
-            output.status
-        )),
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1479,45 +1463,8 @@ fn installed_version_at_path(_path: &Path) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn running_installation() -> Option<LocalInstallation> {
-    let output = Command::new("ps")
-        .args(["ax", "-o", "command="])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())?;
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .find_map(macos_main_app_path)
-        .map(read_macos_installation)
-}
-
-#[cfg(target_os = "macos")]
-fn macos_main_app_path(command: &str) -> Option<PathBuf> {
-    ["ChatGPT", "Codex"].into_iter().find_map(|executable| {
-        let marker = format!("/Contents/MacOS/{executable}");
-        let marker_start = command.find(&marker)?;
-        let marker_end = marker_start + marker.len();
-        if command[marker_end..]
-            .chars()
-            .next()
-            .is_some_and(|character| !character.is_whitespace() && character != '"')
-        {
-            return None;
-        }
-        let raw_path = command[..marker_start]
-            .trim()
-            .trim_start_matches('"')
-            .trim_end_matches('/');
-        let path = PathBuf::from(raw_path);
-        (path.extension().and_then(|extension| extension.to_str()) == Some("app")
-            && !raw_path.contains("/Contents/"))
-        .then_some(path)
-    })
-}
-
-#[cfg(target_os = "macos")]
 fn update_target_installation() -> Option<LocalInstallation> {
-    running_installation().or_else(local_installation)
+    local_installation()
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1976,11 +1923,7 @@ fn copy_macos_app(
     let destinations = if let Some(destination) = preferred_destination {
         vec![destination.to_path_buf()]
     } else {
-        let mut destinations = vec![PathBuf::from("/Applications/ChatGPT.app")];
-        if let Some(home) = dirs::home_dir() {
-            destinations.push(home.join("Applications/ChatGPT.app"));
-        }
-        destinations
+        vec![PathBuf::from("/Applications/ChatGPT.app")]
     };
     let mut last_error = String::new();
     for destination in destinations {
@@ -2276,7 +2219,7 @@ async fn install_with_microsoft_store_fallback(
         "store_fallback_started",
         format!("forceUpdate={force_update}; directError={mirror_error}"),
     );
-    emit_install_progress(app, "installing", 0, None);
+    emit_install_progress(app, "windows-fallback", 0, None);
     let winget_result =
         tauri::async_runtime::spawn_blocking(move || install_with_winget(force_update))
             .await
@@ -2286,6 +2229,7 @@ async fn install_with_microsoft_store_fallback(
         if let Err(error) = &winget_result {
             log_codex_update("error", "winget_fallback_failed", error);
         }
+        emit_install_progress(app, "windows-store", 0, None);
         open_microsoft_store()?;
         let reason = mirror_error.trim();
         let message = if reason.is_empty() {
@@ -2450,45 +2394,96 @@ fn run_windows_command_with_timeout(
         log_codex_update("error", "command_start_failed", &message);
         message
     })?;
-    let deadline = Instant::now() + timeout;
-    loop {
+    let mut stdout = child.stdout.take().ok_or_else(|| {
+        format!("capture standard output from {description}: pipe was not available")
+    })?;
+    let mut stderr = child.stderr.take().ok_or_else(|| {
+        format!("capture standard error from {description}: pipe was not available")
+    })?;
+    // Drain both pipes while the command runs. Waiting for process exit before
+    // reading can deadlock when PowerShell or WinGet fills a pipe with progress output.
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let started_at = Instant::now();
+    let deadline = started_at + timeout;
+    let mut next_heartbeat = started_at + Duration::from_secs(30);
+    let status = loop {
         match child
             .try_wait()
             .map_err(|error| format!("wait for {description}: {error}"))?
         {
-            Some(_) => {
-                let output = child
-                    .wait_with_output()
-                    .map_err(|error| format!("read {description} output: {error}"))?;
-                log_codex_update(
-                    if output.status.success() {
-                        "info"
-                    } else {
-                        "error"
-                    },
-                    "command_finished",
-                    format!(
-                        "{description}; status={}; stdout={:?}; stderr={:?}",
-                        output.status,
-                        compact_command_output(&output.stdout),
-                        compact_command_output(&output.stderr),
-                    ),
-                );
-                return Ok(output);
-            }
+            Some(status) => break status,
             None if Instant::now() >= deadline => {
                 let _ = child.kill();
-                let _ = child.wait_with_output();
+                let _ = child.wait();
+                let stdout = collect_windows_command_stream(stdout_reader, description, "stdout")?;
+                let stderr = collect_windows_command_stream(stderr_reader, description, "stderr")?;
                 let message = format!(
-                    "{description} timed out after {} minutes. Try again, or complete the installation in Microsoft Store.",
-                    timeout.as_secs() / 60
+                    "{description} timed out after {} minutes; stdout={:?}; stderr={:?}. The installer will switch to the next Windows installation method.",
+                    timeout.as_secs() / 60,
+                    compact_command_output(&stdout),
+                    compact_command_output(&stderr),
                 );
                 log_codex_update("error", "command_timed_out", &message);
                 return Err(message);
             }
-            None => thread::sleep(Duration::from_millis(500)),
+            None => {
+                if Instant::now() >= next_heartbeat {
+                    log_codex_update(
+                        "info",
+                        "command_still_running",
+                        format!(
+                            "{description}; elapsed={}s; timeout={}s",
+                            started_at.elapsed().as_secs(),
+                            timeout.as_secs(),
+                        ),
+                    );
+                    next_heartbeat += Duration::from_secs(30);
+                }
+                thread::sleep(Duration::from_millis(500));
+            }
         }
-    }
+    };
+    let stdout = collect_windows_command_stream(stdout_reader, description, "stdout")?;
+    let stderr = collect_windows_command_stream(stderr_reader, description, "stderr")?;
+    let output = Output {
+        status,
+        stdout,
+        stderr,
+    };
+    log_codex_update(
+        if output.status.success() {
+            "info"
+        } else {
+            "error"
+        },
+        "command_finished",
+        format!(
+            "{description}; status={}; stdout={:?}; stderr={:?}",
+            output.status,
+            compact_command_output(&output.stdout),
+            compact_command_output(&output.stderr),
+        ),
+    );
+    Ok(output)
+}
+
+#[cfg(target_os = "windows")]
+fn collect_windows_command_stream(
+    reader: thread::JoinHandle<std::io::Result<Vec<u8>>>,
+    description: &str,
+    stream_name: &str,
+) -> Result<Vec<u8>, String> {
+    reader
+        .join()
+        .map_err(|_| format!("read {stream_name} from {description}: reader thread panicked"))?
+        .map_err(|error| format!("read {stream_name} from {description}: {error}"))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -2502,15 +2497,9 @@ fn install_downloaded_app(
 
 #[cfg(target_os = "macos")]
 fn installation_candidates() -> Vec<PathBuf> {
-    let mut paths = vec![
-        PathBuf::from("/Applications/ChatGPT.app"),
-        PathBuf::from("/Applications/Codex.app"),
-    ];
-    if let Some(home) = dirs::home_dir() {
-        paths.push(home.join("Applications/ChatGPT.app"));
-        paths.push(home.join("Applications/Codex.app"));
-    }
-    paths
+    // macOS permits user-level duplicate app bundles; keep management scoped
+    // to the canonical system installation.
+    vec![PathBuf::from("/Applications/ChatGPT.app")]
 }
 
 #[cfg(target_os = "windows")]
@@ -2641,24 +2630,10 @@ image-path      : /tmp/ChatGPT.dmg
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn detects_the_running_macos_app_bundle_from_its_main_process() {
+    fn manages_only_the_system_chatgpt_application() {
         assert_eq!(
-            super::macos_main_app_path("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"),
-            Some(std::path::PathBuf::from("/Applications/ChatGPT.app"))
-        );
-        assert_eq!(
-            super::macos_main_app_path(
-                "\"/Users/example/Applications/Codex.app/Contents/MacOS/Codex\" --profile"
-            ),
-            Some(std::path::PathBuf::from(
-                "/Users/example/Applications/Codex.app"
-            ))
-        );
-        assert_eq!(
-            super::macos_main_app_path(
-                "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)"
-            ),
-            None
+            super::installation_candidates(),
+            [PathBuf::from("/Applications/ChatGPT.app")],
         );
     }
 

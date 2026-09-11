@@ -738,6 +738,21 @@ h1 {
   min-height: 132px;
   align-content: center;
 }
+.installNoticeSummary {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 20px;
+  align-items: center;
+}
+.installNoticeCopy {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+.installNoticeAction {
+  min-width: 112px;
+  white-space: nowrap;
+}
 .signInActionPanel {
   display: grid;
   justify-items: center;
@@ -893,6 +908,15 @@ h1 {
   font-size: 14px;
   font-variant-numeric: tabular-nums;
   font-weight: 680;
+}
+.managedCodexPath {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--subtle);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .installProgress {
   display: grid;
@@ -2515,6 +2539,12 @@ h1 {
   }
   .versionGrid {
     grid-template-columns: 1fr;
+  }
+  .installNoticeSummary {
+    grid-template-columns: 1fr;
+  }
+  .installNoticeAction {
+    width: 100%;
   }
   .versionUpdateButton {
     width: 100%;

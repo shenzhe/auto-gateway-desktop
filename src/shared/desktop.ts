@@ -53,6 +53,8 @@ export type CodexInstallProgress = {
     | "unmounting"
     | "installing"
     | "windows-installing"
+    | "windows-fallback"
+    | "windows-store"
     | "verifying"
     | "opening"
     | "complete";

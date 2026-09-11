@@ -233,6 +233,8 @@ function App() {
   const [desktopAppVersion, setDesktopAppVersion] = useState("");
   const [installProgress, setInstallProgress] =
     useState<CodexInstallProgress | null>(null);
+  const [installStageElapsedSeconds, setInstallStageElapsedSeconds] =
+    useState(0);
   const [configurationPhase, setConfigurationPhase] =
     useState<ConfigurationPhase>("idle");
   const [configurationError, setConfigurationError] = useState("");
@@ -274,6 +276,37 @@ function App() {
   const downloadSpeed = formatDownloadSpeed(
     installProgress?.speedBytesPerSecond,
   );
+
+  function installStageLabel(stage: string): string {
+    switch (stage) {
+      case "selecting-source":
+        return tr("selectingDownloadSource");
+      case "closing":
+        return tr("closingCodex");
+      case "mounting":
+        return tr("mountingCodex");
+      case "copying":
+        return tr("copyingCodex");
+      case "verifying-signature":
+        return tr("verifyingCodexSignature");
+      case "unmounting":
+        return tr("unmountingCodex");
+      case "windows-installing":
+        return tr("windowsInstallingElapsed", {
+          elapsed: formatRemainingDuration(installStageElapsedSeconds),
+        });
+      case "windows-fallback":
+        return tr("windowsFallbackInstalling");
+      case "windows-store":
+        return tr("windowsStoreOpening");
+      case "verifying":
+        return tr("verifyingCodex");
+      case "opening":
+        return tr("openingCodex");
+      default:
+        return tr("replacingCodex");
+    }
+  }
   const downloadedSize = formatDataSize(installProgress?.downloadedBytes);
   const totalDownloadSize = formatDataSize(installProgress?.totalBytes);
   const downloadRemaining = formatRemainingDuration(
@@ -580,6 +613,10 @@ function App() {
         if (payload.stage === "unmounting") setMessage(tr("unmountingCodex"));
         if (payload.stage === "windows-installing")
           setMessage(tr("windowsInstalling"));
+        if (payload.stage === "windows-fallback")
+          setMessage(tr("windowsFallbackInstalling"));
+        if (payload.stage === "windows-store")
+          setMessage(tr("windowsStoreOpening"));
         if (payload.stage === "verifying") setMessage(tr("verifyingCodex"));
         if (payload.stage === "opening") setMessage(tr("openingCodex"));
       },
@@ -596,6 +633,26 @@ function App() {
       unlisten?.();
     };
   }, [locale, designPreviewState]);
+
+  useEffect(() => {
+    const stage = installProgress?.stage;
+    const tracksElapsedTime =
+      stage === "windows-installing" ||
+      stage === "windows-fallback" ||
+      stage === "windows-store";
+    if (!installingCodex || !tracksElapsedTime) {
+      setInstallStageElapsedSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setInstallStageElapsedSeconds(0);
+    const interval = window.setInterval(() => {
+      setInstallStageElapsedSeconds(
+        Math.max(0, Math.floor((Date.now() - startedAt) / 1000)),
+      );
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [installingCodex, installProgress?.stage]);
 
   function completeExternalInstallation(nextAppStatus: CodexAppStatus) {
     externalInstallationStartedAt.current = null;
@@ -1236,8 +1293,14 @@ function App() {
           await closeCodex(downloadedUpdate.targetPath);
         }
 
-        setInstallProgress({ stage: "installing", downloadedBytes: 0 });
-        setMessage(tr("replacingCodex"));
+        const windowsInstallation = /Windows/i.test(navigator.userAgent);
+        setInstallProgress({
+          stage: windowsInstallation ? "windows-installing" : "installing",
+          downloadedBytes: 0,
+        });
+        setMessage(
+          tr(windowsInstallation ? "windowsInstalling" : "replacingCodex"),
+        );
         const result = await applyCodexUpdate(
           downloadedUpdate.version,
           downloadedUpdate.targetPath,
@@ -2069,6 +2132,14 @@ function App() {
                 <span>{tr("localVersion")}</span>
                 <strong>{version}</strong>
                 <small>{versionStatus}</small>
+                {appStatus?.path ? (
+                  <small
+                    className="managedCodexPath"
+                    title={appStatus.path}
+                  >
+                    {tr("managedCodexPath", { path: appStatus.path })}
+                  </small>
+                ) : null}
                 <div className="homeVersionActions">
                   {!updateAvailable ? (
                     <button
@@ -2145,30 +2216,20 @@ function App() {
                     ) : null}
                   </>
                 ) : (
-                  <div className="progressStatusRow">
-                    <span className="progressSpinner" aria-hidden="true" />
-                    <small>
-                      {installProgress.stage === "selecting-source"
-                        ? tr("selectingDownloadSource")
-                        : installProgress.stage === "closing"
-                          ? tr("closingCodex")
-                          : installProgress.stage === "mounting"
-                            ? tr("mountingCodex")
-                            : installProgress.stage === "copying"
-                              ? tr("copyingCodex")
-                              : installProgress.stage === "verifying-signature"
-                                ? tr("verifyingCodexSignature")
-                                : installProgress.stage === "replacing"
-                                  ? tr("replacingCodex")
-                                  : installProgress.stage === "unmounting"
-                                    ? tr("unmountingCodex")
-                          : installProgress.stage === "verifying"
-                            ? tr("verifyingCodex")
-                            : installProgress.stage === "opening"
-                              ? tr("openingCodex")
-                              : tr("replacingCodex")}
-                    </small>
-                  </div>
+                  <>
+                    <div className="progressStatusRow">
+                      <span className="progressSpinner" aria-hidden="true" />
+                      <small>{installStageLabel(installProgress.stage)}</small>
+                    </div>
+                    <div
+                      className="indeterminateProgressTrack"
+                      role="progressbar"
+                      aria-label={installStageLabel(installProgress.stage)}
+                      aria-valuetext={installStageLabel(installProgress.stage)}
+                    >
+                      <span />
+                    </div>
+                  </>
                 )}
               </div>
             ) : null}
@@ -2486,30 +2547,50 @@ function App() {
                   : "notice warning installNotice setupNotice"
               }
             >
-              <strong>
-                {installationTimedOut
-                  ? tr("windowsInstallationTimedOutTitle")
-                  : updateAvailable
-                    ? tr("updateAvailable")
-                    : appInstalled
-                      ? appStatus?.updateAvailable === false
-                        ? tr("upToDate")
-                        : tr("installed")
-                      : tr("notInstalled")}
-              </strong>
-              <span>
-                {installationTimedOut
-                  ? tr("windowsInstallationTimedOut")
-                  : updateAvailable
-                    ? tr("updateAvailableDescription")
-                    : appInstalled
-                      ? appStatus?.updateCheckError
-                        ? tr("updateCheckUnavailable")
-                        : tr("installedDescription")
-                      : appStatus
-                        ? tr("notInstalledDescription")
-                        : tr("checkingInstallation")}
-              </span>
+              <div className="installNoticeSummary">
+                <div className="installNoticeCopy">
+                  <strong>
+                    {installationTimedOut
+                      ? tr("windowsInstallationTimedOutTitle")
+                      : updateAvailable
+                        ? tr("updateAvailable")
+                        : appInstalled
+                          ? appStatus?.updateAvailable === false
+                            ? tr("upToDate")
+                            : tr("installed")
+                          : tr("notInstalled")}
+                  </strong>
+                  <span>
+                    {installationTimedOut
+                      ? tr("windowsInstallationTimedOut")
+                      : updateAvailable
+                        ? tr("updateAvailableDescription")
+                        : appInstalled
+                          ? appStatus?.updateCheckError
+                            ? tr("updateCheckUnavailable")
+                            : tr("installedDescription")
+                          : appStatus
+                            ? tr("notInstalledDescription")
+                            : tr("checkingInstallation")}
+                  </span>
+                </div>
+                {!appInstalled &&
+                appStatus &&
+                !installationTimedOut &&
+                !awaitingExternalInstallation ? (
+                  <button
+                    className="primaryButton installNoticeAction"
+                    disabled={installingCodex}
+                    onClick={() => void handleInstallCodex()}
+                  >
+                    {installingCodex
+                      ? installPercent === undefined
+                        ? tr("installingCodex")
+                        : `${tr("installingCodex")} ${installPercent}%`
+                      : tr("autoInstall")}
+                  </button>
+                ) : null}
+              </div>
               {installationTimedOut ? (
                 <div className="installRecoveryActions">
                   <button
@@ -2598,7 +2679,9 @@ function App() {
                 </div>
               ) : null}
               {installingCodex &&
-              installProgress?.stage === "windows-installing" ? (
+              (installProgress?.stage === "windows-installing" ||
+                installProgress?.stage === "windows-fallback" ||
+                installProgress?.stage === "windows-store") ? (
                 <div
                   className="installProgress indeterminateProgress"
                   aria-live="polite"
@@ -2607,14 +2690,15 @@ function App() {
                   <div className="progressStatusRow">
                     <span className="progressSpinner" aria-hidden="true" />
                     <small>
-                      {externalInstallationMessage || tr("windowsInstalling")}
+                      {externalInstallationMessage ||
+                        installStageLabel(installProgress.stage)}
                     </small>
                   </div>
                   <div
                     className="indeterminateProgressTrack"
                     role="progressbar"
-                    aria-label={tr("windowsInstalling")}
-                    aria-valuetext={tr("windowsInstalling")}
+                    aria-label={installStageLabel(installProgress.stage)}
+                    aria-valuetext={installStageLabel(installProgress.stage)}
                   >
                     <span />
                   </div>
@@ -2637,25 +2721,7 @@ function App() {
                 >
                   <div className="progressStatusRow">
                     <span className="progressSpinner" aria-hidden="true" />
-                    <small>
-                      {installProgress.stage === "verifying"
-                        ? tr("verifyingCodex")
-                        : installProgress.stage === "opening"
-                          ? tr("openingCodex")
-                          : installProgress.stage === "mounting"
-                            ? tr("mountingCodex")
-                            : installProgress.stage === "copying"
-                              ? tr("copyingCodex")
-                              : installProgress.stage === "verifying-signature"
-                                ? tr("verifyingCodexSignature")
-                                : installProgress.stage === "replacing"
-                                  ? tr("replacingCodex")
-                                  : installProgress.stage === "unmounting"
-                                    ? tr("unmountingCodex")
-                          : installProgress.stage === "closing"
-                            ? tr("closingCodex")
-                          : tr("replacingCodex")}
-                    </small>
+                    <small>{installStageLabel(installProgress.stage)}</small>
                   </div>
                   <div
                     className="indeterminateProgressTrack"
@@ -2688,19 +2754,7 @@ function App() {
               >
                 {tr("checkInstallation")}
               </button>
-            ) : (
-              <button
-                className="primaryButton"
-                disabled={installingCodex}
-                onClick={() => void handleInstallCodex()}
-              >
-                {installingCodex
-                  ? installPercent === undefined
-                    ? tr("installingCodex")
-                    : `${tr("installingCodex")} ${installPercent}%`
-                  : tr("installAutomatically")}
-              </button>
-            )}
+            ) : null}
           </div>
         </section>
       );
