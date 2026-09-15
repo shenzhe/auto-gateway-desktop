@@ -45,6 +45,7 @@ const TRUSTED_WINDOWS_DOWNLOAD_HOSTS: &[&str] = &[
     "codexapp.agentsmirror.com",
     "codexapp-r2.agentsmirror.com",
     "cdn.autogateway.cc",
+    "ag.guangla.com",
     "get.microsoft.com",
 ];
 #[cfg(any(target_os = "windows", test))]
@@ -160,6 +161,8 @@ struct PlatformVersion {
     #[serde(default)]
     download_url: Option<String>,
     #[serde(default)]
+    download_urls: Vec<String>,
+    #[serde(default)]
     fallback_url: Option<String>,
     #[serde(default)]
     artifacts: HashMap<String, PlatformArtifact>,
@@ -172,6 +175,8 @@ struct PlatformArtifact {
     direct_url: Option<String>,
     #[serde(default)]
     download_url: Option<String>,
+    #[serde(default)]
+    download_urls: Vec<String>,
     #[serde(default)]
     fallback_url: Option<String>,
 }
@@ -1314,6 +1319,9 @@ fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String
     if let Some(latest) = latest {
         append_artifact_urls(&mut urls, latest, native_architecture());
         append_url(&mut urls, latest.download_url.as_deref());
+        for candidate in &latest.download_urls {
+            append_url(&mut urls, Some(candidate));
+        }
         append_url(&mut urls, latest.fallback_url.as_deref());
     }
     let fallback = download_url()?.to_string();
@@ -1330,10 +1338,11 @@ fn download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String
 
 #[cfg(any(target_os = "windows", test))]
 fn windows_download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>, String> {
-    let mut urls = Vec::with_capacity(4);
+    let mut urls = Vec::with_capacity(8);
     if let Some(latest) = latest {
         append_trusted_windows_artifact_urls(&mut urls, latest, native_architecture());
         append_trusted_windows_download_url(&mut urls, latest.download_url.as_deref());
+        append_trusted_windows_download_urls(&mut urls, &latest.download_urls);
         append_trusted_windows_download_url(&mut urls, latest.fallback_url.as_deref());
     }
     if urls.is_empty() {
@@ -1357,6 +1366,9 @@ fn append_artifact_urls(urls: &mut Vec<String>, release: &PlatformVersion, archi
     };
     append_url(urls, artifact.direct_url.as_deref());
     append_url(urls, artifact.download_url.as_deref());
+    for candidate in &artifact.download_urls {
+        append_url(urls, Some(candidate));
+    }
     append_url(urls, artifact.fallback_url.as_deref());
 }
 
@@ -1381,7 +1393,15 @@ fn append_trusted_windows_artifact_urls(
     };
     append_trusted_windows_download_url(urls, artifact.direct_url.as_deref());
     append_trusted_windows_download_url(urls, artifact.download_url.as_deref());
+    append_trusted_windows_download_urls(urls, &artifact.download_urls);
     append_trusted_windows_download_url(urls, artifact.fallback_url.as_deref());
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn append_trusted_windows_download_urls(urls: &mut Vec<String>, candidates: &[String]) {
+    for candidate in candidates {
+        append_trusted_windows_download_url(urls, Some(candidate));
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -1402,17 +1422,26 @@ fn is_trusted_windows_download_url(candidate: &str) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
-    if url.scheme() != "https"
-        || url.port_or_known_default() != Some(443)
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || !TRUSTED_WINDOWS_DOWNLOAD_HOSTS.contains(&host)
-    {
+    if !url.username().is_empty() || url.password().is_some() {
         return false;
     }
 
     let path = url.path();
     let normalized_path = path.to_ascii_lowercase();
+    if host == "ag.guangla.com" {
+        return url.scheme() == "http"
+            && url.port_or_known_default() == Some(80)
+            && (normalized_path.starts_with("/desktop-codex/windows-x64/")
+                || normalized_path.starts_with("/desktop-codex/windows-arm64/"))
+            && normalized_path.ends_with(".msix");
+    }
+    if url.scheme() != "https"
+        || url.port_or_known_default() != Some(443)
+        || !TRUSTED_WINDOWS_DOWNLOAD_HOSTS.contains(&host)
+    {
+        return false;
+    }
+
     if matches!(
         host,
         "codexapp.agentsmirror.com" | "codexapp-r2.agentsmirror.com"
@@ -2906,6 +2935,44 @@ image-path      : /tmp/ChatGPT.dmg
         assert!(!is_trusted_windows_download_url(
             "http://codexapp.agentsmirror.com/latest/win-x64"
         ));
+        assert!(is_trusted_windows_download_url(
+            "http://ag.guangla.com/desktop-codex/windows-x64/26.908.4834.0/ChatGPT-Installer.msix"
+        ));
+        assert!(!is_trusted_windows_download_url(
+            "http://ag.guangla.com/desktop-codex/windows-x64/26.908.4834.0/ChatGPT-Installer.exe"
+        ));
+        assert!(!is_trusted_windows_download_url(
+            "http://ag.guangla.com/other/ChatGPT-Installer.msix"
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_includes_the_service_returned_acceleration_source() {
+        let architecture = native_architecture();
+        let acceleration = format!(
+            "http://ag.guangla.com/desktop-codex/macos-{architecture}/26.908.70816/ChatGPT.dmg"
+        );
+        let release: super::PlatformVersion = serde_json::from_str(&format!(
+            r#"{{"version":"26.908.70816","artifacts":{{"{architecture}":{{"downloadUrls":["{acceleration}"]}}}}}}"#,
+        ))
+        .expect("decode acceleration source");
+        let urls = super::download_urls(Some(&release)).expect("build macOS candidates");
+        assert!(urls.contains(&acceleration));
+    }
+
+    #[test]
+    fn windows_includes_the_service_returned_acceleration_source() {
+        let architecture = native_architecture();
+        let acceleration = format!(
+            "http://ag.guangla.com/desktop-codex/windows-{architecture}/26.908.4834.0/ChatGPT-Installer.msix"
+        );
+        let release: super::PlatformVersion = serde_json::from_str(&format!(
+            r#"{{"version":"26.908.4834.0","artifacts":{{"{architecture}":{{"downloadUrls":["{acceleration}"]}}}}}}"#,
+        ))
+        .expect("decode acceleration source");
+        let urls = windows_download_urls(Some(&release)).expect("build Windows candidates");
+        assert!(urls.contains(&acceleration));
     }
 
     #[test]
