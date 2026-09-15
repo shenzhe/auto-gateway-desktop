@@ -46,16 +46,11 @@ const TRUSTED_WINDOWS_DOWNLOAD_HOSTS: &[&str] = &[
     "codexapp-r2.agentsmirror.com",
     "cdn.autogateway.cc",
     "ag.guangla.com",
-    "get.microsoft.com",
 ];
-#[cfg(any(target_os = "windows", test))]
-const WINDOWS_STORE_PRODUCT_ID: &str = "9PLM9XGG6VKS";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[cfg(target_os = "windows")]
 const WINDOWS_MSIX_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-#[cfg(target_os = "windows")]
-const WINDOWS_STORE_COMMAND_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 #[cfg(target_os = "windows")]
 const WINDOWS_QUIT_GRACE_PERIOD: Duration = Duration::from_secs(8);
 #[cfg(target_os = "windows")]
@@ -162,6 +157,7 @@ struct PlatformVersion {
     download_url: Option<String>,
     #[serde(default)]
     download_urls: Vec<String>,
+    #[cfg(target_os = "macos")]
     #[serde(default)]
     fallback_url: Option<String>,
     #[serde(default)]
@@ -177,6 +173,7 @@ struct PlatformArtifact {
     download_url: Option<String>,
     #[serde(default)]
     download_urls: Vec<String>,
+    #[cfg(target_os = "macos")]
     #[serde(default)]
     fallback_url: Option<String>,
 }
@@ -271,16 +268,14 @@ pub async fn install(
         });
     }
 
-    // The version service provides the preferred upstream mirror first, then
-    // our R2 replica. Microsoft Store remains the Windows last resort.
+    // The version service provides the preferred upstream mirror, CDN, and
+    // configured acceleration sources.
     let latest_release = latest_release().await.ok();
     let download_urls = match download_urls(latest_release.as_ref()) {
         Ok(urls) => urls,
         Err(error) => {
             #[cfg(target_os = "windows")]
-            {
-                return install_with_microsoft_store_fallback(app, force_update, &error).await;
-            }
+            return Err(with_codex_update_log_location(error));
             #[cfg(not(target_os = "windows"))]
             return Err(error);
         }
@@ -310,14 +305,9 @@ pub async fn install(
                     let _ = fs::remove_file(completed_download_marker(&download_path));
                 } else {
                     #[cfg(target_os = "windows")]
-                    {
-                        return install_with_microsoft_store_fallback(
-                            app,
-                            force_update,
-                            &format!("reinstall the completed ChatGPT installer: {error}"),
-                        )
-                        .await;
-                    }
+                    return Err(with_codex_update_log_location(format!(
+                        "reinstall the completed ChatGPT installer: {error}"
+                    )));
                     #[cfg(not(target_os = "windows"))]
                     return Err(error);
                 }
@@ -328,9 +318,7 @@ pub async fn install(
     if installer_result.is_none() {
         if let Err(error) = download_installer(app, &download_urls, &download_path).await {
             #[cfg(target_os = "windows")]
-            {
-                return install_with_microsoft_store_fallback(app, force_update, &error).await;
-            }
+            return Err(with_codex_update_log_location(error));
             #[cfg(not(target_os = "windows"))]
             return Err(error);
         }
@@ -338,9 +326,7 @@ pub async fn install(
             Ok(result) => installer_result = Some(result),
             Err(error) => {
                 #[cfg(target_os = "windows")]
-                {
-                    return install_with_microsoft_store_fallback(app, force_update, &error).await;
-                }
+                return Err(with_codex_update_log_location(error));
                 #[cfg(not(target_os = "windows"))]
                 return Err(error);
             }
@@ -356,9 +342,7 @@ pub async fn install(
         let error =
             "the official ChatGPT installer finished, but the application could not be found";
         #[cfg(target_os = "windows")]
-        {
-            return install_with_microsoft_store_fallback(app, force_update, error).await;
-        }
+        return Err(with_codex_update_log_location(error.to_string()));
         #[cfg(not(target_os = "windows"))]
         return Err(format!(
             "{error}. Open the installer once, then return here and check again."
@@ -540,12 +524,9 @@ pub async fn apply_update(
         install_downloaded_path(app, &download_path, preferred_destination.as_deref()).await
     {
         #[cfg(target_os = "windows")]
-        {
-            log_codex_update("error", "direct_msix_update_failed", &error);
-            return install_with_microsoft_store_fallback(app, true, &error)
-                .await
-                .map_err(with_codex_update_log_location);
-        }
+        log_codex_update("error", "direct_msix_update_failed", &error);
+        #[cfg(target_os = "windows")]
+        return Err(with_codex_update_log_location(error));
         #[cfg(not(target_os = "windows"))]
         return Err(with_codex_update_log_location(error));
     }
@@ -662,7 +643,7 @@ async fn download_installer(
         }
     }
     Err(format!(
-        "download the ChatGPT installer from the mirror, R2, and official source: {}",
+        "download the ChatGPT installer from the mirror, CDN, and acceleration sources: {}",
         errors.join("; ")
     ))
 }
@@ -1343,13 +1324,9 @@ fn windows_download_urls(latest: Option<&PlatformVersion>) -> Result<Vec<String>
         append_trusted_windows_artifact_urls(&mut urls, latest, native_architecture());
         append_trusted_windows_download_url(&mut urls, latest.download_url.as_deref());
         append_trusted_windows_download_urls(&mut urls, &latest.download_urls);
-        append_trusted_windows_download_url(&mut urls, latest.fallback_url.as_deref());
     }
     if urls.is_empty() {
-        return Err(
-            "trusted ChatGPT MSIX sources are unavailable; opening Microsoft Store instead"
-                .to_string(),
-        );
+        return Err("trusted ChatGPT MSIX mirror and CDN sources are unavailable".to_string());
     }
     Ok(urls)
 }
@@ -1394,7 +1371,6 @@ fn append_trusted_windows_artifact_urls(
     append_trusted_windows_download_url(urls, artifact.direct_url.as_deref());
     append_trusted_windows_download_url(urls, artifact.download_url.as_deref());
     append_trusted_windows_download_urls(urls, &artifact.download_urls);
-    append_trusted_windows_download_url(urls, artifact.fallback_url.as_deref());
 }
 
 #[cfg(any(target_os = "windows", test))]
@@ -1452,7 +1428,7 @@ fn is_trusted_windows_download_url(candidate: &str) -> bool {
     if host == "cdn.autogateway.cc" {
         return normalized_path.ends_with(".msix");
     }
-    host == "get.microsoft.com" && path == format!("/installer/download/{WINDOWS_STORE_PRODUCT_ID}")
+    false
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -2206,175 +2182,6 @@ fn macos_app_is_running(app_path: &Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
-fn install_with_winget(force_update: bool) -> Result<(), String> {
-    let mut attempts = Vec::new();
-    if force_update {
-        attempts.push(vec![
-            "upgrade",
-            "--id",
-            WINDOWS_STORE_PRODUCT_ID,
-            "--exact",
-            "--source",
-            "msstore",
-        ]);
-    }
-    attempts.push(vec![
-        "install",
-        "--id",
-        WINDOWS_STORE_PRODUCT_ID,
-        "--exact",
-        "--source",
-        "msstore",
-    ]);
-
-    let mut last_error = None;
-    for arguments in attempts {
-        log_codex_update(
-            "info",
-            "winget_attempt_started",
-            format!(
-                "operation={}; productId={WINDOWS_STORE_PRODUCT_ID}",
-                arguments[0]
-            ),
-        );
-        let mut command = Command::new("winget.exe");
-        command
-            .creation_flags(CREATE_NO_WINDOW)
-            .args(arguments.iter().copied().chain([
-                "--silent",
-                "--accept-package-agreements",
-                "--accept-source-agreements",
-                "--disable-interactivity",
-            ]));
-        let output = run_windows_command_with_timeout(
-            &mut command,
-            WINDOWS_STORE_COMMAND_TIMEOUT,
-            "Microsoft Store installation command",
-        )?;
-        if output.status.success() {
-            log_codex_update(
-                "info",
-                "winget_attempt_completed",
-                format!("operation={}", arguments[0]),
-            );
-            return Ok(());
-        }
-        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let error = if details.is_empty() { stdout } else { details };
-        log_codex_update(
-            "error",
-            "winget_attempt_failed",
-            format!("operation={}; error={error}", arguments[0]),
-        );
-        last_error = Some(error);
-    }
-
-    Err(last_error
-        .filter(|error| !error.is_empty())
-        .unwrap_or_else(|| "WinGet could not install the Microsoft Store package".to_string()))
-}
-
-#[cfg(target_os = "windows")]
-async fn install_with_microsoft_store_fallback(
-    app: &AppHandle,
-    force_update: bool,
-    mirror_error: &str,
-) -> Result<CodexInstallResult, String> {
-    log_codex_update(
-        "warning",
-        "store_fallback_started",
-        format!("forceUpdate={force_update}; directError={mirror_error}"),
-    );
-    emit_install_progress(app, "windows-fallback", 0, None);
-    let winget_result =
-        tauri::async_runtime::spawn_blocking(move || install_with_winget(force_update))
-            .await
-            .map_err(|error| format!("wait for the Microsoft Store installation: {error}"))?;
-
-    if winget_result.is_err() {
-        if let Err(error) = &winget_result {
-            log_codex_update("error", "winget_fallback_failed", error);
-        }
-        emit_install_progress(app, "windows-store", 0, None);
-        open_microsoft_store()?;
-        let reason = mirror_error.trim();
-        let message = if reason.is_empty() {
-            "Microsoft Store has opened. Finish the ChatGPT installation there; this page will continue automatically.".to_string()
-        } else {
-            format!(
-                "The direct ChatGPT installer could not be completed ({reason}). Microsoft Store has opened; finish the installation there and this page will continue automatically."
-            )
-        };
-        return Ok(CodexInstallResult {
-            installed: false,
-            path: None,
-            message,
-            awaiting_installation: true,
-            can_retry_cached_installer: completed_installer_available(),
-        });
-    }
-
-    emit_install_progress(app, "verifying", 0, None);
-    let status = status().await;
-    if status.installed {
-        if force_update {
-            if let (Some(expected), Some(installed)) = (
-                status.latest_version.as_deref(),
-                status.local_version.as_deref(),
-            ) {
-                if compare_versions(installed, expected) == Ordering::Less {
-                    return Err(format!("the update finished, but version {installed} is still installed; expected {expected}"));
-                }
-            }
-            open_installed_app()?;
-        }
-        emit_install_progress(app, "complete", 0, None);
-        return Ok(CodexInstallResult {
-            installed: true,
-            path: status.path,
-            message: if force_update {
-                "ChatGPT and Codex were updated successfully.".to_string()
-            } else {
-                "ChatGPT and Codex are installed and ready for the next step.".to_string()
-            },
-            awaiting_installation: false,
-            can_retry_cached_installer: false,
-        });
-    }
-
-    Ok(CodexInstallResult {
-        installed: false,
-        path: None,
-        message: if mirror_error.trim().is_empty() {
-            "Microsoft Store is installing ChatGPT. This page will continue automatically when the installation finishes.".to_string()
-        } else {
-            format!(
-                "The direct ChatGPT installer could not be completed ({mirror_error}). Microsoft Store is installing ChatGPT; this page will continue automatically when the installation finishes."
-            )
-        },
-        awaiting_installation: true,
-        can_retry_cached_installer: completed_installer_available(),
-    })
-}
-
-#[cfg(target_os = "windows")]
-fn open_microsoft_store() -> Result<(), String> {
-    let store_uri = format!("ms-windows-store://pdp/?productid={WINDOWS_STORE_PRODUCT_ID}");
-    log_codex_update(
-        "info",
-        "microsoft_store_opening",
-        format!("productId={WINDOWS_STORE_PRODUCT_ID}"),
-    );
-    Command::new("explorer.exe")
-        .creation_flags(CREATE_NO_WINDOW)
-        .arg(store_uri)
-        .spawn()
-        .map_err(|error| format!("open Microsoft Store: {error}"))?;
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
 fn install_downloaded_app(
     _app: &AppHandle,
     download_path: &Path,
@@ -2893,18 +2700,16 @@ image-path      : /tmp/ChatGPT.dmg
     }
 
     #[test]
-    fn windows_keeps_trusted_mirror_and_r2_candidates_for_speed_ranking() {
+    fn windows_keeps_trusted_mirror_and_cdn_candidates_for_speed_ranking() {
         let architecture = native_architecture();
         let mirror = format!("https://codexapp.agentsmirror.com/latest/win-{architecture}");
         let r2 = "https://cdn.autogateway.cc/downloads/codex/OpenAI.Codex_26.730.8199.0.msix";
-        let microsoft =
-            "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi";
         let release: PlatformVersion = serde_json::from_str(&format!(
-            r#"{{"version":"26.730.8199.0","artifacts":{{"{architecture}":{{"directUrl":"{mirror}","downloadUrl":"{r2}","fallbackUrl":"{microsoft}"}}}},"downloadUrl":"{r2}","fallbackUrl":"{microsoft}"}}"#,
+            r#"{{"version":"26.730.8199.0","artifacts":{{"{architecture}":{{"directUrl":"{mirror}","downloadUrl":"{r2}","fallbackUrl":"https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi"}}}},"downloadUrl":"{r2}","fallbackUrl":"https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi"}}"#,
         ))
         .expect("decode version service response");
         let urls = windows_download_urls(Some(&release)).expect("build installer candidates");
-        assert_eq!(urls, [mirror, r2.to_string(), microsoft.to_string(),]);
+        assert_eq!(urls, [mirror, r2.to_string(),]);
     }
 
     #[test]
@@ -2920,7 +2725,7 @@ image-path      : /tmp/ChatGPT.dmg
         let redirected_mirror =
             mirror.replace("codexapp.agentsmirror.com", "codexapp-r2.agentsmirror.com");
         assert!(is_trusted_windows_download_url(&redirected_mirror));
-        assert!(is_trusted_windows_download_url(
+        assert!(!is_trusted_windows_download_url(
             "https://get.microsoft.com/installer/download/9PLM9XGG6VKS?cid=website_cta_psi"
         ));
         assert!(!is_trusted_windows_download_url(
