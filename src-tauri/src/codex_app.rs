@@ -50,6 +50,10 @@ const TRUSTED_WINDOWS_DOWNLOAD_HOSTS: &[&str] = &[
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 #[cfg(target_os = "windows")]
+const WINDOWS_STORE_PRODUCT_ID: &str = "9PLM9XGG6VKS";
+#[cfg(target_os = "windows")]
+const WINDOWS_STORE_COMMAND_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+#[cfg(target_os = "windows")]
 const WINDOWS_MSIX_INSTALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 #[cfg(target_os = "windows")]
 const WINDOWS_QUIT_GRACE_PERIOD: Duration = Duration::from_secs(8);
@@ -275,7 +279,7 @@ pub async fn install(
         Ok(urls) => urls,
         Err(error) => {
             #[cfg(target_os = "windows")]
-            return Err(with_codex_update_log_location(error));
+            return install_with_microsoft_store_fallback(app, force_update, &error).await;
             #[cfg(not(target_os = "windows"))]
             return Err(error);
         }
@@ -296,7 +300,20 @@ pub async fn install(
         .map(|installation| installation.path.clone());
     emit_install_progress(app, "preparing", 0, None);
     let mut installer_result = None;
-    if download_path.is_file() {
+    #[cfg(target_os = "windows")]
+    let use_cached_installer = if completed_download_marker(&download_path).is_file() {
+        match windows_installer_cache_is_valid(&download_path) {
+            Ok(valid) => valid,
+            Err(error) => {
+                return install_with_microsoft_store_fallback(app, force_update, &error).await
+            }
+        }
+    } else {
+        false
+    };
+    #[cfg(not(target_os = "windows"))]
+    let use_cached_installer = download_path.is_file();
+    if use_cached_installer {
         let cached_download_complete = completed_download_marker(&download_path).is_file();
         match install_downloaded_path(app, &download_path, preferred_destination.as_deref()).await {
             Ok(result) => installer_result = Some(result),
@@ -305,9 +322,7 @@ pub async fn install(
                     let _ = fs::remove_file(completed_download_marker(&download_path));
                 } else {
                     #[cfg(target_os = "windows")]
-                    return Err(with_codex_update_log_location(format!(
-                        "reinstall the completed ChatGPT installer: {error}"
-                    )));
+                    return install_with_microsoft_store_fallback(app, force_update, &error).await;
                     #[cfg(not(target_os = "windows"))]
                     return Err(error);
                 }
@@ -318,7 +333,7 @@ pub async fn install(
     if installer_result.is_none() {
         if let Err(error) = download_installer(app, &download_urls, &download_path).await {
             #[cfg(target_os = "windows")]
-            return Err(with_codex_update_log_location(error));
+            return install_with_microsoft_store_fallback(app, force_update, &error).await;
             #[cfg(not(target_os = "windows"))]
             return Err(error);
         }
@@ -326,7 +341,7 @@ pub async fn install(
             Ok(result) => installer_result = Some(result),
             Err(error) => {
                 #[cfg(target_os = "windows")]
-                return Err(with_codex_update_log_location(error));
+                return install_with_microsoft_store_fallback(app, force_update, &error).await;
                 #[cfg(not(target_os = "windows"))]
                 return Err(error);
             }
@@ -342,7 +357,7 @@ pub async fn install(
         let error =
             "the official ChatGPT installer finished, but the application could not be found";
         #[cfg(target_os = "windows")]
-        return Err(with_codex_update_log_location(error.to_string()));
+        return install_with_microsoft_store_fallback(app, force_update, error).await;
         #[cfg(not(target_os = "windows"))]
         return Err(format!(
             "{error}. Open the installer once, then return here and check again."
@@ -354,9 +369,16 @@ pub async fn install(
         let installed_version = status.local_version.as_deref();
         if let (Some(expected), Some(installed)) = (expected_version, installed_version) {
             if compare_versions(installed, expected) == Ordering::Less {
-                return Err(format!("the update finished, but version {installed} is still installed; expected {expected}"));
+                let error = format!("the update finished, but version {installed} is still installed; expected {expected}");
+                #[cfg(target_os = "windows")]
+                return install_with_microsoft_store_fallback(app, true, &error).await;
+                #[cfg(not(target_os = "windows"))]
+                return Err(error);
             }
         }
+        #[cfg(target_os = "windows")]
+        open_installed_app_at(status.path.as_deref().map(Path::new))?;
+        #[cfg(not(target_os = "windows"))]
         open_installed_app_at(
             existing_installation
                 .as_ref()
@@ -526,13 +548,23 @@ pub async fn apply_update(
         #[cfg(target_os = "windows")]
         log_codex_update("error", "direct_msix_update_failed", &error);
         #[cfg(target_os = "windows")]
-        return Err(with_codex_update_log_location(error));
+        return install_with_microsoft_store_fallback(app, true, &error)
+            .await
+            .map_err(with_codex_update_log_location);
         #[cfg(not(target_os = "windows"))]
         return Err(with_codex_update_log_location(error));
     }
     emit_install_progress(app, "verifying", 0, None);
     let status = status().await;
     if !status.installed {
+        #[cfg(target_os = "windows")]
+        return install_with_microsoft_store_fallback(
+            app,
+            true,
+            "The installer completed but the application was not found",
+        )
+        .await;
+        #[cfg(not(target_os = "windows"))]
         return Err(
             "the Codex installer finished, but the application could not be found".to_string(),
         );
@@ -546,13 +578,20 @@ pub async fn apply_update(
         installed_version.as_deref(),
     ) {
         if compare_versions(installed, expected) == Ordering::Less {
-            return Err(format!(
+            let error = format!(
                 "the update finished, but version {installed} is still installed; expected {expected}"
-            ));
+            );
+            #[cfg(target_os = "windows")]
+            return install_with_microsoft_store_fallback(app, true, &error).await;
+            #[cfg(not(target_os = "windows"))]
+            return Err(error);
         }
     }
     let _ = fs::remove_file(completed_download_marker(&download_path));
     emit_install_progress(app, "opening", 0, None);
+    // AppX installation paths contain the package version and change on update.
+    #[cfg(target_os = "windows")]
+    let preferred_destination = status.path.as_ref().map(PathBuf::from);
     open_installed_app_at(preferred_destination.as_deref())?;
     emit_install_progress(app, "complete", 0, None);
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -586,6 +625,13 @@ async fn install_downloaded_path(
     download_path: &Path,
     preferred_destination: Option<&Path>,
 ) -> Result<InstallerResult, String> {
+    #[cfg(target_os = "windows")]
+    if !windows_installer_cache_is_valid(download_path)? {
+        return Err(
+            "The cached Codex MSIX is invalid and has been removed. Download the installer again."
+                .to_string(),
+        );
+    }
     emit_install_progress(app, "installing", 0, None);
     #[cfg(target_os = "windows")]
     emit_install_progress(app, "windows-installing", 0, None);
@@ -655,6 +701,14 @@ async fn download_installer_from_url(
 ) -> Result<(), String> {
     let source = download_source_label(download_url);
     let _ = fs::remove_file(completed_download_marker(download_path));
+    // Legacy partial files have no source/ETag identity. Never append bytes
+    // from a different mirror (or a different release served by /latest).
+    #[cfg(target_os = "windows")]
+    let existing_bytes = {
+        discard_windows_installer(download_path)?;
+        0
+    };
+    #[cfg(not(target_os = "windows"))]
     let existing_bytes = fs::metadata(download_path)
         .map(|metadata| metadata.len())
         .or_else(|error| {
@@ -684,6 +738,21 @@ async fn download_installer_from_url(
     #[cfg(target_os = "windows")]
     if !is_trusted_windows_download_url(response.url().as_str()) {
         return Err("the ChatGPT installer redirected to an untrusted download source".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        log_codex_update(
+            "info", "download_response",
+            format!("source={source}; status={}; contentType={:?}; contentLength={:?}; contentRange={:?}",
+                response.status(), response.headers().get("content-type"),
+                response.content_length(), response.headers().get("content-range")),
+        );
+        if response.status() != reqwest::StatusCode::OK {
+            return Err(format!(
+                "The Codex mirror returned {} for a full MSIX download",
+                response.status()
+            ));
+        }
     }
     let append = existing_bytes > 0 && response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
     let starting_bytes = append.then_some(existing_bytes).unwrap_or(0);
@@ -738,8 +807,130 @@ async fn download_installer_from_url(
     }
     file.sync_all()
         .map_err(|error| format!("finish saving the ChatGPT installer: {error}"))?;
-    fs::write(completed_download_marker(download_path), b"complete")
-        .map_err(|error| format!("mark the ChatGPT installer as complete: {error}"))?;
+    #[cfg(target_os = "windows")]
+    {
+        drop(file);
+        return complete_windows_installer_download(download_path, total_bytes);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        fs::write(completed_download_marker(download_path), b"complete")
+            .map_err(|error| format!("mark the ChatGPT installer as complete: {error}"))?;
+        Ok(())
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn validate_windows_msix(path: &Path) -> Result<(), String> {
+    let mut file = fs::File::open(path).map_err(|error| format!("read MSIX: {error}"))?;
+    let length = file
+        .metadata()
+        .map_err(|error| format!("inspect MSIX: {error}"))?
+        .len();
+    let mut signature = [0_u8; 4];
+    file.read_exact(&mut signature)
+        .map_err(|error| format!("MSIX header is incomplete: {error}"))?;
+    if signature != *b"PK\x03\x04" {
+        return Err(format!("The download is not an MSIX/ZIP file (header={signature:02x?}); it may be an EXE installer or an error page"));
+    }
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| format!("read MSIX header: {error}"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| format!("The MSIX ZIP directory is missing or damaged: {error}"))?;
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index_raw(index)
+            .map_err(|error| format!("read MSIX directory entry: {error}"))?;
+        if entry
+            .data_start()
+            .checked_add(entry.compressed_size())
+            .is_none_or(|end| end > length)
+        {
+            return Err(format!(
+                "The MSIX entry {} extends beyond the downloaded file",
+                entry.name()
+            ));
+        }
+    }
+    // Check the package structure here. Windows still verifies the signature
+    // and publisher during Add-AppxPackage; this is not a trust bypass.
+    for name in ["AppxManifest.xml", "AppxBlockMap.xml", "AppxSignature.p7x"] {
+        let mut entry = archive
+            .by_name(name)
+            .map_err(|error| format!("MSIX is missing {name}: {error}"))?;
+        if entry.size() == 0 {
+            return Err(format!("MSIX contains an empty {name}"));
+        }
+        if name == "AppxManifest.xml" {
+            if entry.size() > 4 * 1024 * 1024 {
+                return Err("MSIX manifest is unexpectedly large".to_string());
+            }
+            std::io::copy(&mut entry, &mut std::io::sink())
+                .map_err(|error| format!("MSIX manifest is damaged: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn discard_windows_installer(path: &Path) -> Result<(), String> {
+    for target in [completed_download_marker(path), path.to_path_buf()] {
+        match fs::remove_file(&target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "remove invalid installer cache {}: {error}",
+                    target.display()
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_installer_cache_is_valid(path: &Path) -> Result<bool, String> {
+    if let Err(error) = validate_windows_msix(path) {
+        log_codex_update(
+            "warning",
+            "invalid_msix_cache",
+            format!("path={}; error={error}", path.display()),
+        );
+        discard_windows_installer(path)?;
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn complete_windows_installer_download(
+    path: &Path,
+    expected_bytes: Option<u64>,
+) -> Result<(), String> {
+    let result = (|| {
+        let actual = fs::metadata(path)
+            .map_err(|error| format!("inspect downloaded MSIX: {error}"))?
+            .len();
+        if expected_bytes.is_some_and(|expected| expected != actual) {
+            return Err(format!(
+                "MSIX download size mismatch: expected {expected_bytes:?} bytes, received {actual}"
+            ));
+        }
+        validate_windows_msix(path)
+    })();
+    if let Err(error) = result {
+        log_codex_update("error", "msix_download_validation_failed", &error);
+        discard_windows_installer(path)?;
+        return Err(error);
+    }
+    fs::write(completed_download_marker(path), b"complete")
+        .map_err(|error| format!("mark the validated MSIX as complete: {error}"))?;
+    log_codex_update(
+        "info",
+        "msix_download_validated",
+        format!("path={}", path.display()),
+    );
     Ok(())
 }
 
@@ -773,6 +964,14 @@ fn cached_installer_from_path(path: PathBuf, version: String) -> Option<CachedIn
     let marker = completed_download_marker(&path);
     let marker_age = marker.metadata().ok()?.modified().ok()?.elapsed().ok()?;
     if path.is_file() && marker.is_file() && marker_age <= CODEX_INSTALLER_CACHE_TTL {
+        #[cfg(any(target_os = "windows", test))]
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "msix")
+            && !windows_installer_cache_is_valid(&path).ok()?
+        {
+            return None;
+        }
         return Some(CachedInstaller { path, version });
     }
 
@@ -2182,6 +2381,177 @@ fn macos_app_is_running(app_path: &Path) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+fn install_with_winget(force_update: bool) -> Result<(), String> {
+    let mut attempts = Vec::new();
+    if force_update {
+        attempts.push(vec![
+            "upgrade",
+            "--id",
+            WINDOWS_STORE_PRODUCT_ID,
+            "--exact",
+            "--source",
+            "msstore",
+        ]);
+    }
+    attempts.push(vec![
+        "install",
+        "--id",
+        WINDOWS_STORE_PRODUCT_ID,
+        "--exact",
+        "--source",
+        "msstore",
+    ]);
+
+    let mut last_error = None;
+    for arguments in attempts {
+        log_codex_update(
+            "info",
+            "winget_attempt_started",
+            format!(
+                "operation={}; productId={WINDOWS_STORE_PRODUCT_ID}",
+                arguments[0]
+            ),
+        );
+        let mut command = Command::new("winget.exe");
+        command
+            .creation_flags(CREATE_NO_WINDOW)
+            .args(arguments.iter().copied().chain([
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ]));
+        let output = run_windows_command_with_timeout(
+            &mut command,
+            WINDOWS_STORE_COMMAND_TIMEOUT,
+            "Microsoft Store installation command",
+        )?;
+        if output.status.success() {
+            log_codex_update(
+                "info",
+                "winget_attempt_completed",
+                format!("operation={}", arguments[0]),
+            );
+            return Ok(());
+        }
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let error = if details.is_empty() { stdout } else { details };
+        log_codex_update(
+            "error",
+            "winget_attempt_failed",
+            format!("operation={}; error={error}", arguments[0]),
+        );
+        last_error = Some(error);
+    }
+
+    Err(last_error
+        .filter(|error| !error.is_empty())
+        .unwrap_or_else(|| "WinGet could not install the Microsoft Store package".to_string()))
+}
+
+#[cfg(target_os = "windows")]
+async fn install_with_microsoft_store_fallback(
+    app: &AppHandle,
+    force_update: bool,
+    mirror_error: &str,
+) -> Result<CodexInstallResult, String> {
+    log_codex_update(
+        "warning",
+        "store_fallback_started",
+        format!("forceUpdate={force_update}; directError={mirror_error}"),
+    );
+    emit_install_progress(app, "windows-fallback", 0, None);
+    let winget_result =
+        tauri::async_runtime::spawn_blocking(move || install_with_winget(force_update))
+            .await
+            .map_err(|error| format!("wait for the Microsoft Store installation: {error}"))?;
+
+    if winget_result.is_err() {
+        if let Err(error) = &winget_result {
+            log_codex_update("error", "winget_fallback_failed", error);
+        }
+        emit_install_progress(app, "windows-store", 0, None);
+        open_microsoft_store()?;
+        let reason = mirror_error.trim();
+        let message = if reason.is_empty() {
+            "Microsoft Store has opened. Finish the ChatGPT installation there; this page will continue automatically.".to_string()
+        } else {
+            format!(
+                "The direct ChatGPT installer could not be completed ({reason}). Microsoft Store has opened; finish the installation there and this page will continue automatically."
+            )
+        };
+        return Ok(CodexInstallResult {
+            installed: false,
+            path: None,
+            message,
+            awaiting_installation: true,
+            can_retry_cached_installer: completed_installer_available(),
+        });
+    }
+
+    emit_install_progress(app, "verifying", 0, None);
+    let status = status().await;
+    if status.installed && (!force_update || status.update_available == Some(false)) {
+        if force_update {
+            open_installed_app()?;
+        }
+        emit_install_progress(app, "complete", 0, None);
+        return Ok(CodexInstallResult {
+            installed: true,
+            path: status.path,
+            message: if force_update {
+                "ChatGPT and Codex were updated successfully.".to_string()
+            } else {
+                "ChatGPT and Codex are installed and ready for the next step.".to_string()
+            },
+            awaiting_installation: false,
+            can_retry_cached_installer: false,
+        });
+    }
+
+    log_codex_update(
+        "warning",
+        "store_installation_pending",
+        format!(
+            "localVersion={:?}; latestVersion={:?}",
+            status.local_version, status.latest_version
+        ),
+    );
+    emit_install_progress(app, "windows-store", 0, None);
+    open_microsoft_store()?;
+    Ok(CodexInstallResult {
+        installed: false,
+        path: None,
+        message: if mirror_error.trim().is_empty() {
+            "Microsoft Store is installing ChatGPT. This page will continue automatically when the installation finishes.".to_string()
+        } else {
+            format!(
+                "The direct ChatGPT installer could not be completed ({mirror_error}). Microsoft Store is installing ChatGPT; this page will continue automatically when the installation finishes."
+            )
+        },
+        awaiting_installation: true,
+        can_retry_cached_installer: completed_installer_available(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn open_microsoft_store() -> Result<(), String> {
+    let store_uri = format!("ms-windows-store://pdp/?productid={WINDOWS_STORE_PRODUCT_ID}");
+    log_codex_update(
+        "info",
+        "microsoft_store_opening",
+        format!("productId={WINDOWS_STORE_PRODUCT_ID}"),
+    );
+    Command::new("explorer.exe")
+        .creation_flags(CREATE_NO_WINDOW)
+        .arg(store_uri)
+        .spawn()
+        .map_err(|error| format!("open Microsoft Store: {error}"))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn install_downloaded_app(
     _app: &AppHandle,
     download_path: &Path,
@@ -2476,6 +2846,111 @@ mod tests {
     use std::path::PathBuf;
     use std::process::Command;
     use std::time::Duration;
+
+    struct MsixFixture(std::path::PathBuf);
+
+    impl MsixFixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("ag-msix-validation-{}.msix", uuid::Uuid::new_v4()));
+            Self(path)
+        }
+
+        fn write_package(&self, include_manifest: bool) {
+            use std::io::Write;
+            let mut archive = zip::ZipWriter::new(fs::File::create(&self.0).unwrap());
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            if include_manifest {
+                archive.start_file("AppxManifest.xml", options).unwrap();
+                archive.write_all(b"<Package><Identity Name=\"OpenAI.Codex\" Version=\"26.908.4834.0\"/></Package>").unwrap();
+            }
+            archive.start_file("AppxBlockMap.xml", options).unwrap();
+            archive.write_all(b"<BlockMap/>").unwrap();
+            archive.start_file("AppxSignature.p7x", options).unwrap();
+            archive
+                .write_all(b"test-only-signature-placeholder")
+                .unwrap();
+            archive.finish().unwrap();
+        }
+    }
+
+    impl Drop for MsixFixture {
+        fn drop(&mut self) {
+            let _ = super::discard_windows_installer(&self.0);
+        }
+    }
+
+    #[test]
+    fn msix_rejects_exe_and_html_saved_with_an_msix_extension() {
+        let fixture = MsixFixture::new();
+        for content in [
+            b"MZ executable installer".as_slice(),
+            b"<!doctype html>download error",
+        ] {
+            fs::write(&fixture.0, content).unwrap();
+            assert!(super::validate_windows_msix(&fixture.0)
+                .unwrap_err()
+                .contains("not an MSIX/ZIP"));
+        }
+    }
+
+    #[test]
+    fn msix_rejects_missing_end_of_central_directory_and_clears_completed_cache() {
+        let fixture = MsixFixture::new();
+        fixture.write_package(true);
+        let file = fs::OpenOptions::new().write(true).open(&fixture.0).unwrap();
+        file.set_len(file.metadata().unwrap().len() - 22).unwrap();
+        drop(file);
+        fs::write(completed_download_marker(&fixture.0), b"complete").unwrap();
+        assert!(super::validate_windows_msix(&fixture.0)
+            .unwrap_err()
+            .contains("directory"));
+        assert!(
+            cached_installer_from_path(fixture.0.clone(), "26.908.4834.0".to_string()).is_none()
+        );
+        assert!(!fixture.0.exists());
+        assert!(!completed_download_marker(&fixture.0).exists());
+    }
+
+    #[test]
+    fn msix_rejects_zip_without_a_package_manifest() {
+        let fixture = MsixFixture::new();
+        fixture.write_package(false);
+        assert!(super::validate_windows_msix(&fixture.0)
+            .unwrap_err()
+            .contains("AppxManifest.xml"));
+    }
+
+    #[test]
+    fn msix_validation_failure_allows_a_clean_retry_at_the_same_cache_path() {
+        let fixture = MsixFixture::new();
+        fs::write(&fixture.0, b"MZ old cached installer").unwrap();
+        fs::write(completed_download_marker(&fixture.0), b"complete").unwrap();
+        assert!(!super::windows_installer_cache_is_valid(&fixture.0).unwrap());
+        assert!(!fixture.0.exists());
+        fixture.write_package(true);
+        let size = fs::metadata(&fixture.0).unwrap().len();
+        super::complete_windows_installer_download(&fixture.0, Some(size)).unwrap();
+        assert!(
+            cached_installer_from_path(fixture.0.clone(), "26.908.4834.0".to_string()).is_some()
+        );
+        assert!(fixture.0.exists());
+    }
+
+    #[test]
+    fn msix_size_mismatch_never_leaves_a_completed_marker() {
+        let fixture = MsixFixture::new();
+        fixture.write_package(true);
+        let size = fs::metadata(&fixture.0).unwrap().len();
+        assert!(
+            super::complete_windows_installer_download(&fixture.0, Some(size + 1))
+                .unwrap_err()
+                .contains("size mismatch")
+        );
+        assert!(!completed_download_marker(&fixture.0).exists());
+        assert!(!fixture.0.exists());
+    }
 
     fn test_command(unix_script: &str, windows_script: &str) -> Command {
         #[cfg(target_os = "windows")]
