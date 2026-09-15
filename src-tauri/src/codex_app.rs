@@ -133,6 +133,7 @@ struct DownloadProbe {
     index: usize,
     url: String,
     elapsed: Duration,
+    total_bytes: Option<u64>,
 }
 
 struct LocalInstallation {
@@ -191,6 +192,7 @@ struct CachedDownloadSources {
     measured_at: Instant,
     key: String,
     ranked_urls: Vec<String>,
+    source_sizes: HashMap<String, u64>,
 }
 
 struct CachedInstaller {
@@ -303,7 +305,23 @@ pub async fn install(
     #[cfg(target_os = "windows")]
     let use_cached_installer = if completed_download_marker(&download_path).is_file() {
         match windows_installer_cache_is_valid(&download_path) {
-            Ok(valid) => valid,
+            Ok(true) => {
+                if cached_installer_size_matches(&download_urls, &download_path).await {
+                    true
+                } else {
+                    log_codex_update(
+                        "warning",
+                        "cached_installer_size_mismatch",
+                        format!(
+                            "path={}; action=discard_and_redownload",
+                            download_path.display()
+                        ),
+                    );
+                    discard_windows_installer(&download_path)?;
+                    false
+                }
+            }
+            Ok(false) => false,
             Err(error) => {
                 return install_with_microsoft_store_fallback(app, force_update, &error).await
             }
@@ -315,7 +333,14 @@ pub async fn install(
     let use_cached_installer = download_path.is_file();
     if use_cached_installer {
         let cached_download_complete = completed_download_marker(&download_path).is_file();
-        match install_downloaded_path(app, &download_path, preferred_destination.as_deref()).await {
+        match install_downloaded_path_with_retry(
+            app,
+            &download_path,
+            preferred_destination.as_deref(),
+            Some(&download_urls),
+        )
+        .await
+        {
             Ok(result) => installer_result = Some(result),
             Err(error) => {
                 if !cached_download_complete {
@@ -337,7 +362,14 @@ pub async fn install(
             #[cfg(not(target_os = "windows"))]
             return Err(error);
         }
-        match install_downloaded_path(app, &download_path, preferred_destination.as_deref()).await {
+        match install_downloaded_path_with_retry(
+            app,
+            &download_path,
+            preferred_destination.as_deref(),
+            Some(&download_urls),
+        )
+        .await
+        {
             Ok(result) => installer_result = Some(result),
             Err(error) => {
                 #[cfg(target_os = "windows")]
@@ -363,7 +395,6 @@ pub async fn install(
             "{error}. Open the installer once, then return here and check again."
         ));
     }
-    let _ = fs::remove_file(completed_download_marker(&download_path));
     if force_update {
         let expected_version = status.latest_version.as_deref();
         let installed_version = status.local_version.as_deref();
@@ -428,24 +459,48 @@ pub async fn download_update(
     let latest_version = latest_release
         .as_ref()
         .map(|release| release.version.as_str());
+    let candidate_download_urls = latest_release
+        .as_ref()
+        .and_then(|release| download_urls(Some(release)).ok());
     if !force_redownload {
         if let Some(cached) =
             latest_version.and_then(|version| cached_installer_for_version(version, extension))
         {
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            log_codex_update(
-                "info",
-                "cached_installer_selected",
-                format!("version={}; path={}", cached.version, cached.path.display()),
-            );
-            emit_cached_download_progress(app, &cached);
-            return Ok(CodexUpdateDownloadResult {
-                downloaded: true,
-                version: cached.version,
-                message: "The cached Codex installer is ready to install.".to_string(),
-                target_path: target_path.clone(),
-                target_version: target_version.clone(),
-            });
+            #[cfg(target_os = "windows")]
+            let cached_size_matches = match candidate_download_urls.as_deref() {
+                Some(urls) => cached_installer_size_matches(urls, &cached.path).await,
+                None => false,
+            };
+            #[cfg(not(target_os = "windows"))]
+            let cached_size_matches = true;
+            if cached_size_matches {
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                log_codex_update(
+                    "info",
+                    "cached_installer_selected",
+                    format!("version={}; path={}", cached.version, cached.path.display()),
+                );
+                emit_cached_download_progress(app, &cached);
+                return Ok(CodexUpdateDownloadResult {
+                    downloaded: true,
+                    version: cached.version,
+                    message: "The cached Codex installer is ready to install.".to_string(),
+                    target_path: target_path.clone(),
+                    target_version: target_version.clone(),
+                });
+            }
+            #[cfg(target_os = "windows")]
+            {
+                log_codex_update(
+                    "warning",
+                    "cached_installer_size_mismatch",
+                    format!(
+                        "path={}; action=discard_and_redownload",
+                        cached.path.display()
+                    ),
+                );
+                discard_windows_installer(&cached.path)?;
+            }
         }
         if latest_version.is_none() {
             if let Some(cached) = newest_cached_installer(extension) {
@@ -467,7 +522,9 @@ pub async fn download_update(
         }
     }
 
-    let download_urls = download_urls(latest_release.as_ref())?;
+    let download_urls = candidate_download_urls
+        .or_else(|| download_urls(latest_release.as_ref()).ok())
+        .ok_or_else(|| "trusted ChatGPT MSIX mirror and CDN sources are unavailable".to_string())?;
     let download_path = resumable_download_path(latest_version, extension);
     if force_redownload {
         let _ = fs::remove_file(&download_path);
@@ -542,8 +599,13 @@ pub async fn apply_update(
     let preferred_destination = target_path
         .map(PathBuf::from)
         .or_else(|| update_target_installation().map(|installation| installation.path));
-    if let Err(error) =
-        install_downloaded_path(app, &download_path, preferred_destination.as_deref()).await
+    if let Err(error) = install_downloaded_path_with_retry(
+        app,
+        &download_path,
+        preferred_destination.as_deref(),
+        None,
+    )
+    .await
     {
         #[cfg(target_os = "windows")]
         log_codex_update("error", "direct_msix_update_failed", &error);
@@ -587,7 +649,6 @@ pub async fn apply_update(
             return Err(error);
         }
     }
-    let _ = fs::remove_file(completed_download_marker(&download_path));
     emit_install_progress(app, "opening", 0, None);
     // AppX installation paths contain the package version and change on update.
     #[cfg(target_os = "windows")]
@@ -661,6 +722,97 @@ async fn install_downloaded_path(
     .map_err(|error| format!("wait for the official ChatGPT installer: {error}"))?
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+async fn install_downloaded_path_with_retry(
+    app: &AppHandle,
+    download_path: &Path,
+    preferred_destination: Option<&Path>,
+    retry_download_urls: Option<&[String]>,
+) -> Result<InstallerResult, String> {
+    let first_error = match install_downloaded_path(app, download_path, preferred_destination).await
+    {
+        Ok(result) => return Ok(result),
+        Err(error) => error,
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        log_codex_update(
+            "error",
+            "local_msix_install_failed",
+            format!(
+                "path={}; error={first_error}; retry=1",
+                download_path.display()
+            ),
+        );
+        discard_windows_installer(download_path).map_err(|cleanup_error| {
+            format!(
+                "local MSIX installation failed: {first_error}; remove the local installer for retry: {cleanup_error}"
+            )
+        })?;
+        let download_urls = match retry_download_urls {
+            Some(urls) if !urls.is_empty() => urls.to_vec(),
+            _ => {
+                let release = latest_release()
+                    .await
+                    .map_err(|error| format!("redownload the Codex installer: {error}"))?;
+                download_urls(Some(&release))?
+            }
+        };
+        log_codex_update(
+            "warning",
+            "msix_redownload_started",
+            format!(
+                "path={}; sourceCount={}; attempt=1",
+                download_path.display(),
+                download_urls.len(),
+            ),
+        );
+        if let Err(error) = download_installer(app, &download_urls, download_path).await {
+            log_codex_update(
+                "error",
+                "msix_redownload_failed",
+                format!(
+                    "path={}; error={error}; attempts=1",
+                    download_path.display()
+                ),
+            );
+            return Err(format!(
+                "local MSIX installation failed: {first_error}; redownload failed: {error}"
+            ));
+        }
+        return match install_downloaded_path(app, download_path, preferred_destination).await {
+            Ok(result) => {
+                log_codex_update(
+                    "info",
+                    "msix_retry_install_completed",
+                    format!("path={}; attempts=1", download_path.display()),
+                );
+                Ok(result)
+            }
+            Err(retry_error) => {
+                log_codex_update(
+                    "error",
+                    "msix_retry_install_failed",
+                    format!(
+                        "path={}; error={retry_error}; attempts=1",
+                        download_path.display()
+                    ),
+                );
+                Err(format!(
+                    "local MSIX installation failed: {first_error}; retry after redownload failed: {retry_error}"
+                ))
+            }
+        };
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = retry_download_urls;
+        Err(first_error)
+    }
+}
+
 async fn download_installer(
     app: &AppHandle,
     download_urls: &[String],
@@ -680,13 +832,18 @@ async fn download_installer(
     );
     let mut errors = Vec::new();
     emit_install_progress(app, "selecting-source", 0, None);
-    let ranked_urls = rank_download_sources(download_urls).await;
-    for download_url in &ranked_urls {
+    let ranked_sources = rank_download_sources(download_urls).await;
+    for source_probe in &ranked_sources {
+        let download_url = &source_probe.url;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         log_codex_update(
             "info",
             "download_source_started",
-            format!("source={}", download_source_label(download_url)),
+            format!(
+                "source={}; expectedBytes={:?}",
+                download_source_label(download_url),
+                source_probe.total_bytes,
+            ),
         );
         match download_installer_from_url(app, download_url, download_path).await {
             Ok(()) => {
@@ -701,6 +858,7 @@ async fn download_installer(
                         started.elapsed().as_millis(),
                     ),
                 );
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 log_codex_update(
                     "info",
                     "download_flow_completed",
@@ -1068,7 +1226,50 @@ fn completed_installer_available() -> bool {
     newest_cached_installer(download_extension(&[])).is_some()
 }
 
-async fn rank_download_sources(download_urls: &[String]) -> Vec<String> {
+#[cfg(target_os = "windows")]
+async fn cached_installer_size_matches(download_urls: &[String], path: &Path) -> bool {
+    let Some(local_bytes) = fs::metadata(path).ok().map(|metadata| metadata.len()) else {
+        log_codex_update(
+            "warning",
+            "cached_installer_size_check_failed",
+            format!("path={}; error=local file is unavailable", path.display()),
+        );
+        return false;
+    };
+    let probes = rank_download_sources(download_urls).await;
+    if let Some(probe) = probes
+        .iter()
+        .find(|probe| probe.total_bytes == Some(local_bytes))
+    {
+        log_codex_update(
+            "info",
+            "cached_installer_size_match",
+            format!(
+                "path={}; bytes={}; source={}",
+                path.display(),
+                local_bytes,
+                download_source_label(&probe.url),
+            ),
+        );
+        return true;
+    }
+    log_codex_update(
+        "warning",
+        "cached_installer_size_mismatch",
+        format!(
+            "path={}; localBytes={}; remoteBytes={:?}; action=discard_and_redownload",
+            path.display(),
+            local_bytes,
+            probes
+                .iter()
+                .filter_map(|probe| probe.total_bytes)
+                .collect::<Vec<_>>(),
+        ),
+    );
+    false
+}
+
+async fn rank_download_sources(download_urls: &[String]) -> Vec<DownloadProbe> {
     let cache = DOWNLOAD_SOURCE_CACHE
         .get_or_init(|| tokio::sync::Mutex::new(None))
         .lock()
@@ -1092,7 +1293,17 @@ async fn rank_download_sources(download_urls: &[String]) -> Vec<String> {
                     .join(","),
             ),
         );
-        return cached.ranked_urls.clone();
+        return cached
+            .ranked_urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| DownloadProbe {
+                index,
+                url: url.clone(),
+                elapsed: Duration::ZERO,
+                total_bytes: cached.source_sizes.get(url).copied(),
+            })
+            .collect();
     }
 
     let probe_count = download_urls.len().max(1);
@@ -1109,19 +1320,30 @@ async fn rank_download_sources(download_urls: &[String]) -> Vec<String> {
     .await;
     responsive.sort_by_key(|probe| (probe.elapsed, probe.index));
 
-    let mut ranked = responsive
+    let mut ranked = responsive;
+    for download_url in download_urls {
+        if !ranked.iter().any(|probe| probe.url == *download_url) {
+            ranked.push(DownloadProbe {
+                index: ranked.len(),
+                url: download_url.clone(),
+                elapsed: Duration::ZERO,
+                total_bytes: None,
+            });
+        }
+    }
+    let ranked_urls = ranked
         .iter()
         .map(|probe| probe.url.clone())
         .collect::<Vec<_>>();
-    for download_url in download_urls {
-        if !ranked.iter().any(|url| url == download_url) {
-            ranked.push(download_url.clone());
-        }
-    }
+    let source_sizes = ranked
+        .iter()
+        .filter_map(|probe| probe.total_bytes.map(|size| (probe.url.clone(), size)))
+        .collect::<HashMap<_, _>>();
     *cache = Some(CachedDownloadSources {
         measured_at: Instant::now(),
         key: cache_key,
-        ranked_urls: ranked.clone(),
+        ranked_urls,
+        source_sizes,
     });
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     log_codex_update(
@@ -1131,7 +1353,7 @@ async fn rank_download_sources(download_urls: &[String]) -> Vec<String> {
             "sources={}",
             ranked
                 .iter()
-                .map(|url| download_source_label(url))
+                .map(|probe| download_source_label(&probe.url))
                 .collect::<Vec<_>>()
                 .join(","),
         ),
@@ -1162,6 +1384,7 @@ async fn probe_download_source(index: usize, url: String) -> Result<DownloadProb
             "the ChatGPT installer probe redirected to an untrusted download source".to_string(),
         );
     }
+    let total_bytes = response_total_bytes(&response);
     let mut stream = response.bytes_stream();
     let mut sampled_bytes = 0_usize;
     while let Some(chunk) = stream.next().await {
@@ -1178,7 +1401,19 @@ async fn probe_download_source(index: usize, url: String) -> Result<DownloadProb
         index,
         url,
         elapsed: started.elapsed(),
+        total_bytes,
     })
+}
+
+fn response_total_bytes(response: &reqwest::Response) -> Option<u64> {
+    response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit('/').next())
+        .and_then(|value| (value != "*").then_some(value))
+        .and_then(|value| value.parse::<u64>().ok())
+        .or_else(|| response.content_length())
 }
 
 fn download_source_label(download_url: &str) -> String {
@@ -2736,11 +2971,95 @@ fn install_windows_msix(download_path: &Path) -> Result<(), String> {
         log_codex_update("error", "msix_installation_failed", &error);
         return Err(error);
     }
-    if let Err(error) = fs::remove_file(download_path) {
-        log_codex_update("warning", "installer_cleanup_failed", error.to_string());
-    }
+    log_codex_update("info", "msix_registration_completed", "success");
     log_codex_update("info", "msix_installation_completed", "success");
+    log_codex_update(
+        "info",
+        "installer_cache_retained",
+        format!(
+            "path={}; marker={}",
+            download_path.display(),
+            completed_download_marker(download_path).display()
+        ),
+    );
+    schedule_windows_installer_cleanup(download_path);
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn schedule_windows_installer_cleanup(keep_path: &Path) {
+    let keep_path = keep_path.to_path_buf();
+    log_codex_update(
+        "info",
+        "installer_cleanup_scheduled",
+        format!("keepPath={}", keep_path.display()),
+    );
+    thread::spawn(move || {
+        let started = Instant::now();
+        log_codex_update(
+            "info",
+            "installer_cleanup_started",
+            format!("keepPath={}", keep_path.display()),
+        );
+        let (removed, failed) = cleanup_stale_windows_installers(&keep_path);
+        log_codex_update(
+            if failed == 0 { "info" } else { "warning" },
+            "installer_cleanup_completed",
+            format!(
+                "keepPath={}; removed={}; failed={}; elapsedMs={}",
+                keep_path.display(),
+                removed,
+                failed,
+                started.elapsed().as_millis(),
+            ),
+        );
+    });
+}
+
+#[cfg(target_os = "windows")]
+fn cleanup_stale_windows_installers(keep_path: &Path) -> (usize, usize) {
+    let prefix = format!("autogateway-chatgpt-windows-{}-", native_architecture());
+    let keep_marker = completed_download_marker(keep_path);
+    let entries = match fs::read_dir(env::temp_dir()) {
+        Ok(entries) => entries,
+        Err(error) => {
+            log_codex_update(
+                "warning",
+                "installer_cleanup_read_directory_failed",
+                error.to_string(),
+            );
+            return (0, 1);
+        }
+    };
+    let mut removed = 0;
+    let mut failed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == keep_path || path == keep_marker {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(&prefix)
+            || !(name.ends_with(".msix") || name.ends_with(".msix.complete"))
+        {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                failed += 1;
+                log_codex_update(
+                    "warning",
+                    "installer_cleanup_failed",
+                    format!("path={}; error={error}", path.display()),
+                );
+            }
+        }
+    }
+    (removed, failed)
 }
 
 #[cfg(target_os = "windows")]
