@@ -1374,6 +1374,17 @@ h1 {
   font-size: 14px;
   line-height: 1.45;
 }
+.codexInstallErrorActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  align-items: center;
+  margin: -12px 0 24px;
+}
+.codexInstallErrorActions small {
+  color: var(--muted);
+  font-size: 12px;
+}
 .homeSubscriptionCard {
   display: grid;
   gap: 22px;

@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, it, vi } from "vitest";
 
@@ -85,8 +85,23 @@ it("shows a visible installation error after loading disappears and clears it on
   await act(async () => rejectInstall("Deployment failed: 0x80073D02"));
   const alert = await screen.findByRole("alert");
   expect(alert).toBeVisible();
-  expect(alert).toHaveTextContent("Deployment failed: 0x80073D02");
+  expect(alert).toHaveTextContent(
+    "Codex installation could not be completed. Open the update log for details.",
+  );
+  expect(alert).not.toHaveTextContent("Deployment failed: 0x80073D02");
   expect(alert).toHaveClass("homeActionMessage");
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("log_codex_update_error", {
+      message: "Deployment failed: 0x80073D02",
+    }),
+  );
+  expect(
+    screen.getByRole("button", { name: "Open update log" }),
+  ).toBeVisible();
+  fireEvent.keyDown(window, { key: "l", ctrlKey: true, shiftKey: true });
+  await waitFor(() =>
+    expect(mocks.invoke).toHaveBeenCalledWith("open_codex_update_log"),
+  );
   expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
 
   await user.click(screen.getByRole("button", { name: "Update Codex" }));

@@ -16,7 +16,9 @@ import {
   getSkillDetail,
   installSkill,
   isCodexExternalInstallationComplete,
+  logCodexUpdateError,
   openCodex,
+  openCodexUpdateLog,
   scanSkills,
   validateSkillSource,
 } from "./desktop";
@@ -116,6 +118,20 @@ describe("desktop.ts invoke wrappers", () => {
     invokeMock.mockResolvedValue(undefined);
     await openCodex();
     expect(invokeMock).toHaveBeenCalledWith("open_codex");
+  });
+
+  it("openCodexUpdateLog calls the log opener command", async () => {
+    invokeMock.mockResolvedValue(undefined);
+    await openCodexUpdateLog();
+    expect(invokeMock).toHaveBeenCalledWith("open_codex_update_log");
+  });
+
+  it("logCodexUpdateError sends the detailed frontend error to the backend", async () => {
+    invokeMock.mockResolvedValue(undefined);
+    await logCodexUpdateError("PowerShell installer details");
+    expect(invokeMock).toHaveBeenCalledWith("log_codex_update_error", {
+      message: "PowerShell installer details",
+    });
   });
 
   it("returns the invoke result to the caller", async () => {

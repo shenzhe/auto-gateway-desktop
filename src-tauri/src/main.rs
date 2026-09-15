@@ -13,7 +13,9 @@ mod skills;
 use codex_app::{
     apply_update as apply_codex_update, close_installed_app_at,
     download_update as download_codex_update, install as install_codex_app,
-    is_installed_app_running, local_status as local_codex_app_status, open_installed_app,
+    is_installed_app_running, local_status as local_codex_app_status,
+    log_codex_update_error as log_codex_update_error_details,
+    open_codex_update_log as open_codex_update_log_file, open_installed_app,
     status as codex_app_status, CodexAppStatus, CodexInstallResult, CodexUpdateDownloadResult,
 };
 use codex_config::{
@@ -475,6 +477,16 @@ async fn open_codex() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(open_installed_app)
         .await
         .map_err(|error| format!("open the installed app: {error}"))?
+}
+
+#[tauri::command]
+fn open_codex_update_log() -> Result<(), String> {
+    open_codex_update_log_file()
+}
+
+#[tauri::command]
+fn log_codex_update_error(message: String) {
+    log_codex_update_error_details(&message);
 }
 
 #[tauri::command]
@@ -1017,6 +1029,8 @@ fn main() {
             apply_codex_update_command,
             close_codex,
             open_codex,
+            open_codex_update_log,
+            log_codex_update_error,
             is_codex_running,
             configure_codex,
             restore_latest_codex_backups,

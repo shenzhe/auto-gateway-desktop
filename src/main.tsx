@@ -53,8 +53,10 @@ import {
   isCodexExternalInstallationComplete,
   isCodexRunning,
   isAuthenticationRequired,
+  logCodexUpdateError,
   openDesktopSignIn,
   openCodex,
+  openCodexUpdateLog,
   openConsole,
   openNotificationWindow,
   openDevtools,
@@ -165,6 +167,16 @@ function App() {
   useCopyOnlyContextMenu();
   useEffect(() => {
     function handleDevtoolsShortcut(event: KeyboardEvent) {
+      const isUpdateLogShortcut =
+        event.key.toLowerCase() === "l" &&
+        ((event.ctrlKey && event.shiftKey) ||
+          (event.metaKey && event.shiftKey));
+      if (isUpdateLogShortcut) {
+        event.preventDefault();
+        void handleOpenCodexUpdateLog();
+        return;
+      }
+
       const isDevtoolsShortcut =
         event.key.toLowerCase() === "i" &&
         ((event.ctrlKey && event.shiftKey) ||
@@ -250,6 +262,7 @@ function App() {
   const [desktopInstallerUrl, setDesktopInstallerUrl] = useState("");
   const [openingDesktopInstaller, setOpeningDesktopInstaller] = useState(false);
   const [homeActionError, setHomeActionError] = useState("");
+  const [codexInstallError, setCodexInstallError] = useState(false);
   const [codexInstallNotice, setCodexInstallNotice] = useState("");
   const [codexOpenPhase, setCodexOpenPhase] =
     useState<CodexOpenPhase>("closed");
@@ -390,6 +403,7 @@ function App() {
     storeAutoRetryAttempted.current = false;
     setSelectedStep(1);
     setHomeActionError("");
+    setCodexInstallError(false);
     setCodexInstallNotice("");
     externalInstallationTargetVersion.current = undefined;
     setMessage(nextMessage);
@@ -1283,6 +1297,7 @@ function App() {
   ) {
     if (installingCodex) return;
     setHomeActionError("");
+    setCodexInstallError(false);
     setCodexInstallNotice("");
     externalInstallationTargetVersion.current = forceUpdate
       ? appStatus?.latestVersion
@@ -1378,6 +1393,7 @@ function App() {
         return;
       }
       if (!result.installed) throw new Error(result.message);
+      setCodexInstallError(false);
       setAwaitingExternalInstallation(false);
       setCanRetryCachedInstaller(false);
       setExternalInstallationMessage("");
@@ -1385,7 +1401,13 @@ function App() {
       setMessage(tr(forceUpdate ? "updatedReady" : "installedReady"));
       setCodexInstallNotice(tr(forceUpdate ? "updatedReady" : "installedReady"));
     } catch (error) {
-      const failure = tr("installationFailed", { error: String(error) });
+      try {
+        await logCodexUpdateError(String(error));
+      } catch {
+        // The original error is still retained by the backend update log when available.
+      }
+      const failure = tr("installationFailed");
+      setCodexInstallError(true);
       setMessage(failure);
       setHomeActionError(failure);
     } finally {
@@ -1585,6 +1607,31 @@ function App() {
     } catch (error) {
       setMessage(tr("devtoolsFailed", { error: String(error) }));
     }
+  }
+
+  async function handleOpenCodexUpdateLog() {
+    try {
+      await openCodexUpdateLog();
+      setMessage(tr("updateLogOpened"));
+    } catch {
+      setHomeActionError(tr("openUpdateLogFailed"));
+    }
+  }
+
+  function renderCodexInstallErrorActions() {
+    if (!codexInstallError) return null;
+    return (
+      <div className="codexInstallErrorActions">
+        <button
+          className="secondaryButton"
+          type="button"
+          onClick={() => void handleOpenCodexUpdateLog()}
+        >
+          {tr("openUpdateLog")}
+        </button>
+        <small>{tr("updateLogShortcut")}</small>
+      </div>
+    );
   }
 
   async function waitForCodexOpen(): Promise<boolean> {
@@ -2013,6 +2060,7 @@ function App() {
                 {homeActionError}
               </p>
             ) : null}
+            {renderCodexInstallErrorActions()}
             {codexInstallNotice ? (
               <p role="status">{codexInstallNotice}</p>
             ) : null}
@@ -2598,6 +2646,7 @@ function App() {
                 {homeActionError}
               </p>
             ) : null}
+            {renderCodexInstallErrorActions()}
             <div
               className={
                 appInstalled && !updateAvailable

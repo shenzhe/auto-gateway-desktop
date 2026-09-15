@@ -476,6 +476,14 @@ export function openCodex(): Promise<void> {
   return invoke<void>("open_codex");
 }
 
+export function openCodexUpdateLog(): Promise<void> {
+  return invoke<void>("open_codex_update_log");
+}
+
+export function logCodexUpdateError(message: string): Promise<void> {
+  return invoke<void>("log_codex_update_error", { message });
+}
+
 export function isCodexRunning(): Promise<boolean> {
   return invoke<boolean>("is_codex_running");
 }

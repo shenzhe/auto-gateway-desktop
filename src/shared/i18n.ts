@@ -99,7 +99,13 @@ const dictionaries = {
     installedReady:
       "ChatGPT and Codex are installed and ready for the next step.",
     updatedReady: "ChatGPT and Codex were updated successfully.",
-    installationFailed: "Codex installation failed: {error}",
+    installationFailed:
+      "Codex installation could not be completed. Open the update log for details.",
+    openUpdateLog: "Open update log",
+    updateLogShortcut: "Shortcut: Ctrl+Shift+L (Windows) or Cmd+Shift+L (macOS)",
+    updateLogOpened: "Opened the Codex update log.",
+    openUpdateLogFailed:
+      "The update log could not be opened. Check the application log folder manually.",
     storeInstallationInProgress:
       "Finish the ChatGPT installation in Microsoft Store. This page is checking automatically.",
     storeInstallationTitle: "Finishing Windows registration…",
@@ -702,7 +708,11 @@ const dictionaries = {
     downloadPercent: "已下载 {percent}%",
     installedReady: "ChatGPT 和 Codex 已安装，可以进入下一步。",
     updatedReady: "ChatGPT 和 Codex 已成功更新。",
-    installationFailed: "Codex 安装失败：{error}",
+    installationFailed: "Codex 安装未完成，请打开更新日志查看详情。",
+    openUpdateLog: "打开更新日志",
+    updateLogShortcut: "快捷键：Windows 使用 Ctrl+Shift+L，macOS 使用 Cmd+Shift+L",
+    updateLogOpened: "已打开 Codex 更新日志。",
+    openUpdateLogFailed: "无法打开更新日志，请手动检查应用日志目录。",
     storeInstallationInProgress:
       "请在 Microsoft Store 完成 ChatGPT 安装；此页面会自动检查。",
     storeInstallationTitle: "正在完成 Windows 注册…",

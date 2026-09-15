@@ -632,6 +632,18 @@ async fn install_downloaded_path(
                 .to_string(),
         );
     }
+    #[cfg(target_os = "windows")]
+    log_codex_update(
+        "info",
+        "direct_msix_install_selected",
+        format!(
+            "installerPath={}; targetPath={}",
+            download_path.display(),
+            preferred_destination
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "automatic".to_string()),
+        ),
+    );
     emit_install_progress(app, "installing", 0, None);
     #[cfg(target_os = "windows")]
     emit_install_progress(app, "windows-installing", 0, None);
@@ -654,6 +666,18 @@ async fn download_installer(
     download_urls: &[String],
     download_path: &Path,
 ) -> Result<(), String> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let started = Instant::now();
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    log_codex_update(
+        "info",
+        "download_flow_started",
+        format!(
+            "sourceCount={}; installerPath={}",
+            download_urls.len(),
+            download_path.display(),
+        ),
+    );
     let mut errors = Vec::new();
     emit_install_progress(app, "selecting-source", 0, None);
     let ranked_urls = rank_download_sources(download_urls).await;
@@ -670,7 +694,25 @@ async fn download_installer(
                 log_codex_update(
                     "info",
                     "download_source_completed",
-                    format!("source={}", download_source_label(download_url)),
+                    format!(
+                        "source={}; installerPath={}; elapsedMs={}",
+                        download_source_label(download_url),
+                        download_path.display(),
+                        started.elapsed().as_millis(),
+                    ),
+                );
+                log_codex_update(
+                    "info",
+                    "download_flow_completed",
+                    format!(
+                        "source={}; installerPath={}; bytes={}; elapsedMs={}",
+                        download_source_label(download_url),
+                        download_path.display(),
+                        fs::metadata(download_path)
+                            .map(|metadata| metadata.len())
+                            .unwrap_or_default(),
+                        started.elapsed().as_millis(),
+                    ),
                 );
                 return Ok(());
             }
@@ -688,6 +730,17 @@ async fn download_installer(
             }
         }
     }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    log_codex_update(
+        "error",
+        "download_flow_failed",
+        format!(
+            "installerPath={}; elapsedMs={}; errors={}",
+            download_path.display(),
+            started.elapsed().as_millis(),
+            errors.join(" | "),
+        ),
+    );
     Err(format!(
         "download the ChatGPT installer from the mirror, CDN, and acceleration sources: {}",
         errors.join("; ")
@@ -1025,6 +1078,20 @@ async fn rank_download_sources(download_urls: &[String]) -> Vec<String> {
     if let Some(cached) = cache.as_ref().filter(|cached| {
         cached.key == cache_key && cached.measured_at.elapsed() < DOWNLOAD_SOURCE_CACHE_TTL
     }) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        log_codex_update(
+            "info",
+            "download_source_ranking_cache_hit",
+            format!(
+                "sources={}",
+                cached
+                    .ranked_urls
+                    .iter()
+                    .map(|url| download_source_label(url))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ),
+        );
         return cached.ranked_urls.clone();
     }
 
@@ -1056,6 +1123,19 @@ async fn rank_download_sources(download_urls: &[String]) -> Vec<String> {
         key: cache_key,
         ranked_urls: ranked.clone(),
     });
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    log_codex_update(
+        "info",
+        "download_source_ranking_completed",
+        format!(
+            "sources={}",
+            ranked
+                .iter()
+                .map(|url| download_source_label(url))
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+    );
     ranked
 }
 
@@ -1102,10 +1182,18 @@ async fn probe_download_source(index: usize, url: String) -> Result<DownloadProb
 }
 
 fn download_source_label(download_url: &str) -> String {
-    reqwest::Url::parse(download_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .unwrap_or_else(|| "download source".to_string())
+    let Ok(url) = reqwest::Url::parse(download_url) else {
+        return "download source".to_string();
+    };
+    let Some(host) = url.host_str() else {
+        return "download source".to_string();
+    };
+    let path = url.path().trim_end_matches('/');
+    if path.is_empty() {
+        host.to_string()
+    } else {
+        format!("{host}{path}")
+    }
 }
 
 fn emit_install_progress(
@@ -1848,15 +1936,66 @@ fn log_codex_update(level: &str, event: &str, message: impl AsRef<str>) {
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn with_codex_update_log_location(error: String) -> String {
     log_codex_update("error", "update_failed", &error);
-    match codex_update_log_path() {
-        Some(path) => format!("{error}. Update log: {}", path.display()),
-        None => error,
-    }
+    "Codex installation could not be completed. Open the update log for details.".to_string()
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn with_codex_update_log_location(error: String) -> String {
     error
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn log_codex_update_error(message: &str) {
+    log_codex_update("error", "frontend_installation_failed", message);
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn log_codex_update_error(_message: &str) {}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub fn open_codex_update_log() -> Result<(), String> {
+    let path = codex_update_log_path()
+        .ok_or_else(|| "the Codex update log location is unavailable".to_string())?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "the Codex update log directory is unavailable".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("create the Codex update log directory: {error}"))?;
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("create the Codex update log: {error}"))?;
+    log_codex_update(
+        "info",
+        "update_log_open_requested",
+        format!("path={}", path.display()),
+    );
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|error| format!("open the Codex update log: {error}"))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new("explorer.exe")
+            .creation_flags(CREATE_NO_WINDOW)
+            .arg(&path)
+            .spawn()
+            .map_err(|error| format!("open the Codex update log: {error}"))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub fn open_codex_update_log() -> Result<(), String> {
+    Err("opening the Codex update log is supported on macOS and Windows only".to_string())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -2461,6 +2600,11 @@ async fn install_with_microsoft_store_fallback(
         "store_fallback_started",
         format!("forceUpdate={force_update}; directError={mirror_error}"),
     );
+    log_codex_update(
+        "warning",
+        "installation_mode_changed",
+        "direct MSIX installation failed; switching to WinGet and Microsoft Store fallback",
+    );
     emit_install_progress(app, "windows-fallback", 0, None);
     let winget_result =
         tauri::async_runtime::spawn_blocking(move || install_with_winget(force_update))
@@ -2472,25 +2616,27 @@ async fn install_with_microsoft_store_fallback(
             log_codex_update("error", "winget_fallback_failed", error);
         }
         emit_install_progress(app, "windows-store", 0, None);
+        log_codex_update(
+            "warning",
+            "microsoft_store_fallback_selected",
+            "WinGet could not complete the installation; opening Microsoft Store",
+        );
         open_microsoft_store()?;
-        let reason = mirror_error.trim();
-        let message = if reason.is_empty() {
-            "Microsoft Store has opened. Finish the ChatGPT installation there; this page will continue automatically.".to_string()
-        } else {
-            format!(
-                "The direct ChatGPT installer could not be completed ({reason}). Microsoft Store has opened; finish the installation there and this page will continue automatically."
-            )
-        };
         return Ok(CodexInstallResult {
             installed: false,
             path: None,
-            message,
+            message: "Microsoft Store has opened. Finish the ChatGPT installation there; this page will continue automatically.".to_string(),
             awaiting_installation: true,
             can_retry_cached_installer: completed_installer_available(),
         });
     }
 
     emit_install_progress(app, "verifying", 0, None);
+    log_codex_update(
+        "info",
+        "winget_fallback_completed",
+        "WinGet reported success; verifying the installed package",
+    );
     let status = status().await;
     if status.installed && (!force_update || status.update_available == Some(false)) {
         if force_update {
@@ -2519,17 +2665,16 @@ async fn install_with_microsoft_store_fallback(
         ),
     );
     emit_install_progress(app, "windows-store", 0, None);
+    log_codex_update(
+        "warning",
+        "microsoft_store_fallback_selected",
+        "WinGet completed without the expected installed version; opening Microsoft Store",
+    );
     open_microsoft_store()?;
     Ok(CodexInstallResult {
         installed: false,
         path: None,
-        message: if mirror_error.trim().is_empty() {
-            "Microsoft Store is installing ChatGPT. This page will continue automatically when the installation finishes.".to_string()
-        } else {
-            format!(
-                "The direct ChatGPT installer could not be completed ({mirror_error}). Microsoft Store is installing ChatGPT; this page will continue automatically when the installation finishes."
-            )
-        },
+        message: "Microsoft Store is installing ChatGPT. This page will continue automatically when the installation finishes.".to_string(),
         awaiting_installation: true,
         can_retry_cached_installer: completed_installer_available(),
     })
@@ -3286,6 +3431,20 @@ image-path      : /tmp/ChatGPT.dmg
         assert!(!script.contains(
             "Where-Object { $_.Name -match '(?i)(chatgpt|codex)' } | Select-Object -First 1"
         ));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn update_failure_response_hides_diagnostic_details() {
+        let response = super::with_codex_update_log_location(
+            "PowerShell installer failed: HRESULT=0x80073D02".to_string(),
+        );
+
+        assert_eq!(
+            response,
+            "Codex installation could not be completed. Open the update log for details."
+        );
+        assert!(!response.contains("0x80073D02"));
     }
 
     #[cfg(target_os = "macos")]
