@@ -753,6 +753,46 @@ h1 {
   min-width: 112px;
   white-space: nowrap;
 }
+.manualCodexDownloadPanel {
+  display: grid;
+  gap: 8px;
+  margin: 16px 0 24px;
+  padding: 16px;
+  border: 1px dashed var(--control-border);
+  border-radius: 12px;
+  background: color-mix(in oklch, var(--primary-soft) 32%, var(--panel));
+}
+.manualCodexDownloadPanel > span {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1.45;
+}
+.manualCodexDownloadLinks {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+}
+.manualCodexDownloadLink {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--control-border);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  text-align: left;
+}
+.manualCodexDownloadLink:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.manualCodexDownloadLink small {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
 .signInActionPanel {
   display: grid;
   justify-items: center;

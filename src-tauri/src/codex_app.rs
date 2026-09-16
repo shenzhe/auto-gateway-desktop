@@ -103,6 +103,10 @@ pub struct CodexInstallResult {
     pub installed: bool,
     pub path: Option<String>,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub manual_download_urls: Vec<String>,
     pub awaiting_installation: bool,
     pub can_retry_cached_installer: bool,
 }
@@ -269,6 +273,8 @@ pub async fn install(
             installed: true,
             path: Some(installation.path.display().to_string()),
             message: "The official ChatGPT desktop application is already installed.".to_string(),
+            message_key: None,
+            manual_download_urls: Vec::new(),
             awaiting_installation: false,
             can_retry_cached_installer: false,
         });
@@ -425,6 +431,8 @@ pub async fn install(
         } else {
             "ChatGPT and Codex are installed and ready for the next step.".to_string()
         },
+        message_key: None,
+        manual_download_urls: Vec::new(),
         awaiting_installation: false,
         can_retry_cached_installer: false,
     })
@@ -675,6 +683,8 @@ pub async fn apply_update(
             .map(|path| path.display().to_string())
             .or(status.path),
         message: "ChatGPT and Codex were updated successfully.".to_string(),
+        message_key: None,
+        manual_download_urls: Vec::new(),
         awaiting_installation: false,
         can_retry_cached_installer: false,
     })
@@ -2830,10 +2840,18 @@ async fn install_with_microsoft_store_fallback(
     force_update: bool,
     mirror_error: &str,
 ) -> Result<CodexInstallResult, String> {
+    let manual_download_urls = latest_release()
+        .await
+        .ok()
+        .and_then(|release| download_urls(Some(&release)).ok())
+        .unwrap_or_default();
     log_codex_update(
         "warning",
         "store_fallback_started",
-        format!("forceUpdate={force_update}; directError={mirror_error}"),
+        format!(
+            "forceUpdate={force_update}; directError={mirror_error}; manualDownloadUrlCount={}",
+            manual_download_urls.len()
+        ),
     );
     log_codex_update(
         "warning",
@@ -2861,6 +2879,8 @@ async fn install_with_microsoft_store_fallback(
             installed: false,
             path: None,
             message: "Microsoft Store has opened. Finish the ChatGPT installation there; this page will continue automatically.".to_string(),
+            message_key: Some("storeInstallationInProgress".to_string()),
+            manual_download_urls: manual_download_urls.clone(),
             awaiting_installation: true,
             can_retry_cached_installer: completed_installer_available(),
         });
@@ -2886,6 +2906,8 @@ async fn install_with_microsoft_store_fallback(
             } else {
                 "ChatGPT and Codex are installed and ready for the next step.".to_string()
             },
+            message_key: None,
+            manual_download_urls: Vec::new(),
             awaiting_installation: false,
             can_retry_cached_installer: false,
         });
@@ -2910,6 +2932,8 @@ async fn install_with_microsoft_store_fallback(
         installed: false,
         path: None,
         message: "Microsoft Store is installing ChatGPT. This page will continue automatically when the installation finishes.".to_string(),
+        message_key: Some("storeInstallationInProgress".to_string()),
+        manual_download_urls,
         awaiting_installation: true,
         can_retry_cached_installer: completed_installer_available(),
     })

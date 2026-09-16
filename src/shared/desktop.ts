@@ -28,6 +28,8 @@ export type CodexInstallResult = {
   installed: boolean;
   path?: string;
   message: string;
+  messageKey?: string;
+  manualDownloadUrls?: string[];
   awaitingInstallation: boolean;
   canRetryCachedInstaller: boolean;
 };

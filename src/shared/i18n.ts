@@ -108,6 +108,14 @@ const dictionaries = {
       "The update log could not be opened. Check the application log folder manually.",
     storeInstallationInProgress:
       "Finish the ChatGPT installation in Microsoft Store. This page is checking automatically.",
+    manualCodexDownloadTitle: "Manual download links",
+    manualCodexDownloadDescription:
+      "If Microsoft Store does not finish, download and install the Windows package manually. This page will continue checking automatically.",
+    manualCodexDownloadCdn: "CDN",
+    manualCodexDownloadAg: "AG mirror",
+    manualCodexDownloadMirror: "Mirror",
+    manualCodexDownloadLink: "Download link",
+    manualCodexDownloadOpenFailed: "Unable to open the download link.",
     storeInstallationTitle: "Finishing Windows registration…",
     storeInstallationTimedOutTitle: "Windows registration is taking too long",
     storeInstallationTimedOutDescription:
@@ -715,6 +723,14 @@ const dictionaries = {
     openUpdateLogFailed: "无法打开更新日志，请手动检查应用日志目录。",
     storeInstallationInProgress:
       "请在 Microsoft Store 完成 ChatGPT 安装；此页面会自动检查。",
+    manualCodexDownloadTitle: "手动下载安装包",
+    manualCodexDownloadDescription:
+      "如果 Microsoft Store 长时间未完成，请手动下载并安装 Windows 安装包；此页面会继续自动检查。",
+    manualCodexDownloadCdn: "CDN 下载",
+    manualCodexDownloadAg: "AG 镜像",
+    manualCodexDownloadMirror: "镜像下载",
+    manualCodexDownloadLink: "下载安装包",
+    manualCodexDownloadOpenFailed: "无法打开下载链接。",
     storeInstallationTitle: "正在完成 Windows 注册…",
     storeInstallationTimedOutTitle: "Windows 注册超时",
     storeInstallationTimedOutDescription:

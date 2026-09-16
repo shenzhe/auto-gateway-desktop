@@ -66,6 +66,7 @@ import {
   signOutDesktop,
   updateTrayStatus,
   type CodexAppStatus,
+  type CodexInstallResult,
   type CodexInstallProgress,
   type CodexStatus,
   type DesktopAccountSummary,
@@ -101,6 +102,7 @@ import {
   saveNotificationWindowPayload,
 } from "./shared/notifications";
 import { useCopyOnlyContextMenu } from "./shared/useCopyOnlyContextMenu";
+import type { TranslationKey } from "./shared/i18n";
 import {
   formatBalance,
   formatDataSize,
@@ -223,6 +225,9 @@ function App() {
   const [installationTimedOut, setInstallationTimedOut] = useState(false);
   const [storeInstallForceUpdate, setStoreInstallForceUpdate] = useState(false);
   const [canRetryCachedInstaller, setCanRetryCachedInstaller] = useState(false);
+  const [manualCodexDownloadUrls, setManualCodexDownloadUrls] = useState<string[]>(
+    [],
+  );
   const [externalInstallationMessage, setExternalInstallationMessage] =
     useState("");
   const externalInstallationStartedAt = useRef<number | null>(null);
@@ -322,6 +327,57 @@ function App() {
         return tr("replacingCodex");
     }
   }
+
+  function localizeCodexInstallMessage(result: CodexInstallResult): string {
+    return result.messageKey
+      ? tr(result.messageKey as TranslationKey)
+      : result.message;
+  }
+
+  function manualCodexDownloadLabel(url: string): string {
+    try {
+      const host = new URL(url).hostname;
+      if (host === "cdn.autogateway.cc") return tr("manualCodexDownloadCdn");
+      if (host === "ag.guangla.com") return tr("manualCodexDownloadAg");
+      return tr("manualCodexDownloadMirror");
+    } catch {
+      return tr("manualCodexDownloadLink");
+    }
+  }
+
+  async function handleOpenManualCodexDownload(url: string) {
+    try {
+      await openUrl(url);
+    } catch {
+      setHomeActionError(tr("manualCodexDownloadOpenFailed"));
+    }
+  }
+
+  function renderManualCodexDownloads() {
+    if (!installationTimedOut || manualCodexDownloadUrls.length === 0) {
+      return null;
+    }
+    return (
+      <section className="manualCodexDownloadPanel" aria-live="polite">
+        <strong>{tr("manualCodexDownloadTitle")}</strong>
+        <span>{tr("manualCodexDownloadDescription")}</span>
+        <div className="manualCodexDownloadLinks">
+          {manualCodexDownloadUrls.map((url) => (
+            <button
+              className="manualCodexDownloadLink"
+              key={url}
+              type="button"
+              title={url}
+              onClick={() => void handleOpenManualCodexDownload(url)}
+            >
+              <strong>{manualCodexDownloadLabel(url)}</strong>
+              <small>{url}</small>
+            </button>
+          ))}
+        </div>
+      </section>
+    );
+  }
   const downloadedSize = formatDataSize(installProgress?.downloadedBytes);
   const totalDownloadSize = formatDataSize(installProgress?.totalBytes);
   const downloadRemaining = formatRemainingDuration(
@@ -398,6 +454,7 @@ function App() {
     externalInstallationStartedAt.current = null;
     setAwaitingExternalInstallation(false);
     setCanRetryCachedInstaller(false);
+    setManualCodexDownloadUrls([]);
     setExternalInstallationMessage("");
     setInstallationTimedOut(false);
     storeAutoRetryAttempted.current = false;
@@ -679,6 +736,7 @@ function App() {
     setInstallingCodex(false);
     setInstallProgress(null);
     setCanRetryCachedInstaller(false);
+    setManualCodexDownloadUrls([]);
     setExternalInstallationMessage("");
     setInstallationTimedOut(false);
     const completedMessage = tr(
@@ -1306,6 +1364,7 @@ function App() {
     setAwaitingExternalInstallation(false);
     setStoreInstallForceUpdate(forceUpdate);
     setCanRetryCachedInstaller(false);
+    setManualCodexDownloadUrls([]);
     setExternalInstallationMessage("");
     setInstallationTimedOut(false);
     setInstallingCodex(true);
@@ -1352,17 +1411,19 @@ function App() {
           downloadedUpdate.targetPath,
         );
         if (result.awaitingInstallation) {
+          const installationMessage = localizeCodexInstallMessage(result);
           waitingForExternalInstallation = true;
           externalInstallationStartedAt.current = Date.now();
           storeAutoRetryAttempted.current = true;
           setAwaitingExternalInstallation(true);
           setCanRetryCachedInstaller(result.canRetryCachedInstaller);
-          setExternalInstallationMessage(result.message);
+          setManualCodexDownloadUrls(result.manualDownloadUrls ?? []);
+          setExternalInstallationMessage(installationMessage);
           setInstallProgress({
             stage: "windows-store",
             downloadedBytes: 0,
           });
-          setMessage(result.message);
+          setMessage(installationMessage);
           return;
         }
         if (!result.installed) throw new Error(result.message);
@@ -1379,17 +1440,19 @@ function App() {
 
       const result = await installCodex(forceUpdate, forceRedownload);
       if (result.awaitingInstallation) {
+        const installationMessage = localizeCodexInstallMessage(result);
         waitingForExternalInstallation = true;
         externalInstallationStartedAt.current = Date.now();
         storeAutoRetryAttempted.current = automaticRetry;
         setAwaitingExternalInstallation(true);
         setCanRetryCachedInstaller(result.canRetryCachedInstaller);
-        setExternalInstallationMessage(result.message);
+        setManualCodexDownloadUrls(result.manualDownloadUrls ?? []);
+        setExternalInstallationMessage(installationMessage);
         setInstallProgress({
           stage: "windows-store",
           downloadedBytes: 0,
         });
-        setMessage(result.message);
+        setMessage(installationMessage);
         return;
       }
       if (!result.installed) throw new Error(result.message);
@@ -2061,6 +2124,7 @@ function App() {
               </p>
             ) : null}
             {renderCodexInstallErrorActions()}
+            {renderManualCodexDownloads()}
             {codexInstallNotice ? (
               <p role="status">{codexInstallNotice}</p>
             ) : null}
@@ -2714,6 +2778,7 @@ function App() {
                   </button>
                 </div>
               ) : null}
+              {renderManualCodexDownloads()}
               {appInstalled ? (
                 <div className="versionGrid" aria-label={tr("installed")}>
                   <div className="versionItem">
