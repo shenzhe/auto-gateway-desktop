@@ -458,8 +458,9 @@ async fn apply_codex_update_command(
     app: AppHandle,
     downloaded_version: String,
     target_path: Option<String>,
+    allow_store_fallback: bool,
 ) -> Result<CodexInstallResult, String> {
-    apply_codex_update(&app, downloaded_version, target_path).await
+    apply_codex_update(&app, downloaded_version, target_path, allow_store_fallback).await
 }
 
 #[tauri::command]

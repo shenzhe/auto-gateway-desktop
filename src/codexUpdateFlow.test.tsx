@@ -36,7 +36,7 @@ afterEach(async () => {
   localStorage.clear();
 });
 
-it("shows a visible installation error after loading disappears and clears it on successful retry", async () => {
+it("automatically retries a failed update with a fresh installer", async () => {
   localStorage.setItem("autogateway.desktop.locale", "en");
   localStorage.setItem("autogateway.desktop.setup-completed:1", "true");
   const host = document.createElement("div");
@@ -83,29 +83,19 @@ it("shows a visible installation error after loading disappears and clears it on
   await waitFor(() => expect(attempts).toBe(1));
   expect(screen.getByRole("progressbar")).toBeInTheDocument();
   await act(async () => rejectInstall("Deployment failed: 0x80073D02"));
-  const alert = await screen.findByRole("alert");
-  expect(alert).toBeVisible();
-  expect(alert).toHaveTextContent(
-    "Codex installation could not be completed. Open the update log for details.",
-  );
-  expect(alert).not.toHaveTextContent("Deployment failed: 0x80073D02");
-  expect(alert).toHaveClass("homeActionMessage");
+  await waitFor(() => expect(attempts).toBe(2));
   await waitFor(() =>
     expect(mocks.invoke).toHaveBeenCalledWith("log_codex_update_error", {
       message: "Deployment failed: 0x80073D02",
     }),
   );
   expect(
-    screen.getByRole("button", { name: "Open update log" }),
+    await screen.findByText("Codex was updated and reopened successfully."),
   ).toBeVisible();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   fireEvent.keyDown(window, { key: "l", ctrlKey: true, shiftKey: true });
   await waitFor(() =>
     expect(mocks.invoke).toHaveBeenCalledWith("open_codex_update_log"),
   );
   expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
-
-  await user.click(screen.getByRole("button", { name: "Update Codex" }));
-  await waitFor(() => expect(attempts).toBe(2));
-  await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
-  expect(await screen.findByText("ChatGPT and Codex were updated successfully.")).toBeVisible();
 });

@@ -1372,7 +1372,9 @@ function App() {
     setMessage(
       tr(
         automaticRetry
-          ? "reinstallingCodex"
+          ? forceRedownload
+            ? "retryingCodexUpdate"
+            : "reinstallingCodex"
         : forceUpdate
             ? "updating"
             : "installing",
@@ -1409,6 +1411,7 @@ function App() {
         const result = await applyCodexUpdate(
           downloadedUpdate.version,
           downloadedUpdate.targetPath,
+          automaticRetry,
         );
         if (result.awaitingInstallation) {
           const installationMessage = localizeCodexInstallMessage(result);
@@ -1468,6 +1471,22 @@ function App() {
         await logCodexUpdateError(String(error));
       } catch {
         // The original error is still retained by the backend update log when available.
+      }
+      await refreshStatus(false);
+      if (forceUpdate && !automaticRetry) {
+        waitingForExternalInstallation = true;
+        setCodexInstallError(false);
+        setHomeActionError("");
+        setMessage(tr("retryingCodexUpdate"));
+        try {
+          await logCodexUpdateError(
+            "The first update attempt failed. Forcing a fresh release check and installer download for one retry.",
+          );
+        } catch {
+          // The first attempt's detailed failure is already in the update log.
+        }
+        await handleInstallCodex(true, true, true);
+        return;
       }
       const failure = tr("installationFailed");
       setCodexInstallError(true);

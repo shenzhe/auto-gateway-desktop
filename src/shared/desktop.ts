@@ -463,10 +463,12 @@ export function downloadCodexUpdate(
 export function applyCodexUpdate(
   downloadedVersion: string,
   targetPath?: string,
+  allowStoreFallback = false,
 ): Promise<CodexInstallResult> {
   return invoke<CodexInstallResult>("apply_codex_update_command", {
     downloadedVersion,
     targetPath,
+    allowStoreFallback,
   });
 }
 

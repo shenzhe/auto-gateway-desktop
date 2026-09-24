@@ -244,7 +244,7 @@ pub async fn status() -> CodexAppStatus {
         return local;
     }
 
-    let latest_result = latest_release().await;
+    let latest_result = latest_release(false).await;
     let (latest_version, update_available, update_check_error) = match latest_result {
         Ok(latest) => {
             let available = local
@@ -282,7 +282,7 @@ pub async fn install(
 
     // The version service provides the preferred upstream mirror, CDN, and
     // configured acceleration sources.
-    let latest_release = latest_release().await.ok();
+    let latest_release = latest_release(force_redownload).await.ok();
     let download_urls = match download_urls(latest_release.as_ref()) {
         Ok(urls) => urls,
         Err(error) => {
@@ -344,6 +344,9 @@ pub async fn install(
             &download_path,
             preferred_destination.as_deref(),
             Some(&download_urls),
+            latest_release
+                .as_ref()
+                .map(|release| release.version.as_str()),
         )
         .await
         {
@@ -362,7 +365,16 @@ pub async fn install(
     }
 
     if installer_result.is_none() {
-        if let Err(error) = download_installer(app, &download_urls, &download_path).await {
+        if let Err(error) = download_installer(
+            app,
+            &download_urls,
+            &download_path,
+            latest_release
+                .as_ref()
+                .map(|release| release.version.as_str()),
+        )
+        .await
+        {
             #[cfg(target_os = "windows")]
             return install_with_microsoft_store_fallback(app, force_update, &error).await;
             #[cfg(not(target_os = "windows"))]
@@ -373,6 +385,9 @@ pub async fn install(
             &download_path,
             preferred_destination.as_deref(),
             Some(&download_urls),
+            latest_release
+                .as_ref()
+                .map(|release| release.version.as_str()),
         )
         .await
         {
@@ -401,18 +416,24 @@ pub async fn install(
             "{error}. Open the installer once, then return here and check again."
         ));
     }
-    if force_update {
-        let expected_version = status.latest_version.as_deref();
+    if let Some(expected) = latest_release
+        .as_ref()
+        .map(|release| release.version.as_str())
+    {
         let installed_version = status.local_version.as_deref();
-        if let (Some(expected), Some(installed)) = (expected_version, installed_version) {
-            if compare_versions(installed, expected) == Ordering::Less {
-                let error = format!("the update finished, but version {installed} is still installed; expected {expected}");
-                #[cfg(target_os = "windows")]
-                return install_with_microsoft_store_fallback(app, true, &error).await;
-                #[cfg(not(target_os = "windows"))]
-                return Err(error);
-            }
+        if !installed_version
+            .is_some_and(|installed| compare_versions(installed, expected) == Ordering::Equal)
+        {
+            let error = format!(
+                "the installer target version is {expected}, but the detected installed version is {installed_version:?}"
+            );
+            #[cfg(target_os = "windows")]
+            return install_with_microsoft_store_fallback(app, force_update, &error).await;
+            #[cfg(not(target_os = "windows"))]
+            return Err(error);
         }
+    }
+    if force_update {
         #[cfg(target_os = "windows")]
         open_installed_app_at(status.path.as_deref().map(Path::new))?;
         #[cfg(not(target_os = "windows"))]
@@ -462,7 +483,7 @@ pub async fn download_update(
             target_version.as_deref().unwrap_or("unknown"),
         ),
     );
-    let latest_release = latest_release().await.ok();
+    let latest_release = latest_release(force_redownload).await.ok();
     let extension = download_extension(&[]);
     let latest_version = latest_release
         .as_ref()
@@ -474,13 +495,18 @@ pub async fn download_update(
         if let Some(cached) =
             latest_version.and_then(|version| cached_installer_for_version(version, extension))
         {
-            #[cfg(target_os = "windows")]
-            let cached_size_matches = match candidate_download_urls.as_deref() {
-                Some(urls) => cached_installer_size_matches(urls, &cached.path).await,
+            let cached_version_matches = match latest_version {
+                Some(version) => cached_installer_version_matches(&cached.path, version).await,
                 None => false,
             };
+            #[cfg(target_os = "windows")]
+            let cached_size_matches = cached_version_matches
+                && match candidate_download_urls.as_deref() {
+                    Some(urls) => cached_installer_size_matches(urls, &cached.path).await,
+                    None => false,
+                };
             #[cfg(not(target_os = "windows"))]
-            let cached_size_matches = true;
+            let cached_size_matches = cached_version_matches;
             if cached_size_matches {
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 log_codex_update(
@@ -497,35 +523,38 @@ pub async fn download_update(
                     target_version: target_version.clone(),
                 });
             }
-            #[cfg(target_os = "windows")]
             {
                 log_codex_update(
                     "warning",
-                    "cached_installer_size_mismatch",
+                    "cached_installer_version_or_size_mismatch",
                     format!(
-                        "path={}; action=discard_and_redownload",
-                        cached.path.display()
+                        "path={}; expectedVersion={}; action=discard_and_redownload",
+                        cached.path.display(),
+                        latest_version.unwrap_or("unknown"),
                     ),
                 );
-                discard_windows_installer(&cached.path)?;
+                discard_downloaded_installer(&cached.path)?;
             }
         }
         if latest_version.is_none() {
             if let Some(cached) = newest_cached_installer(extension) {
-                #[cfg(any(target_os = "macos", target_os = "windows"))]
-                log_codex_update(
-                    "warning",
-                    "offline_cached_installer_selected",
-                    format!("version={}; path={}", cached.version, cached.path.display()),
-                );
-                emit_cached_download_progress(app, &cached);
-                return Ok(CodexUpdateDownloadResult {
-                    downloaded: true,
-                    version: cached.version,
-                    message: "The cached Codex installer is ready to install.".to_string(),
-                    target_path: target_path.clone(),
-                    target_version: target_version.clone(),
-                });
+                if cached_installer_version_matches(&cached.path, &cached.version).await {
+                    #[cfg(any(target_os = "macos", target_os = "windows"))]
+                    log_codex_update(
+                        "warning",
+                        "offline_cached_installer_selected",
+                        format!("version={}; path={}", cached.version, cached.path.display()),
+                    );
+                    emit_cached_download_progress(app, &cached);
+                    return Ok(CodexUpdateDownloadResult {
+                        downloaded: true,
+                        version: cached.version,
+                        message: "The cached Codex installer is ready to install.".to_string(),
+                        target_path: target_path.clone(),
+                        target_version: target_version.clone(),
+                    });
+                }
+                discard_downloaded_installer(&cached.path)?;
             }
         }
     }
@@ -540,7 +569,7 @@ pub async fn download_update(
     }
 
     emit_install_progress(app, "preparing", 0, None);
-    download_installer(app, &download_urls, &download_path)
+    download_installer(app, &download_urls, &download_path, latest_version)
         .await
         .map_err(with_codex_update_log_location)?;
 
@@ -586,7 +615,10 @@ pub async fn apply_update(
     app: &AppHandle,
     downloaded_version: String,
     target_path: Option<String>,
+    allow_store_fallback: bool,
 ) -> Result<CodexInstallResult, String> {
+    #[cfg(not(target_os = "windows"))]
+    let _ = allow_store_fallback;
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     log_codex_update(
         "info",
@@ -607,20 +639,32 @@ pub async fn apply_update(
     let preferred_destination = target_path
         .map(PathBuf::from)
         .or_else(|| update_target_installation().map(|installation| installation.path));
+    let retry_download_urls = latest_release(false)
+        .await
+        .ok()
+        .filter(|release| {
+            compare_versions(&release.version, &downloaded_version) == Ordering::Equal
+        })
+        .and_then(|release| download_urls(Some(&release)).ok());
     if let Err(error) = install_downloaded_path_with_retry(
         app,
         &download_path,
         preferred_destination.as_deref(),
-        None,
+        retry_download_urls.as_deref(),
+        Some(downloaded_version.as_str()),
     )
     .await
     {
         #[cfg(target_os = "windows")]
         log_codex_update("error", "direct_msix_update_failed", &error);
         #[cfg(target_os = "windows")]
-        return install_with_microsoft_store_fallback(app, true, &error)
-            .await
-            .map_err(with_codex_update_log_location);
+        if allow_store_fallback {
+            return install_with_microsoft_store_fallback(app, true, &error)
+                .await
+                .map_err(with_codex_update_log_location);
+        } else {
+            return Err(with_codex_update_log_location(error));
+        }
         #[cfg(not(target_os = "windows"))]
         return Err(with_codex_update_log_location(error));
     }
@@ -628,12 +672,18 @@ pub async fn apply_update(
     let status = status().await;
     if !status.installed {
         #[cfg(target_os = "windows")]
-        return install_with_microsoft_store_fallback(
-            app,
-            true,
-            "The installer completed but the application was not found",
-        )
-        .await;
+        if allow_store_fallback {
+            return install_with_microsoft_store_fallback(
+                app,
+                true,
+                "The installer completed but the application was not found",
+            )
+            .await;
+        } else {
+            return Err(with_codex_update_log_location(
+                "The installer completed but the application was not found".to_string(),
+            ));
+        }
         #[cfg(not(target_os = "windows"))]
         return Err(
             "the Codex installer finished, but the application could not be found".to_string(),
@@ -643,16 +693,20 @@ pub async fn apply_update(
         .as_deref()
         .and_then(installed_version_at_path)
         .or_else(|| status.local_version.clone());
-    if let (Some(expected), Some(installed)) = (
-        (downloaded_version != "latest").then_some(downloaded_version.as_str()),
-        installed_version.as_deref(),
-    ) {
-        if compare_versions(installed, expected) == Ordering::Less {
+    if downloaded_version != "latest" {
+        let matches_package = installed_version.as_deref().is_some_and(|installed| {
+            compare_versions(installed, downloaded_version.as_str()) == Ordering::Equal
+        });
+        if !matches_package {
             let error = format!(
-                "the update finished, but version {installed} is still installed; expected {expected}"
+                "the installer version is {downloaded_version}, but the detected installed version is {installed_version:?}"
             );
             #[cfg(target_os = "windows")]
-            return install_with_microsoft_store_fallback(app, true, &error).await;
+            if allow_store_fallback {
+                return install_with_microsoft_store_fallback(app, true, &error).await;
+            } else {
+                return Err(with_codex_update_log_location(error));
+            }
             #[cfg(not(target_os = "windows"))]
             return Err(error);
         }
@@ -738,95 +792,103 @@ async fn install_downloaded_path_with_retry(
     download_path: &Path,
     preferred_destination: Option<&Path>,
     retry_download_urls: Option<&[String]>,
+    expected_version: Option<&str>,
 ) -> Result<InstallerResult, String> {
-    let first_error = match install_downloaded_path(app, download_path, preferred_destination).await
-    {
+    let first_error = match ensure_installer_version(download_path, expected_version).await {
+        Ok(()) => install_downloaded_path(app, download_path, preferred_destination).await,
+        Err(error) => Err(error),
+    };
+    let first_error = match first_error {
         Ok(result) => return Ok(result),
         Err(error) => error,
     };
 
-    #[cfg(target_os = "windows")]
+    log_codex_update(
+        "error",
+        "local_installer_install_failed",
+        format!(
+            "path={}; expectedVersion={}; error={first_error}; retry=1",
+            download_path.display(),
+            expected_version.unwrap_or("unknown"),
+        ),
+    );
+    discard_downloaded_installer(download_path).map_err(|cleanup_error| {
+        format!(
+            "local installer installation failed: {first_error}; remove the local installer for retry: {cleanup_error}"
+        )
+    })?;
+    let retry_download_urls = match retry_download_urls {
+        Some(urls) if !urls.is_empty() => urls.to_vec(),
+        _ => {
+            let release = latest_release(true)
+                .await
+                .map_err(|error| format!("redownload the Codex installer: {error}"))?;
+            if expected_version.is_some_and(|expected| {
+                compare_versions(&release.version, expected) != Ordering::Equal
+            }) {
+                return Err(format!(
+                    "the latest release changed while retrying (expected {}, latest {})",
+                    expected_version.unwrap_or("unknown"),
+                    release.version
+                ));
+            }
+            download_urls(Some(&release))?
+        }
+    };
+    log_codex_update(
+        "warning",
+        "installer_redownload_started",
+        format!(
+            "path={}; sourceCount={}; expectedVersion={}; attempt=1",
+            download_path.display(),
+            retry_download_urls.len(),
+            expected_version.unwrap_or("unknown"),
+        ),
+    );
+    if let Err(error) =
+        download_installer(app, &retry_download_urls, download_path, expected_version).await
     {
         log_codex_update(
             "error",
-            "local_msix_install_failed",
+            "installer_redownload_failed",
             format!(
-                "path={}; error={first_error}; retry=1",
+                "path={}; error={error}; attempts=1",
                 download_path.display()
             ),
         );
-        discard_windows_installer(download_path).map_err(|cleanup_error| {
-            format!(
-                "local MSIX installation failed: {first_error}; remove the local installer for retry: {cleanup_error}"
-            )
-        })?;
-        let download_urls = match retry_download_urls {
-            Some(urls) if !urls.is_empty() => urls.to_vec(),
-            _ => {
-                let release = latest_release()
-                    .await
-                    .map_err(|error| format!("redownload the Codex installer: {error}"))?;
-                download_urls(Some(&release))?
-            }
-        };
+        return Err(format!(
+            "local installer installation failed: {first_error}; redownload failed: {error}"
+        ));
+    }
+    match ensure_installer_version(download_path, expected_version).await {
+        Ok(()) => install_downloaded_path(app, download_path, preferred_destination).await,
+        Err(error) => Err(error),
+    }
+    .map(|result| {
         log_codex_update(
-            "warning",
-            "msix_redownload_started",
-            format!(
-                "path={}; sourceCount={}; attempt=1",
-                download_path.display(),
-                download_urls.len(),
-            ),
+            "info",
+            "installer_retry_install_completed",
+            format!("path={}; attempts=1", download_path.display()),
         );
-        if let Err(error) = download_installer(app, &download_urls, download_path).await {
-            log_codex_update(
-                "error",
-                "msix_redownload_failed",
-                format!(
-                    "path={}; error={error}; attempts=1",
-                    download_path.display()
-                ),
-            );
-            return Err(format!(
-                "local MSIX installation failed: {first_error}; redownload failed: {error}"
-            ));
-        }
-        return match install_downloaded_path(app, download_path, preferred_destination).await {
-            Ok(result) => {
-                log_codex_update(
-                    "info",
-                    "msix_retry_install_completed",
-                    format!("path={}; attempts=1", download_path.display()),
-                );
-                Ok(result)
-            }
-            Err(retry_error) => {
-                log_codex_update(
-                    "error",
-                    "msix_retry_install_failed",
-                    format!(
-                        "path={}; error={retry_error}; attempts=1",
-                        download_path.display()
-                    ),
-                );
-                Err(format!(
-                    "local MSIX installation failed: {first_error}; retry after redownload failed: {retry_error}"
-                ))
-            }
-        };
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let _ = retry_download_urls;
-        Err(first_error)
-    }
+        result
+    })
+    .map_err(|retry_error| {
+        log_codex_update(
+            "error",
+            "installer_retry_install_failed",
+            format!("path={}; error={retry_error}; attempts=1", download_path.display()),
+        );
+        format!(
+            "local installer installation failed: {first_error}; retry after redownload failed: {retry_error}"
+        )
+    })
 }
 
 async fn download_installer(
     app: &AppHandle,
     download_urls: &[String],
     download_path: &Path,
+    expected_version: Option<&str>,
 ) -> Result<(), String> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let started = Instant::now();
@@ -835,14 +897,15 @@ async fn download_installer(
         "info",
         "download_flow_started",
         format!(
-            "sourceCount={}; installerPath={}",
+            "sourceCount={}; expectedVersion={}; installerPath={}",
             download_urls.len(),
+            expected_version.unwrap_or("unknown"),
             download_path.display(),
         ),
     );
     let mut errors = Vec::new();
     emit_install_progress(app, "selecting-source", 0, None);
-    let ranked_sources = rank_download_sources(download_urls).await;
+    let ranked_sources = rank_download_sources(download_urls, expected_version).await;
     for source_probe in &ranked_sources {
         let download_url = &source_probe.url;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -850,13 +913,67 @@ async fn download_installer(
             "info",
             "download_source_started",
             format!(
-                "source={}; expectedBytes={:?}",
+                "source={}; expectedVersion={}; versionPinned={}; expectedBytes={:?}",
                 download_source_label(download_url),
+                expected_version.unwrap_or("unknown"),
+                expected_version.is_some_and(|version| {
+                    download_url_is_version_pinned(download_url, version)
+                }),
                 source_probe.total_bytes,
             ),
         );
         match download_installer_from_url(app, download_url, download_path).await {
             Ok(()) => {
+                if let Some(expected_version) = expected_version {
+                    match inspect_downloaded_installer_version(download_path).await {
+                        Ok(actual_version)
+                            if compare_versions(&actual_version, expected_version)
+                                == Ordering::Equal =>
+                        {
+                            log_codex_update(
+                                "info",
+                                "downloaded_installer_version_verified",
+                                format!(
+                                    "source={}; expectedVersion={expected_version}; actualVersion={actual_version}",
+                                    download_source_label(download_url),
+                                ),
+                            );
+                        }
+                        Ok(actual_version) => {
+                            let mismatch = format!(
+                                "installer version mismatch from {}: expected {expected_version}, found {actual_version}",
+                                download_source_label(download_url),
+                            );
+                            log_codex_update(
+                                "error",
+                                "downloaded_installer_version_mismatch",
+                                format!(
+                                    "source={}; expectedVersion={expected_version}; actualVersion={actual_version}",
+                                    download_source_label(download_url),
+                                ),
+                            );
+                            discard_downloaded_installer(download_path)?;
+                            errors.push(mismatch);
+                            continue;
+                        }
+                        Err(error) => {
+                            log_codex_update(
+                                "error",
+                                "downloaded_installer_version_read_failed",
+                                format!(
+                                    "source={}; expectedVersion={expected_version}; error={error}",
+                                    download_source_label(download_url),
+                                ),
+                            );
+                            discard_downloaded_installer(download_path)?;
+                            errors.push(format!(
+                                "read package version from {}: {error}",
+                                download_source_label(download_url),
+                            ));
+                            continue;
+                        }
+                    }
+                }
                 #[cfg(any(target_os = "macos", target_os = "windows"))]
                 log_codex_update(
                     "info",
@@ -1155,6 +1272,192 @@ fn complete_windows_installer_download(
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn downloaded_installer_version(path: &Path) -> Result<String, String> {
+    let file = fs::File::open(path).map_err(|error| format!("read downloaded MSIX: {error}"))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| format!("read downloaded MSIX archive: {error}"))?;
+    let mut manifest = String::new();
+    archive
+        .by_name("AppxManifest.xml")
+        .map_err(|error| format!("read MSIX manifest: {error}"))?
+        .read_to_string(&mut manifest)
+        .map_err(|error| format!("decode MSIX manifest: {error}"))?;
+    let identity_start = manifest
+        .find("<Identity")
+        .ok_or_else(|| "MSIX manifest has no package identity".to_string())?;
+    let identity_end = manifest[identity_start..]
+        .find('>')
+        .map(|offset| identity_start + offset)
+        .ok_or_else(|| "MSIX package identity is incomplete".to_string())?;
+    let identity = &manifest[identity_start..=identity_end];
+    let name = xml_tag_attribute(identity, "Name")
+        .ok_or_else(|| "MSIX package identity has no name".to_string())?;
+    if !matches!(
+        name.as_str(),
+        "OpenAI.Codex" | "Codex" | "OpenAI.ChatGPT" | "ChatGPT"
+    ) {
+        return Err(format!(
+            "MSIX package identity is not OpenAI ChatGPT: {name}"
+        ));
+    }
+    xml_tag_attribute(identity, "Version")
+        .ok_or_else(|| "MSIX package identity has no version".to_string())
+}
+
+async fn inspect_downloaded_installer_version(path: &Path) -> Result<String, String> {
+    let path = path.to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || downloaded_installer_version(&path))
+        .await
+        .map_err(|error| format!("wait for downloaded installer version check: {error}"))?
+}
+
+async fn ensure_installer_version(
+    path: &Path,
+    expected_version: Option<&str>,
+) -> Result<(), String> {
+    let Some(expected_version) = expected_version else {
+        return Ok(());
+    };
+    let actual_version = inspect_downloaded_installer_version(path).await?;
+    if compare_versions(&actual_version, expected_version) != Ordering::Equal {
+        return Err(format!(
+            "installer version mismatch: expected {expected_version}, found {actual_version}"
+        ));
+    }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    log_codex_update(
+        "info",
+        "installer_version_verified_before_install",
+        format!("path={}; version={actual_version}", path.display()),
+    );
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn xml_tag_attribute(tag: &str, attribute: &str) -> Option<String> {
+    let mut offset = 0;
+    while let Some(found) = tag[offset..].find(attribute) {
+        let start = offset + found;
+        let previous_is_boundary = start == 0
+            || tag[..start]
+                .chars()
+                .next_back()
+                .is_some_and(char::is_whitespace);
+        let after_name = start + attribute.len();
+        if previous_is_boundary {
+            let assignment = tag[after_name..].trim_start();
+            if let Some(value) = assignment.strip_prefix('=') {
+                let value = value.trim_start();
+                let quote = value.chars().next()?;
+                if quote == '\'' || quote == '"' {
+                    let value = &value[quote.len_utf8()..];
+                    return Some(value.split(quote).next()?.to_string());
+                }
+            }
+        }
+        offset = after_name;
+        if offset >= tag.len() {
+            return None;
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn downloaded_installer_version(path: &Path) -> Result<String, String> {
+    let mut command = Command::new("hdiutil");
+    command.args(["attach", "-nobrowse", "-readonly"]).arg(path);
+    let output = run_macos_command_with_timeout(
+        &mut command,
+        MACOS_ATTACH_TIMEOUT,
+        "mount the downloaded ChatGPT package for version validation",
+    )?;
+    if !output.status.success() {
+        return Err(format!(
+            "mount the downloaded ChatGPT package for version validation: {}",
+            compact_command_output(&output.stderr)
+        ));
+    }
+    let mount_path = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split('\t').last())
+        .map(str::trim)
+        .find(|value| value.starts_with("/Volumes/"))
+        .map(PathBuf::from)
+        .or_else(|| mounted_volume_for_image(path))
+        .ok_or_else(|| "locate the mounted ChatGPT package for version validation".to_string())?;
+    let result = (|| {
+        let application = [mount_path.join("ChatGPT.app"), mount_path.join("Codex.app")]
+            .into_iter()
+            .find(|candidate| candidate.exists())
+            .ok_or_else(|| "the downloaded DMG does not contain ChatGPT.app".to_string())?;
+        let mut command = Command::new("/usr/libexec/PlistBuddy");
+        command
+            .args(["-c", "Print :CFBundleShortVersionString"])
+            .arg(application.join("Contents/Info.plist"));
+        let output = run_macos_command_with_timeout(
+            &mut command,
+            Duration::from_secs(10),
+            "read the ChatGPT version from the downloaded package",
+        )?;
+        if !output.status.success() {
+            return Err(format!(
+                "read the ChatGPT version from the downloaded package: {}",
+                compact_command_output(&output.stderr)
+            ));
+        }
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if version.is_empty() {
+            return Err("the downloaded ChatGPT package has no version".to_string());
+        }
+        Ok(version)
+    })();
+    let detach_result = detach_macos_volume(&mount_path);
+    match (result, detach_result) {
+        (Ok(version), Ok(_)) => Ok(version),
+        (Err(error), Ok(_)) => Err(error),
+        (Ok(_), Err(error)) => Err(format!(
+            "unmount the package after version validation: {error}"
+        )),
+        (Err(error), Err(detach_error)) => Err(format!(
+            "{error}; also failed to unmount the validation image: {detach_error}"
+        )),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn downloaded_installer_version(_path: &Path) -> Result<String, String> {
+    Err("installer version validation is only supported on macOS and Windows".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn discard_downloaded_installer(path: &Path) -> Result<(), String> {
+    discard_windows_installer(path)
+}
+
+#[cfg(target_os = "macos")]
+fn discard_downloaded_installer(path: &Path) -> Result<(), String> {
+    for target in [completed_download_marker(path), path.to_path_buf()] {
+        match fs::remove_file(&target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "remove mismatched installer {}: {error}",
+                    target.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn discard_downloaded_installer(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 fn resumable_download_path(version: Option<&str>, extension: &str) -> PathBuf {
     let normalized_version = version
         .unwrap_or("latest")
@@ -1236,6 +1539,51 @@ fn completed_installer_available() -> bool {
     newest_cached_installer(download_extension(&[])).is_some()
 }
 
+async fn cached_installer_version_matches(path: &Path, expected_version: &str) -> bool {
+    let path = path.to_path_buf();
+    let expected_version = expected_version.to_string();
+    match tauri::async_runtime::spawn_blocking(move || downloaded_installer_version(&path)).await {
+        Ok(Ok(actual_version))
+            if compare_versions(&actual_version, &expected_version) == Ordering::Equal =>
+        {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            log_codex_update(
+                "info",
+                "cached_installer_version_match",
+                format!("expectedVersion={expected_version}; actualVersion={actual_version}"),
+            );
+            true
+        }
+        Ok(Ok(actual_version)) => {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            log_codex_update(
+                "warning",
+                "cached_installer_version_mismatch",
+                format!("expectedVersion={expected_version}; actualVersion={actual_version}"),
+            );
+            false
+        }
+        Ok(Err(error)) => {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            log_codex_update(
+                "warning",
+                "cached_installer_version_read_failed",
+                format!("expectedVersion={expected_version}; error={error}"),
+            );
+            false
+        }
+        Err(error) => {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            log_codex_update(
+                "warning",
+                "cached_installer_version_check_failed",
+                format!("expectedVersion={expected_version}; error={error}"),
+            );
+            false
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 async fn cached_installer_size_matches(download_urls: &[String], path: &Path) -> bool {
     let Some(local_bytes) = fs::metadata(path).ok().map(|metadata| metadata.len()) else {
@@ -1246,7 +1594,7 @@ async fn cached_installer_size_matches(download_urls: &[String], path: &Path) ->
         );
         return false;
     };
-    let probes = rank_download_sources(download_urls).await;
+    let probes = rank_download_sources(download_urls, None).await;
     if let Some(probe) = probes
         .iter()
         .find(|probe| probe.total_bytes == Some(local_bytes))
@@ -1279,13 +1627,20 @@ async fn cached_installer_size_matches(download_urls: &[String], path: &Path) ->
     false
 }
 
-async fn rank_download_sources(download_urls: &[String]) -> Vec<DownloadProbe> {
+async fn rank_download_sources(
+    download_urls: &[String],
+    expected_version: Option<&str>,
+) -> Vec<DownloadProbe> {
     let cache = DOWNLOAD_SOURCE_CACHE
         .get_or_init(|| tokio::sync::Mutex::new(None))
         .lock()
         .await;
     let mut cache = cache;
-    let cache_key = download_urls.join("\n");
+    let cache_key = format!(
+        "{}\n{}",
+        expected_version.unwrap_or("unversioned"),
+        download_urls.join("\n")
+    );
     if let Some(cached) = cache.as_ref().filter(|cached| {
         cached.key == cache_key && cached.measured_at.elapsed() < DOWNLOAD_SOURCE_CACHE_TTL
     }) {
@@ -1328,7 +1683,14 @@ async fn rank_download_sources(download_urls: &[String]) -> Vec<DownloadProbe> {
     .filter_map(|result| async move { result })
     .collect::<Vec<_>>()
     .await;
-    responsive.sort_by_key(|probe| (probe.elapsed, probe.index));
+    responsive.sort_by_key(|probe| {
+        (
+            !expected_version
+                .is_some_and(|version| download_url_is_version_pinned(&probe.url, version)),
+            probe.elapsed,
+            probe.index,
+        )
+    });
 
     let mut ranked = responsive;
     for download_url in download_urls {
@@ -1336,11 +1698,19 @@ async fn rank_download_sources(download_urls: &[String]) -> Vec<DownloadProbe> {
             ranked.push(DownloadProbe {
                 index: ranked.len(),
                 url: download_url.clone(),
-                elapsed: Duration::ZERO,
+                elapsed: Duration::MAX,
                 total_bytes: None,
             });
         }
     }
+    ranked.sort_by_key(|probe| {
+        (
+            !expected_version
+                .is_some_and(|version| download_url_is_version_pinned(&probe.url, version)),
+            probe.elapsed,
+            probe.index,
+        )
+    });
     let ranked_urls = ranked
         .iter()
         .map(|probe| probe.url.clone())
@@ -1360,7 +1730,8 @@ async fn rank_download_sources(download_urls: &[String]) -> Vec<DownloadProbe> {
         "info",
         "download_source_ranking_completed",
         format!(
-            "sources={}",
+            "expectedVersion={}; sources={}",
+            expected_version.unwrap_or("unknown"),
             ranked
                 .iter()
                 .map(|probe| download_source_label(&probe.url))
@@ -1369,6 +1740,15 @@ async fn rank_download_sources(download_urls: &[String]) -> Vec<DownloadProbe> {
         ),
     );
     ranked
+}
+
+fn download_url_is_version_pinned(download_url: &str, expected_version: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(download_url) else {
+        return false;
+    };
+    let path = url.path();
+    path.split('/').any(|segment| segment == expected_version)
+        || path.contains(&format!("ChatGPT-{expected_version}-"))
 }
 
 async fn probe_download_source(index: usize, url: String) -> Result<DownloadProbe, String> {
@@ -1777,17 +2157,19 @@ Write-Output ($package.PackageFamilyName + '!' + $application.Id)"#
     )
 }
 
-async fn latest_release() -> Result<PlatformVersion, String> {
+async fn latest_release(force_refresh: bool) -> Result<PlatformVersion, String> {
     let cache = CODEX_RELEASE_CACHE
         .get_or_init(|| tokio::sync::Mutex::new(None))
         .lock()
         .await;
     let mut cache = cache;
-    if let Some(cached) = cache
-        .as_ref()
-        .filter(|cached| cached.fetched_at.elapsed() < CODEX_VERSION_CACHE_TTL)
-    {
-        return Ok(cached.release.clone());
+    if !force_refresh {
+        if let Some(cached) = cache
+            .as_ref()
+            .filter(|cached| cached.fetched_at.elapsed() < CODEX_VERSION_CACHE_TTL)
+        {
+            return Ok(cached.release.clone());
+        }
     }
 
     let client = desktop_http_client(Some(Duration::from_secs(10)))
@@ -2840,7 +3222,7 @@ async fn install_with_microsoft_store_fallback(
     force_update: bool,
     mirror_error: &str,
 ) -> Result<CodexInstallResult, String> {
-    let manual_download_urls = latest_release()
+    let manual_download_urls = latest_release(false)
         .await
         .ok()
         .and_then(|release| download_urls(Some(&release)).ok())

@@ -101,6 +101,8 @@ const dictionaries = {
     updatedReady: "ChatGPT and Codex were updated successfully.",
     installationFailed:
       "Codex installation could not be completed. Open the update log for details.",
+    retryingCodexUpdate:
+      "The update did not reach the requested version. Checking for the latest release and downloading a fresh installer…",
     openUpdateLog: "Open update log",
     updateLogShortcut: "Shortcut: Ctrl+Shift+L (Windows) or Cmd+Shift+L (macOS)",
     updateLogOpened: "Opened the Codex update log.",
@@ -717,6 +719,7 @@ const dictionaries = {
     installedReady: "ChatGPT 和 Codex 已安装，可以进入下一步。",
     updatedReady: "ChatGPT 和 Codex 已成功更新。",
     installationFailed: "Codex 安装未完成，请打开更新日志查看详情。",
+    retryingCodexUpdate: "更新版本不匹配，正在重新检查最新版本并下载全新的安装包…",
     openUpdateLog: "打开更新日志",
     updateLogShortcut: "快捷键：Windows 使用 Ctrl+Shift+L，macOS 使用 Cmd+Shift+L",
     updateLogOpened: "已打开 Codex 更新日志。",
